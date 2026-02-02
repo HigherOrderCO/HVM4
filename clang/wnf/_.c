@@ -29,6 +29,13 @@ __attribute__((cold, noinline)) static Term wnf_rebuild(Term cur, Term *stack, u
         cur = frame;
         break;
       }
+      case GT0:
+      case GT1: {
+        u32 loc = term_val(frame);
+        heap_set(loc, cur);
+        cur = frame;
+        break;
+      }
       case OP2: {
         u32 loc = term_val(frame);
         heap_set(loc + 0, cur);
@@ -129,6 +136,19 @@ __attribute__((hot)) fn Term wnf(Term term) {
         goto enter;
       }
 
+      case GT0:
+      case GT1: {
+        u32 loc = term_val(next);
+        Term cell = heap_take(loc);
+        if (term_sub_get(cell)) {
+          next = term_sub_set(cell, 0);
+          goto enter;
+        }
+        stack[s_pos++] = next;
+        next = cell;
+        goto enter;
+      }
+
       case APP: {
         u32  loc = term_val(next);
         Term fun = heap_read(loc);
@@ -138,6 +158,13 @@ __attribute__((hot)) fn Term wnf(Term term) {
       }
 
       case DUP: {
+        u32  loc  = term_val(next);
+        Term body = heap_read(loc + 1);
+        next = body;
+        goto enter;
+      }
+
+      case GET: {
         u32  loc  = term_val(next);
         Term body = heap_read(loc + 1);
         next = body;
@@ -195,6 +222,12 @@ __attribute__((hot)) fn Term wnf(Term term) {
                                term_tag(book) == BJ0 ? 0 : 1, term_tag(book));
             goto enter;
           }
+          case BG0:
+          case BG1: {
+            next = wnf_alo_cop(ls_loc, len, term_val(book), term_ext(book),
+                               term_tag(book) == BG0 ? 0 : 1, term_tag(book));
+            goto enter;
+          }
           case NAM: {
             next = wnf_alo_nam(term_ext(book));
             goto enter;
@@ -209,6 +242,7 @@ __attribute__((hot)) fn Term wnf(Term term) {
           }
           case APP:
           case SUP:
+          case TUP:
           case MAT:
           case SWI:
           case USE:
@@ -228,6 +262,10 @@ __attribute__((hot)) fn Term wnf(Term term) {
           }
           case DUP: {
             next = wnf_alo_dup(ls_loc, len, term_val(book), term_ext(book));
+            goto enter;
+          }
+          case GET: {
+            next = wnf_alo_get(ls_loc, len, term_val(book));
             goto enter;
           }
           case NUM: {
@@ -296,9 +334,12 @@ __attribute__((hot)) fn Term wnf(Term term) {
       case BJV:
       case BJ0:
       case BJ1:
+      case BG0:
+      case BG1:
       case DRY:
       case ERA:
       case SUP:
+      case TUP:
       case LAM:
       case NUM:
       case MAT:
@@ -347,7 +388,9 @@ __attribute__((hot)) fn Term wnf(Term term) {
             case NAM:
             case BJV:
             case BJ0:
-            case BJ1: {
+            case BJ1:
+            case BG0:
+            case BG1: {
               whnf = wnf_app_nam(whnf, arg);
               continue;
             }
@@ -389,6 +432,10 @@ __attribute__((hot)) fn Term wnf(Term term) {
             }
             case NUM: {
               fprintf(stderr, "RUNTIME_ERROR: cannot apply a number\n");
+              exit(1);
+            }
+            case TUP: {
+              fprintf(stderr, "RUNTIME_ERROR: cannot apply a tuple\n");
               exit(1);
             }
             case C00 ... C16: {
@@ -452,7 +499,9 @@ __attribute__((hot)) fn Term wnf(Term term) {
             case NAM:
             case BJV:
             case BJ0:
-            case BJ1: {
+            case BJ1:
+            case BG0:
+            case BG1: {
               whnf = wnf_app_red_nam(f, g, arg);
               continue;
             }
@@ -510,6 +559,8 @@ __attribute__((hot)) fn Term wnf(Term term) {
             case BJV:
             case BJ0:
             case BJ1:
+            case BG0:
+            case BG1:
             case DRY: {
               // (mat ^n) or (mat ^(f x)): stuck, produce DRY
               whnf = term_new_dry(mat, whnf);
@@ -643,6 +694,8 @@ __attribute__((hot)) fn Term wnf(Term term) {
             case BJV:
             case BJ0:
             case BJ1:
+            case BG0:
+            case BG1:
             case DRY: {
               // Stuck - drop g, return ^(f arg)
               whnf = term_new_dry(f, whnf);
@@ -668,7 +721,9 @@ __attribute__((hot)) fn Term wnf(Term term) {
             case NAM:
             case BJV:
             case BJ0:
-            case BJ1: {
+            case BJ1:
+            case BG0:
+            case BG1: {
               whnf = wnf_dup_nam(lab, loc, side, whnf);
               continue;
             }
@@ -683,6 +738,10 @@ __attribute__((hot)) fn Term wnf(Term term) {
             case LAM: {
               whnf = wnf_dup_lam(lab, loc, side, whnf);
               continue;
+            }
+            case TUP: {
+              next = wnf_dup_tup(lab, loc, side, whnf);
+              goto enter;
             }
             case SUP: {
               next = wnf_dup_sup(lab, loc, side, whnf);
@@ -713,6 +772,44 @@ __attribute__((hot)) fn Term wnf(Term term) {
               heap_subst_var(loc, term_new(0, side == 0 ? DP1 : DP0, lab, new_loc));
               whnf          = term_new(0, side == 0 ? DP0 : DP1, lab, new_loc);
               continue;
+            }
+          }
+        }
+
+        // -----------------------------------------------------------------------
+        // GT0/GT1 frame: GET node - we reduced the expr, dispatch get interaction
+        // -----------------------------------------------------------------------
+        case GT0:
+        case GT1: {
+          u8  side = (term_tag(frame) == GT0) ? 0 : 1;
+          u32 loc  = term_val(frame);
+
+          switch (term_tag(whnf)) {
+            case TUP: {
+              next = wnf_get_tup(loc, side, whnf);
+              goto enter;
+            }
+            case SUP: {
+              next = wnf_get_sup(loc, side, whnf);
+              goto enter;
+            }
+            case ERA: {
+              whnf = wnf_get_era(loc);
+              continue;
+            }
+            case INC: {
+              whnf = wnf_get_inc(loc, side, whnf);
+              continue;
+            }
+            case RED: {
+              u32 red_loc = term_val(whnf);
+              Term rhs = heap_read(red_loc + 1);
+              next = rhs;
+              goto enter;
+            }
+            default: {
+              fprintf(stderr, "RUNTIME_ERROR: cannot get from non-tuple\n");
+              exit(1);
             }
           }
         }
@@ -883,6 +980,11 @@ __attribute__((hot)) fn Term wnf(Term term) {
                 next = wnf_eql_ctr(a, whnf);
                 goto enter;
               }
+              // TUP === TUP
+              if (a_tag == TUP && b_tag == TUP) {
+                next = wnf_eql_tup(a, whnf);
+                goto enter;
+              }
               // MAT/SWI === MAT/SWI
               if ((a_tag == MAT || a_tag == SWI) && (b_tag == MAT || b_tag == SWI)) {
                 next = wnf_eql_mat(a, whnf);
@@ -894,8 +996,8 @@ __attribute__((hot)) fn Term wnf(Term term) {
                 goto enter;
               }
               // NAM/BJ* === NAM/BJ*
-              if ((a_tag == NAM || a_tag == BJV || a_tag == BJ0 || a_tag == BJ1) &&
-                  (b_tag == NAM || b_tag == BJV || b_tag == BJ0 || b_tag == BJ1)) {
+              if ((a_tag == NAM || a_tag == BJV || a_tag == BJ0 || a_tag == BJ1 || a_tag == BG0 || a_tag == BG1) &&
+                  (b_tag == NAM || b_tag == BJV || b_tag == BJ0 || b_tag == BJ1 || b_tag == BG0 || b_tag == BG1)) {
                 whnf = wnf_eql_nam(a, whnf);
                 continue;
               }
@@ -1061,9 +1163,12 @@ fn Term wnf_at(u32 loc) {
     case BJV:
     case BJ0:
     case BJ1:
+    case BG0:
+    case BG1:
     case DRY:
     case ERA:
     case SUP:
+    case TUP:
     case LAM:
     case NUM:
     case MAT:
@@ -1105,9 +1210,12 @@ __attribute__((cold, noinline)) fn Term wnf_steps_at(u32 loc) {
     case BJV:
     case BJ0:
     case BJ1:
+    case BG0:
+    case BG1:
     case DRY:
     case ERA:
     case SUP:
+    case TUP:
     case LAM:
     case NUM:
     case MAT:

@@ -47,7 +47,7 @@ static inline void eval_normalize_go(EvalNormalizeCtx *ctx, EvalNormalizeWorker 
     u32 tloc = term_val(term);
     // DP0/DP1 have term_arity == 0, handle separately
     u8  tag  = term_tag(term);
-    if (tag == DP0 || tag == DP1) {
+    if (tag == DP0 || tag == DP1 || tag == GT0 || tag == GT1) {
       loc = tloc;
       continue;
     }

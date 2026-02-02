@@ -163,7 +163,9 @@ fn Term cnf_at(Term term, u32 depth, u32 par_depth) {
     case NAM:
     case BJV:
     case BJ0:
-    case BJ1: {
+    case BJ1:
+    case BG0:
+    case BG1: {
       return term;
     }
 
@@ -222,6 +224,7 @@ fn Term cnf_at(Term term, u32 depth, u32 par_depth) {
     }
 
     case DUP:
+    case GET:
     case APP:
     case DRY:
     case MAT:
@@ -235,6 +238,7 @@ fn Term cnf_at(Term term, u32 depth, u32 par_depth) {
     case AND:
     case OR:
     case UNS:
+    case TUP:
     case C00 ... C16: {
       u32 ari = term_arity(term);
       u32 loc = (u32)term_val(term);

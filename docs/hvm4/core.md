@@ -18,6 +18,8 @@ Term ::=
   | Era  "&{}"                                       -- erasure
   | Sup  "&" Label "{" Term "," Term "}"             -- superposition
   | Dup  "!" Name "&" Label "=" Term ";" Term        -- duplication term
+  | Tup  "(" Term "," Term ")"                       -- tuple
+  | Get  "!" "(" Name "₀" "," Name "₁" ")" "=" Term ";" Term -- tuple getter
   | Ctr  "#" Name "{" Term,* "}"                     -- constructor
   | Mat  "λ" "{" "#" Name ":" Term ";" Term "}"      -- pattern match
   | Swi  "λ" "{" Num ":" Term ";" Term "}"           -- number switch

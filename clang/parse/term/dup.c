@@ -1,10 +1,85 @@
 fn Term parse_term(PState *s, u32 depth);
 
+fn u32 parse_tuple_binder(PState *s) {
+  u32 nam0 = parse_name(s);
+  parse_consume(s, "₀");
+  parse_consume(s, ",");
+  u32 nam1 = parse_name(s);
+  parse_consume(s, "₁");
+  if (nam0 != nam1) {
+    parse_error(s, "same tuple binder name on both sides", parse_peek(s));
+  }
+  return nam0;
+}
+
 fn Term parse_term_dup(PState *s, u32 depth) {
   parse_skip(s);
   // Check for !!x = val or !!&x = val (strict let, optionally cloned)
   int strict = parse_match(s, "!");
   parse_skip(s);
+
+  // Tuple getter: !(x₀,x₁) = val; body
+  if (parse_peek(s) == '(') {
+    parse_consume(s, "(");
+    u32 nam = parse_tuple_binder(s);
+    parse_consume(s, ")");
+    parse_consume(s, "=");
+    Term val = parse_term(s, depth);
+    parse_skip(s);
+    parse_match(s, ";");
+    parse_skip(s);
+    PBind* bind = parse_bind_push(nam, depth, PARSE_GET_LAB, 0, 0);
+    Term body = parse_term(s, depth + 1);
+    parse_bind_pop();
+    u32 uses0 = count_uses(body, depth + 1, BG0, 0);
+    u32 uses1 = count_uses(body, depth + 1, BG1, 0);
+    if (uses0 > 1) {
+      parse_error_affine(s, nam, 0, uses0);
+    }
+    if (uses1 > 1) {
+      parse_error_affine(s, nam, 1, uses1);
+    }
+    u64 loc = heap_alloc(2);
+    HEAP[loc + 0] = val;
+    HEAP[loc + 1] = body;
+    return term_new(0, GET, 0, loc);
+  }
+
+  // Dup sugar: ! &L{x₀,x₁} = val; body  =>  ! x&L = val; body
+  if (parse_peek(s) == '&') {
+    PState save = *s;
+    parse_advance(s);
+    parse_skip(s);
+    u32 lab = parse_name(s);
+    parse_skip(s);
+    if (parse_peek(s) == '{') {
+      parse_consume(s, "{");
+      u32 nam = parse_tuple_binder(s);
+      parse_consume(s, "}");
+      parse_consume(s, "=");
+      Term val = parse_term(s, depth);
+      parse_skip(s);
+      parse_match(s, ";");
+      parse_skip(s);
+      PBind* bind = parse_bind_push(nam, depth, lab, 0, 0);
+      Term body = parse_term(s, depth + 1);
+      parse_bind_pop();
+      u32 uses0 = count_uses(body, depth + 1, BJ0, lab);
+      u32 uses1 = count_uses(body, depth + 1, BJ1, lab);
+      if (uses0 > 1) {
+        parse_error_affine(s, nam, 0, uses0);
+      }
+      if (uses1 > 1) {
+        parse_error_affine(s, nam, 1, uses1);
+      }
+      u64 loc = heap_alloc(2);
+      HEAP[loc + 0] = val;
+      HEAP[loc + 1] = body;
+      return term_new(0, DUP, lab, loc);
+    }
+    *s = save;
+  }
+
   // Check for cloned: '&' BEFORE name
   u32 cloned = 0;
   if (parse_peek(s) == '&') {

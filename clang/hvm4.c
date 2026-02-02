@@ -91,6 +91,12 @@ typedef struct {
 #define BJ0 44  // Bj0(n): quoted dup-bound variable (side 0, de Bruijn level)
 #define BJ1 45  // Bj1(n): quoted dup-bound variable (side 1, de Bruijn level)
 #define PRI 46  // Pri(p): primitive (native) function
+#define TUP 47  // Tup(a,b): native tuple
+#define GET 48  // Get(val, bod): tuple getter binder
+#define GT0 49  // Gt0(n): linked get-bound variable (side 0)
+#define GT1 50  // Gt1(n): linked get-bound variable (side 1)
+#define BG0 51  // Bg0(n): quoted get-bound variable (side 0, de Bruijn level)
+#define BG1 52  // Bg1(n): quoted get-bound variable (side 1, de Bruijn level)
 
 // LAM Ext Flags
 // =============
@@ -268,6 +274,7 @@ static u32    PARSE_SEEN_FILES_LEN = 0;
 static PBind  PARSE_BINDS[16384];
 static u32    PARSE_BINDS_LEN = 0;
 static u32    PARSE_FRESH_LAB = 0x800000; // start at 2^23 to avoid collision with user labels
+static const u32 PARSE_GET_LAB = 0xFFFFFE; // sentinel lab for GET binders
 static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 = right branch (DP1)
 
 // Term
@@ -302,10 +309,14 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "term/new/any.c"
 #include "term/new/dp0.c"
 #include "term/new/dp1.c"
+#include "term/new/gt0.c"
+#include "term/new/gt1.c"
 #include "term/new/lam.c"
 #include "term/new/app.c"
 #include "term/new/sup.c"
 #include "term/new/dup.c"
+#include "term/new/get.c"
+#include "term/new/tup.c"
 #include "term/new/mat.c"
 #include "term/new/swi.c"
 #include "term/new/use.c"
@@ -435,6 +446,7 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "wnf/dup_red.c"
 #include "wnf/dup_lam.c"
 #include "wnf/dup_sup.c"
+#include "wnf/dup_tup.c"
 #include "wnf/dup_nod.c"
 #include "wnf/alo_var.c"
 #include "wnf/alo_cop.c"
@@ -442,6 +454,7 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "wnf/alo_dry.c"
 #include "wnf/alo_lam.c"
 #include "wnf/alo_dup.c"
+#include "wnf/alo_get.c"
 #include "wnf/alo_nod.c"
 #include "wnf/op2_era.c"
 #include "wnf/op2_sup.c"
@@ -461,6 +474,10 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "wnf/use_sup.c"
 #include "wnf/use_val.c"
 #include "wnf/use_inc.c"
+#include "wnf/get_era.c"
+#include "wnf/get_sup.c"
+#include "wnf/get_tup.c"
+#include "wnf/get_inc.c"
 #include "wnf/app_red_era.c"
 #include "wnf/app_red_sup.c"
 #include "wnf/app_red_inc.c"
@@ -484,6 +501,7 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "wnf/eql_num.c"
 #include "wnf/eql_lam.c"
 #include "wnf/eql_ctr.c"
+#include "wnf/eql_tup.c"
 #include "wnf/eql_mat.c"
 #include "wnf/eql_use.c"
 #include "wnf/eql_nam.c"

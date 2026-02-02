@@ -22,11 +22,15 @@ application             | APP    | 0                | node: [func, arg]         
 linked variable         | VAR    | 0                | lam body or subst            | dynamic only; follows SUB cells
 linked duplicate 0      | DP0    | label            | dup expr or subst            | dynamic only; twin of DP1
 linked duplicate 1      | DP1    | label            | dup expr or subst            | dynamic only; twin of DP0
+linked get variable 0   | GT0    | 0                | get expr or subst            | dynamic only; twin of GT1
+linked get variable 1   | GT1    | 0                | get expr or subst            | dynamic only; twin of GT0
 linked lambda           | LAM    | level+flags      | node: [body]                 | dynamic only; binder for VAR
 quoted lam              | LAM    | level+flags      | node: [body]                 | quoted; level stored in EXT
 superposition           | SUP    | label            | node: [tm0, tm1]             | dynamic or static
 linked duplication term | DUP    | label            | node: [expr, body]           | dynamic or static; binder for DP0/DP1
 quoted duplication term | DUP    | label            | node: [expr, body]           | expr typically `&L{BJ0,BJ1}` in quoted mode
+tuple                   | TUP    | 0                | node: [tm0, tm1]             | dynamic or static
+tuple getter            | GET    | 0                | node: [expr, body]           | dynamic or static; binder for GT0/GT1
 number literal          | NUM    | 0                | unboxed u32                  | 
 constructor arity 0     | C00    | ctor name        | 0                            | tag encodes arity
 constructor arity N     | C01-16 | ctor name        | node: [field0..fieldN-1]     | N = tag - C00
@@ -49,6 +53,8 @@ wildcard                | ANY    | 0                | 0                         
 quoted lam var          | BJV    | 0                | de Bruijn level              | quoted lam-bound var
 quoted dup var 0        | BJ0    | label            | de Bruijn level              | quoted dup-bound var
 quoted dup var 1        | BJ1    | label            | de Bruijn level              | quoted dup-bound var
+quoted get var 0        | BG0    | 0                | de Bruijn level              | quoted get-bound var
+quoted get var 1        | BG1    | 0                | de Bruijn level              | quoted get-bound var
 dynamic superposition   | DSU    | 0                | node: [lab, tm0, tm1]        | label computed dynamically
 dynamic duplication     | DDU    | 0                | node: [lab, val, body]       | label computed dynamically
 

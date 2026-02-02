@@ -33,3 +33,14 @@ fn void term_clone_many(u32 lab, Term *src, u32 n, Term *dst0, Term *dst1) {
     dst1[i] = c.k1;
   }
 }
+
+// GET clones (no labels): creates GT0/GT1 that share a node.
+fn Copy term_clone_get_at(u32 loc) {
+  return (Copy){ term_new_gt0(loc), term_new_gt1(loc) };
+}
+
+fn Copy term_clone_get(Term val) {
+  u64 loc = heap_alloc(1);
+  heap_set(loc, val);
+  return term_clone_get_at(loc);
+}

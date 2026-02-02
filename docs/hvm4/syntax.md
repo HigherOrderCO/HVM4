@@ -89,6 +89,13 @@ Lists use built-in `#Nil` and `#Con`:
   - Commas are optional; trailing comma allowed.
 - `a <> b` desugars to `#Con{a, b}` (cons sugar).
 
+### Tuples
+
+Tuples are native pairs:
+
+- `(a,b)` desugars to core `Tup`.
+- The comma is required; `(a)` is just grouping.
+
 ## Lambdas and binders
 
 ### Lambda
@@ -130,6 +137,15 @@ All of these combine with cloning: `λ&x&L. ...`.
 - `!x& = v; body` uses a fresh label.
 - Optional `;` after `v` is allowed.
 - Cloned dup binder: `!&x&L = v; body` (or `!&x& = ...`).
+
+### Tuple getter (`!`)
+
+- `!(x₀,x₁) = v; body` is core `Get`.
+  - Subscripts are mandatory and both names must match.
+
+### Tuple-style dup sugar
+
+- `! &L{x₀,x₁} = v; body` desugars to `! x&L = v; body`.
 
 ### Duplication (dynamic label)
 

@@ -24,19 +24,28 @@ typedef struct {
   u32 lab;
 } DupBind;
 
+typedef struct {
+  u32 loc;
+  u32 name;
+} GetBind;
+
 // PrintState keeps naming tables and ALO printing mode.
 // - quoted/subst/subst_len: current printing mode, bind list head, and length.
 // Fixed-size tables: keep naming simple and bounded.
 #define PRINT_NAME_MAX 65536
 static LamBind PRINT_LAMS[PRINT_NAME_MAX];
 static DupBind PRINT_DUPS[PRINT_NAME_MAX];
+static GetBind PRINT_GETS[PRINT_NAME_MAX];
 
 typedef struct {
   u32 lam_len;
   u32 dup_len;
   u32 dup_print;
+  u32 get_len;
+  u32 get_print;
   u32 next_lam;
   u32 next_dup;
+  u32 next_get;
   u8  quoted;
   u32 subst;
   u32 subst_len;
@@ -92,11 +101,17 @@ fn void print_dup_name(FILE *f, u32 name) {
   print_alpha_name(f, name, 'A');
 }
 
+// Emits a get name (lowercase alpha).
+fn void print_get_name(FILE *f, u32 name) {
+  print_alpha_name(f, name, 'a');
+}
+
 // Initializes the printer state and name counters.
 fn void print_state_init(PrintState *st) {
   memset(st, 0, sizeof(*st));
   st->next_lam    = 1;
   st->next_dup    = 1;
+  st->next_get    = 1;
 }
 
 // No-op for fixed tables; kept for symmetry with print_state_init.
@@ -135,6 +150,23 @@ fn u32 print_state_dup(PrintState *st, u32 loc, u32 lab) {
   u32 name = st->next_dup++;
   PRINT_DUPS[st->dup_len] = (DupBind){.loc = loc, .name = name, .lab = lab};
   st->dup_len++;
+  return name;
+}
+
+// Returns the global name for a GET node keyed by its expr location.
+fn u32 print_state_get(PrintState *st, u32 loc) {
+  for (u32 i = 0; i < st->get_len; i++) {
+    if (PRINT_GETS[i].loc == loc) {
+      return PRINT_GETS[i].name;
+    }
+  }
+  if (st->get_len >= PRINT_NAME_MAX) {
+    fprintf(stderr, "print_state: too many gets\n");
+    exit(1);
+  }
+  u32 name = st->next_get++;
+  PRINT_GETS[st->get_len] = (GetBind){.loc = loc, .name = name};
+  st->get_len++;
   return name;
 }
 
@@ -399,6 +431,37 @@ fn void print_term_go(FILE *f, Term term, u32 depth, PrintState *st) {
       }
       break;
     }
+    case BG0:
+    case BG1: {
+      // Quoted BG_: val is de Bruijn level; try ALO substitution.
+      u32 lvl  = term_val(term);
+      u32 bind = 0;
+      if (quoted && lvl > 0 && lvl <= st->subst_len) {
+        bind = alo_subst_get(subst, st->subst_len - lvl);
+      }
+      if (bind != 0) {
+        Term val = HEAP[bind];
+        if (term_sub_get(val)) {
+          val = term_sub_set(val, 0);
+          print_term_mode(f, val, depth, 0, 0, 0, st);
+        } else {
+          u8  tag = term_tag(term) == BG0 ? GT0 : GT1;
+          print_term_mode(f, term_new(0, tag, 0, bind), depth, 0, 0, 0, st);
+        }
+      } else {
+        u32 nam = (lvl > st->subst_len) ? (lvl - st->subst_len) : 0;
+        if (nam > depth) {
+          nam = 0;
+        }
+        if (nam == 0) {
+          fputc('_', f);
+        } else {
+          print_alpha_name(f, nam, 'a');
+        }
+        fputs(term_tag(term) == BG0 ? "₀" : "₁", f);
+      }
+      break;
+    }
     case VAR: {
       // Runtime VAR: val is binding lam body location.
       u32 loc = term_val(term);
@@ -420,6 +483,19 @@ fn void print_term_go(FILE *f, Term term, u32 depth, PrintState *st) {
         u32 nam = print_state_dup(st, loc, term_ext(term));
         print_dup_name(f, nam);
         fputs(term_tag(term) == DP0 ? "₀" : "₁", f);
+      }
+      break;
+    }
+    case GT0:
+    case GT1: {
+      // Runtime GT_: val is a GET node expr location.
+      u32 loc = term_val(term);
+      if (loc != 0 && term_sub_get(HEAP[loc])) {
+        print_term_mode(f, term_sub_set(HEAP[loc], 0), depth, 0, 0, 0, st);
+      } else {
+        u32 nam = print_state_get(st, loc);
+        print_get_name(f, nam);
+        fputs(term_tag(term) == GT0 ? "₀" : "₁", f);
       }
       break;
     }
@@ -454,6 +530,15 @@ fn void print_term_go(FILE *f, Term term, u32 depth, PrintState *st) {
       fputc('}', f);
       break;
     }
+    case TUP: {
+      u32 loc = term_val(term);
+      fputc('(', f);
+      print_term_at(f, HEAP[loc + 0], depth, st);
+      fputc(',', f);
+      print_term_at(f, HEAP[loc + 1], depth, st);
+      fputc(')', f);
+      break;
+    }
     case DUP: {
       // DUP term is a syntactic binder; dynamic mode queues its DUP node and prints the body.
       u32 loc = term_val(term);
@@ -468,6 +553,24 @@ fn void print_term_go(FILE *f, Term term, u32 depth, PrintState *st) {
         print_term_at(f, HEAP[loc + 1], depth + 1, st);
       } else {
         print_state_dup(st, loc, term_ext(term));
+        print_term_at(f, HEAP[loc + 1], depth, st);
+      }
+      break;
+    }
+    case GET: {
+      // GET term is a syntactic binder; dynamic mode queues its GET node and prints the body.
+      u32 loc = term_val(term);
+      if (quoted) {
+        fputs("!(", f);
+        print_alpha_name(f, depth + 1, 'a');
+        fputs("₀,", f);
+        print_alpha_name(f, depth + 1, 'a');
+        fputs("₁)=", f);
+        print_term_at(f, HEAP[loc + 0], depth, st);
+        fputc(';', f);
+        print_term_at(f, HEAP[loc + 1], depth + 1, st);
+      } else {
+        print_state_get(st, loc);
         print_term_at(f, HEAP[loc + 1], depth, st);
       }
       break;
@@ -630,7 +733,7 @@ fn void print_term_go(FILE *f, Term term, u32 depth, PrintState *st) {
 
 // Prints all discovered dup definitions after the main term.
 fn void print_term_finish(FILE *f, PrintState *st) {
-  int need_sep = (st->dup_print == 0);
+  int need_sep = (st->dup_print == 0 && st->get_print == 0);
   while (st->dup_print < st->dup_len) {
     if (need_sep) {
       fputc(';', f);
@@ -645,6 +748,26 @@ fn void print_term_finish(FILE *f, PrintState *st) {
     fputc('&', f);
     print_name(f, lab);
     fputc('=', f);
+    Term val = HEAP[loc];
+    if (term_sub_get(val)) {
+      val = term_sub_set(val, 0);
+    }
+    print_term_at(f, val, 0, st);
+    fputc(';', f);
+  }
+  while (st->get_print < st->get_len) {
+    if (need_sep) {
+      fputc(';', f);
+      need_sep = 0;
+    }
+    u32 idx = st->get_print++;
+    u32 loc = PRINT_GETS[idx].loc;
+    u32 nam = PRINT_GETS[idx].name;
+    fputs("!(", f);
+    print_get_name(f, nam);
+    fputs("₀,", f);
+    print_get_name(f, nam);
+    fputs("₁)=", f);
     Term val = HEAP[loc];
     if (term_sub_get(val)) {
       val = term_sub_set(val, 0);

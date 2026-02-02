@@ -48,6 +48,12 @@ static const u8 TERM_ARITY[TAG_MASK + 1] = {
   [BJ0] = 0,
   [BJ1] = 0,
   [PRI] = 0,
+  [TUP] = 2,
+  [GET] = 2,
+  [GT0] = 0,
+  [GT1] = 0,
+  [BG0] = 0,
+  [BG1] = 0,
 };
 
 fn u32 term_arity(Term t) {
