@@ -1,0 +1,2 @@
+@main = 1
+//EXPECT_PREFIX:ERROR: missing hvm4_ffi_init in '

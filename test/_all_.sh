@@ -62,6 +62,8 @@ run_tests() {
     nlines_total=0
     nocollapse=0
     extra_flags=()
+    expect_prefix=""
+    expect_contains=""
     while IFS= read -r line; do
       if [[ "$line" == //* ]]; then
         ((nlines_total++))
@@ -69,6 +71,14 @@ run_tests() {
           flag_line="${line#//FLAGS:}"
           read -r -a more_flags <<< "$flag_line"
           extra_flags+=("${more_flags[@]}")
+          continue
+        fi
+        if [[ "$line" == "//EXPECT_PREFIX:"* ]]; then
+          expect_prefix="${line#//EXPECT_PREFIX:}"
+          continue
+        fi
+        if [[ "$line" == "//EXPECT_CONTAINS:"* ]]; then
+          expect_contains="${line#//EXPECT_CONTAINS:}"
           continue
         fi
         if [[ "$line" == '//!'* ]]; then
@@ -91,7 +101,7 @@ run_tests() {
       collapse_count="$nlines_expected"
     fi
 
-    if [ $nlines_expected -eq 0 ]; then
+    if [ $nlines_expected -eq 0 ] && [ -z "$expect_prefix" ] && [ -z "$expect_contains" ]; then
       echo "[FAIL] $name (missing expected result comment)" >&2
       status=1
       continue
@@ -176,7 +186,25 @@ run_tests() {
     expected_clean="$(echo "$expected" | sed 's/\x1b\[[0-9;]*m//g')"
 
     # For PARSE_ERROR tests, just check if output starts with PARSE_ERROR
-    if [ "$expected_clean" = "PARSE_ERROR" ]; then
+    if [ -n "$expect_prefix" ]; then
+      if [[ "$actual_clean" == "$expect_prefix"* ]]; then
+        echo "[PASS] $name"
+      else
+        echo "[FAIL] $name"
+        echo "  expected prefix: $expect_prefix"
+        echo "  detected: $actual_clean"
+        status=1
+      fi
+    elif [ -n "$expect_contains" ]; then
+      if [[ "$actual_clean" == *"$expect_contains"* ]]; then
+        echo "[PASS] $name"
+      else
+        echo "[FAIL] $name"
+        echo "  expected to contain: $expect_contains"
+        echo "  detected: $actual_clean"
+        status=1
+      fi
+    elif [ "$expected_clean" = "PARSE_ERROR" ]; then
       if [[ "$actual_clean" == PARSE_ERROR* ]]; then
         echo "[PASS] $name"
       else

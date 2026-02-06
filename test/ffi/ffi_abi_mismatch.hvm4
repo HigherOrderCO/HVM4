@@ -1,0 +1,2 @@
+@main = 1
+//RUNTIME_ERROR: FFI ABI mismatch
