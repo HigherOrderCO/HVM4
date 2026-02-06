@@ -11,6 +11,7 @@
 #import <Metal/Metal.h>
 #include <stdio.h>
 #include <string.h>
+#include <mach/mach_time.h>
 #include "host.h"
 
 // --- Kernel parameter struct (must match hvm4.metal Params) ---
@@ -178,6 +179,10 @@ uint64_t metal_normalize(uint32_t root_loc) {
     }
 
     uint32_t pass = 0;
+    uint32_t prev_itrs = 0;
+
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
 
     NSUInteger tg_size = [g_pipeline maxTotalThreadsPerThreadgroup];
     if (tg_size > 256) tg_size = 256;
@@ -216,14 +221,21 @@ uint64_t metal_normalize(uint32_t root_loc) {
       [enc setBuffer:g_itr_count   offset:0 atIndex:6];
       [enc setBuffer:g_alloc_buf   offset:0 atIndex:7];
 
-      MTLSize grid = MTLSizeMake(frontier_count, 1, 1);
+      // Thread coarsening: cap dispatch at optimal thread count.
+      // Each thread processes ceil(frontier_count / dispatch_count) entries.
+      uint32_t dispatch_count = frontier_count < METAL_MAX_DISPATCH
+                                ? frontier_count : METAL_MAX_DISPATCH;
+      MTLSize grid = MTLSizeMake(dispatch_count, 1, 1);
       MTLSize tg   = MTLSizeMake(
-        frontier_count < tg_size ? frontier_count : tg_size, 1, 1);
+        dispatch_count < tg_size ? dispatch_count : tg_size, 1, 1);
 
       [enc dispatchThreads:grid threadsPerThreadgroup:tg];
       [enc endEncoding];
+
+      uint64_t pt0 = mach_absolute_time();
       [cmd commit];
       [cmd waitUntilCompleted];
+      uint64_t pt1 = mach_absolute_time();
 
       if ([cmd error]) {
         fprintf(stderr, "metal_normalize: GPU error pass %u: %s\n",
@@ -232,8 +244,15 @@ uint64_t metal_normalize(uint32_t root_loc) {
         break;
       }
 
-      // --- Read back next_count ---
+      // --- Read back next_count and per-pass interactions ---
       uint32_t next = *nc;
+      uint32_t cur_total_itrs = itr_ptr[0];
+      uint32_t pass_itrs = cur_total_itrs - prev_itrs;
+      prev_itrs = cur_total_itrs;
+
+      double pass_ns = (double)(pt1 - pt0) * tb.numer / tb.denom;
+      fprintf(stderr, "  pass %u: frontier=%u, itrs=%u, time=%.2fms\n",
+              pass, frontier_count, pass_itrs, pass_ns / 1e6);
 
       // --- Swap frontiers ---
       id<MTLBuffer> tmp = cur_frontier;

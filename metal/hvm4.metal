@@ -35,12 +35,13 @@ constant ulong SUB_BIT = 1UL << 63;
 // --- Flags ---
 constant uint LAM_ERA_MASK = 0x800000;
 
-// --- Breadcrumb tag for pointer-reversal WNF (APP frames stored in heap) ---
-constant uchar TAG_BC_APP = 7;
+// --- Breadcrumb tags for pointer-reversal WNF (frames stored in heap) ---
+constant uchar TAG_BC_APP = 7;    // APP breadcrumb (fun slot)
+constant uchar TAG_BC_DP0 = 8;    // DP0 breadcrumb (shared expr slot)
+constant uchar TAG_BC_DP1 = 9;    // DP1 breadcrumb (shared expr slot)
 constant uint  BC_SENTINEL = 0xFFFFFFFF;
 
 // --- Limits ---
-constant uint DP_STACK_CAP  = 64;         // DP frames only (much fewer than APPs)
 constant uint WNF_MAX_ITERS = ~0u; // max uint32 (~4.3G iters per WNF call)
 
 // --- Kernel parameters (set by host each pass) ---
@@ -319,12 +320,8 @@ inline Term wnf_dup_nod(device ulong* heap, uint loc, uint side, Term term) {
 
 Term wnf(device ulong* heap, device atomic_uint* locks,
          Term term, thread Alloc& alloc, thread uint& itrs, thread uint& bailouts) {
-  // DP-only stack (small)
-  Term  dp_terms[DP_STACK_CAP];
-  uint  dp_prevs[DP_STACK_CAP];
-  uint  dp_pos = 0;
-
-  // APP breadcrumb chain head (linked list through heap)
+  // Unified breadcrumb chain: both APP and DP frames stored in heap.
+  // Zero thread-local stack → maximum GPU occupancy.
   uint  prev = BC_SENTINEL;
 
   Term  cur  = term;
@@ -369,15 +366,11 @@ Term wnf(device ulong* heap, device atomic_uint* locks,
           continue;
         }
 
-        if (dp_pos >= DP_STACK_CAP) {
-          heap_set(heap, loc, taken); // restore
-          bailouts++;
-          break; // bail out: unwind everything after the loop
-        }
-
-        dp_terms[dp_pos] = cur;
-        dp_prevs[dp_pos] = prev;
-        dp_pos++;
+        // Write DP breadcrumb into the shared expression slot.
+        // Encodes: side (via tag), label (ext), previous breadcrumb (val).
+        uchar bc_tag = (tag == TAG_DP0) ? TAG_BC_DP0 : TAG_BC_DP1;
+        heap_set(heap, loc, term_new(0, bc_tag, term_ext(cur), prev));
+        prev = loc;
         cur = taken;
         continue;
       }
@@ -385,7 +378,7 @@ Term wnf(device ulong* heap, device atomic_uint* locks,
       if (tag == TAG_APP) {
         uint app_loc = term_val(cur);
         Term fun = heap_read(heap, app_loc);
-        // Write breadcrumb into function slot (pointer reversal)
+        // Write APP breadcrumb into function slot (pointer reversal)
         heap_set(heap, app_loc, term_new(0, TAG_BC_APP, 0, prev));
         prev = app_loc;
         cur = fun;
@@ -404,18 +397,22 @@ Term wnf(device ulong* heap, device atomic_uint* locks,
     }
 
     // ==== APPLY PHASE ====
-    // Decide next frame: DP stack or APP breadcrumb, whichever was entered last.
-    // DP frames record saved_prev; if it matches current prev, DP is more recent.
+    // Single unified breadcrumb chain: read tag to determine frame type.
+    if (prev == BC_SENTINEL) {
+      return cur;
+    }
 
-    if (dp_pos > 0 && dp_prevs[dp_pos - 1] == prev) {
-      // --- DP frame is next ---
-      dp_pos--;
-      Term dp_term = dp_terms[dp_pos];
-      uchar dp_tag = term_tag(dp_term);
-      uint side = (dp_tag == TAG_DP0) ? 0 : 1;
-      uint loc  = term_val(dp_term);
-      uint lab  = term_ext(dp_term);
+    Term bc     = heap_read(heap, prev);
+    uchar bc_tag = term_tag(bc);
+    uint parent = term_val(bc);
+
+    if (bc_tag == TAG_BC_DP0 || bc_tag == TAG_BC_DP1) {
+      // --- DP breadcrumb ---
+      uint side = (bc_tag == TAG_BC_DP0) ? 0 : 1;
+      uint loc  = prev;
+      uint lab  = term_ext(bc);
       uchar w_tag = term_tag(cur);
+      prev = parent;
 
       if (w_tag == TAG_LAM) {
         itrs++;
@@ -433,7 +430,7 @@ Term wnf(device ulong* heap, device atomic_uint* locks,
         cur = wnf_dup_nod(heap, loc, side, cur);
         continue;
       }
-      // Stuck DP
+      // Stuck DP: relocate and substitute
       uint new_loc = heap_alloc(alloc, 1);
       heap_set(heap, new_loc, cur);
       heap_subst_var(heap, loc,
@@ -442,68 +439,60 @@ Term wnf(device ulong* heap, device atomic_uint* locks,
       continue;
     }
 
-    if (prev != BC_SENTINEL) {
-      // --- APP breadcrumb is next ---
-      Term bc      = heap_read(heap, prev);
-      uint parent  = term_val(bc);
+    if (bc_tag == TAG_BC_APP) {
+      // --- APP breadcrumb ---
       uint app_loc = prev;
       Term arg     = heap_read(heap, app_loc + 1);
       uchar w_tag  = term_tag(cur);
+      prev = parent;
 
       if (w_tag == TAG_LAM) {
         itrs++;
         cur = wnf_app_lam(heap, cur, arg);
-        prev = parent;
         entering = true;
         continue;
       }
       if (w_tag == TAG_SUP) {
         itrs++;
-        // wnf_app_sup reads arg from heap[app_loc+1] and writes output
-        // to heap[app_loc]. Breadcrumb at heap[app_loc] gets overwritten.
         Term app_term = term_new(0, TAG_APP, 0, app_loc);
         cur = wnf_app_sup(heap, alloc, app_term, cur);
-        prev = parent;
         continue;
       }
       if (w_tag == TAG_ERA) {
         itrs++;
         cur = wnf_app_era();
-        prev = parent;
         continue;
       }
       // Stuck APP: restore function slot and rebuild
       heap_set(heap, app_loc, cur);
       cur = term_new(0, TAG_APP, 0, app_loc);
-      prev = parent;
       continue;
     }
 
-    // No frames left -- done
+    // Unknown breadcrumb (shouldn't happen)
     return cur;
   }
 
-  // Hit iteration limit or DP stack overflow -- unwind all remaining frames
+  // Hit iteration limit -- unwind all remaining breadcrumbs
   bailouts++;
-  if (entering) {
-    // cur is the term we were about to enter; use it as-is
-  }
-  while (prev != BC_SENTINEL || dp_pos > 0) {
-    if (dp_pos > 0 && dp_prevs[dp_pos - 1] == prev) {
-      dp_pos--;
-      Term dp_term = dp_terms[dp_pos];
-      uint loc = term_val(dp_term);
-      heap_set(heap, loc, cur); // restore taken value
-      cur = dp_term;
-    } else if (prev != BC_SENTINEL) {
-      Term bc = heap_read(heap, prev);
-      uint parent = term_val(bc);
-      Term arg = heap_read(heap, prev + 1);
-      cur = term_new_app_at(heap, prev, cur, arg); // restore APP
-      prev = parent;
+  while (prev != BC_SENTINEL) {
+    Term bc = heap_read(heap, prev);
+    uchar bc_tag = term_tag(bc);
+    uint parent = term_val(bc);
+
+    if (bc_tag == TAG_BC_DP0 || bc_tag == TAG_BC_DP1) {
+      // Restore the partial value into the DP slot, return the DP term
+      uint loc = prev;
+      uint lab = term_ext(bc);
+      uchar dp_tag = (bc_tag == TAG_BC_DP0) ? TAG_DP0 : TAG_DP1;
+      heap_set(heap, loc, cur);
+      cur = term_new(0, dp_tag, lab, loc);
     } else {
-      break;
+      // APP breadcrumb: restore APP node
+      Term arg = heap_read(heap, prev + 1);
+      cur = term_new_app_at(heap, prev, cur, arg);
     }
+    prev = parent;
   }
   return cur;
 }
@@ -546,62 +535,70 @@ kernel void normalize_pass(
   device atomic_uint*   locks          [[buffer(5)]],
   device atomic_uint*   itr_count      [[buffer(6)]],
   device atomic_uint*   alloc_cursor   [[buffer(7)]],
-  uint                  tid            [[thread_position_in_grid]])
+  uint                  tid            [[thread_position_in_grid]],
+  uint                  grid_size      [[threads_per_grid]])
 {
-  if (tid >= params.frontier_count) return;
+  uint frontier_count = params.frontier_count;
 
   uint local_itrs = 0;
   uint local_bailouts = 0;
 
-  // --- Per-thread slab allocator ---
+  // --- Per-thread slab allocator (persists across coarsened iterations) ---
   Alloc alloc = { 0, 0, alloc_cursor };
 
-  // --- WNF at frontier location ---
-  uint loc    = frontier[tid];
-  Term result = wnf_at(heap, locks, loc, alloc, local_itrs, local_bailouts);
+  // --- Thread coarsening: each thread processes multiple frontier entries ---
+  // The host caps grid_size at the GPU's optimal thread count (~2048).
+  // Threads stride over the frontier so all entries are covered.
+  for (uint fi = tid; fi < frontier_count; fi += grid_size) {
 
-  // --- If result is a DP, retry (another thread may have resolved it) ---
-  uchar tag = term_tag(result);
-  if (tag == TAG_DP0 || tag == TAG_DP1) {
-    // Retry: the winning thread may have written SUB by now
-    Term retry = wnf(heap, locks, result, alloc, local_itrs, local_bailouts);
-    if (retry != result) {
-      result = retry;
-      heap_set(heap, loc, result);
-      tag = term_tag(result);
+    // --- WNF at frontier location ---
+    uint loc    = frontier[fi];
+    uint prev_bailouts = local_bailouts;
+    Term result = wnf_at(heap, locks, loc, alloc, local_itrs, local_bailouts);
+
+    // --- If result is a DP, retry (another thread may have resolved it) ---
+    uchar tag = term_tag(result);
+    if (tag == TAG_DP0 || tag == TAG_DP1) {
+      Term retry = wnf(heap, locks, result, alloc, local_itrs, local_bailouts);
+      if (retry != result) {
+        result = retry;
+        heap_set(heap, loc, result);
+        tag = term_tag(result);
+      }
     }
-  }
 
-  // --- Compute how many frontier slots this thread needs ---
-  uint val   = term_val(result);
-  uint need  = 0;
-  uint slots[2];  // at most 2 entries to enqueue
+    // --- Compute frontier entries to enqueue ---
+    uint val   = term_val(result);
+    uint need  = 0;
+    uint slots[2];
+    bool bailed = (local_bailouts > prev_bailouts);
 
-  if (local_bailouts > 0 && tag != TAG_LAM && tag != TAG_SUP &&
-      tag != TAG_ERA && tag != TAG_NUM) {
-    slots[0] = loc;
-    need = 1;
-  } else if (tag == TAG_DP0 || tag == TAG_DP1) {
-    slots[0] = val;
-    slots[1] = loc;
-    need = 2;
-  } else {
-    uint ari = term_arity(tag);
-    need = ari;
-    for (uint i = 0; i < ari; i++) slots[i] = val + i;
-  }
+    if (bailed && tag != TAG_LAM && tag != TAG_SUP &&
+        tag != TAG_ERA && tag != TAG_NUM) {
+      slots[0] = loc;
+      need = 1;
+    } else if (tag == TAG_DP0 || tag == TAG_DP1) {
+      slots[0] = val;
+      slots[1] = loc;
+      need = 2;
+    } else {
+      uint ari = term_arity(tag);
+      need = ari;
+      for (uint i = 0; i < ari; i++) slots[i] = val + i;
+    }
 
-  // --- SIMD-cooperative frontier enqueue (1 atomic per 32 threads) ---
-  uint lane_offset = simd_prefix_exclusive_sum(need);
-  uint group_total = simd_sum(need);
-  uint group_base  = 0;
-  if (simd_is_first()) {
-    group_base = atomic_fetch_add_explicit(next_count, group_total, memory_order_relaxed);
-  }
-  group_base = simd_broadcast_first(group_base);
-  uint my_base = group_base + lane_offset;
-  for (uint i = 0; i < need; i++) {
-    next_frontier[my_base + i] = slots[i];
+    // --- SIMD-cooperative frontier enqueue (1 atomic per 32 threads) ---
+    uint lane_offset = simd_prefix_exclusive_sum(need);
+    uint group_total = simd_sum(need);
+    uint group_base  = 0;
+    if (simd_is_first()) {
+      group_base = atomic_fetch_add_explicit(next_count, group_total, memory_order_relaxed);
+    }
+    group_base = simd_broadcast_first(group_base);
+    uint my_base = group_base + lane_offset;
+    for (uint i = 0; i < need; i++) {
+      next_frontier[my_base + i] = slots[i];
+    }
   }
 
   // --- SIMD-cooperative interaction + bailout reporting ---

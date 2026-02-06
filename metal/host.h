@@ -6,6 +6,7 @@
 // Default configuration
 #define METAL_HEAP_WORDS    (1u << 29)  // 512M words = 4GB
 #define METAL_MAX_FRONTIER  (1u << 23)  // 8M entries
+#define METAL_MAX_DISPATCH  2048        // thread coarsening cap (M4: 10 cores)
 
 // Initialize the Metal runtime. Returns 0 on success, -1 on failure.
 int metal_init(void);

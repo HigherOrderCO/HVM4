@@ -1034,7 +1034,10 @@ int main(int argc, const char *argv[]) {
     bench_parallel(4, 20);   // 16 × P20
     bench_parallel(8, 16);   // 256 × P16
     bench_parallel(10, 14);  // 1024 × P14
+    bench_parallel(11, 13);  // 2048 × P13
     bench_parallel(12, 12);  // 4096 × P12
+    bench_parallel(14, 10);  // 16384 × P10
+    bench_parallel(16, 8);   // 65536 × P8
 
     metal_shutdown();
     return failures > 0 ? 1 : 0;
