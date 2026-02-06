@@ -1,7 +1,7 @@
 #include <dlfcn.h>
 
 #define HVM4_RUNTIME
-#include "../../hvm4_ffi.h"
+#include "../hvm4_ffi.h"
 #undef HVM4_RUNTIME
 
 typedef void (*HvmFfiInit)(const HvmApi *api);

@@ -1,0 +1,3 @@
+@main = %log("hi")
+//WARNING: overriding primitive '%log'
+//999

@@ -5,7 +5,7 @@ fn void ffi_load(const char *path);
 
 fn int ffi_is_shared_lib(const char *name) {
   size_t len = strlen(name);
-  if (len >= 7 && strcmp(name + len - 7, ".dylib") == 0) {
+  if (len >= 6 && strcmp(name + len - 6, ".dylib") == 0) {
     return 1;
   }
   if (len >= 3 && strcmp(name + len - 3, ".so") == 0) {

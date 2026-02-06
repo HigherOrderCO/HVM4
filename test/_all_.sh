@@ -13,6 +13,8 @@ set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 C_BIN="$DIR/../clang/main"
 C_MAIN="${C_BIN}.c"
+FFI_DIR="$DIR/ffi"
+ROOT_DIR="$DIR/.."
 
 # Build C
 if [ ! -f "$C_MAIN" ]; then
@@ -31,7 +33,7 @@ trap cleanup EXIT
 
 shopt -s nullglob
 tests=()
-for f in "$DIR"/*.hvm4; do
+for f in "$DIR"/*.hvm4 "$FFI_DIR"/*.hvm4; do
   name="$(basename "$f")"
   case "$name" in
     _* ) continue ;;
@@ -56,10 +58,19 @@ run_tests() {
 
     # Extract trailing // comment lines (consecutive from end of file)
     expected=""
-    nlines=0
+    nlines_expected=0
+    nlines_total=0
     nocollapse=0
+    extra_flags=()
     while IFS= read -r line; do
       if [[ "$line" == //* ]]; then
+        ((nlines_total++))
+        if [[ "$line" == "//FLAGS:"* ]]; then
+          flag_line="${line#//FLAGS:}"
+          read -r -a more_flags <<< "$flag_line"
+          extra_flags+=("${more_flags[@]}")
+          continue
+        fi
         if [[ "$line" == '//!'* ]]; then
           nocollapse=1
           content="${line#//!}"
@@ -68,7 +79,7 @@ run_tests() {
         fi
         [ -n "$expected" ] && expected="${content}"$'\n'"$expected"
         [ -z "$expected" ] && expected="${content}"
-        ((nlines++))
+        ((nlines_expected++))
       else
         break
       fi
@@ -77,10 +88,10 @@ run_tests() {
     # For collapse_* and enum_* tests, infer limit from expected output lines
     collapse_count=""
     if [[ "$name" == collapse_* || "$name" == enum_* ]]; then
-      collapse_count="$nlines"
+      collapse_count="$nlines_expected"
     fi
 
-    if [ $nlines -eq 0 ]; then
+    if [ $nlines_expected -eq 0 ]; then
       echo "[FAIL] $name (missing expected result comment)" >&2
       status=1
       continue
@@ -90,7 +101,7 @@ run_tests() {
     tmp="$(mktemp "${DIR}/.tmp.${name}.XXXXXX")"
     tmp_files+=("$tmp")
     total=$(wc -l < "$test_file")
-    keep=$((total - nlines))
+    keep=$((total - nlines_total))
     head -n "$keep" "$test_file" > "$tmp"
 
     # Determine flags: all tests use -C by default unless //! is used
@@ -104,7 +115,61 @@ run_tests() {
       esac
     fi
 
-    actual="$("$bin" "$tmp" $flags 2>&1)"
+    ffi_flag=""
+    ffi_target=""
+    if [[ "$test_file" == "$FFI_DIR/"* ]]; then
+      base="${test_file%.hvm4}"
+      if [ -d "$base" ]; then
+        ffi_flag="--ffi-dir"
+        ffi_target="$base"
+        shopt -s nullglob
+        c_files=("$base"/*.c)
+        shopt -u nullglob
+        if [ ${#c_files[@]} -eq 0 ]; then
+          echo "[FAIL] $name (no .c files under $base)" >&2
+          status=1
+          continue
+        fi
+        for src in "${c_files[@]}"; do
+          out="${src%.c}.dylib"
+          if ! clang -dynamiclib -fPIC -I "$ROOT_DIR" -o "$out" "$src"; then
+            echo "[FAIL] $name (failed to build $src)" >&2
+            status=1
+            continue 2
+          fi
+          tmp_files+=("$out")
+        done
+      else
+        src="${base}.c"
+        out="${base}.dylib"
+        if [ ! -f "$src" ]; then
+          echo "[FAIL] $name (missing $src)" >&2
+          status=1
+          continue
+        fi
+        if ! clang -dynamiclib -fPIC -I "$ROOT_DIR" -o "$out" "$src"; then
+          echo "[FAIL] $name (failed to build $src)" >&2
+          status=1
+          continue
+        fi
+        tmp_files+=("$out")
+        ffi_flag="--ffi"
+        ffi_target="$out"
+      fi
+    fi
+
+    cmd=("$bin" "$tmp")
+    if [ -n "$flags" ]; then
+      cmd+=("$flags")
+    fi
+    if [ ${#extra_flags[@]} -gt 0 ]; then
+      cmd+=("${extra_flags[@]}")
+    fi
+    if [ -n "$ffi_flag" ]; then
+      cmd+=("$ffi_flag" "$ffi_target")
+    fi
+
+    actual="$("${cmd[@]}" 2>&1)"
 
     # Strip ANSI escape codes for comparison
     actual_clean="$(echo "$actual" | sed 's/\x1b\[[0-9;]*m//g')"
