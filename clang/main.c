@@ -17,6 +17,13 @@
 // CLI
 // ===
 
+#define FFI_MAX 128
+
+typedef struct {
+  int        is_dir;
+  const char *path;
+} FfiLoad;
+
 typedef struct {
   int   stats;
   int   silent;
@@ -25,6 +32,8 @@ typedef struct {
   int   debug;
   int   step_by_step;
   int   threads;
+  u32     ffi_loads_len;
+  FfiLoad ffi_loads[FFI_MAX];
   char *file;
 } CliOpts;
 
@@ -37,6 +46,7 @@ fn CliOpts parse_opts(int argc, char **argv) {
     .debug = 0,
     .step_by_step = 0,
     .threads = 0,
+    .ffi_loads_len = 0,
     .file = NULL
   };
 
@@ -64,6 +74,38 @@ fn CliOpts parse_opts(int argc, char **argv) {
       opts.debug = 1;
     } else if (strcmp(argv[i], "-D") == 0) {
       opts.step_by_step = 1;
+    } else if (strcmp(argv[i], "--ffi") == 0 || strncmp(argv[i], "--ffi=", 6) == 0) {
+      const char *path = NULL;
+      if (argv[i][5] == '=') {
+        path = argv[i] + 6;
+      } else {
+        if (i + 1 >= argc) {
+          fprintf(stderr, "Error: missing path after --ffi\n");
+          exit(1);
+        }
+        path = argv[++i];
+      }
+      if (opts.ffi_loads_len >= FFI_MAX) {
+        fprintf(stderr, "Error: too many --ffi arguments (max %d)\n", FFI_MAX);
+        exit(1);
+      }
+      opts.ffi_loads[opts.ffi_loads_len++] = (FfiLoad){.is_dir = 0, .path = path};
+    } else if (strcmp(argv[i], "--ffi-dir") == 0 || strncmp(argv[i], "--ffi-dir=", 10) == 0) {
+      const char *path = NULL;
+      if (argv[i][9] == '=') {
+        path = argv[i] + 10;
+      } else {
+        if (i + 1 >= argc) {
+          fprintf(stderr, "Error: missing path after --ffi-dir\n");
+          exit(1);
+        }
+        path = argv[++i];
+      }
+      if (opts.ffi_loads_len >= FFI_MAX) {
+        fprintf(stderr, "Error: too many FFI loads (max %d)\n", FFI_MAX);
+        exit(1);
+      }
+      opts.ffi_loads[opts.ffi_loads_len++] = (FfiLoad){.is_dir = 1, .path = path};
     } else if (argv[i][0] != '-') {
       if (opts.file == NULL) {
         opts.file = argv[i];
@@ -88,7 +130,7 @@ int main(int argc, char **argv) {
   CliOpts opts = parse_opts(argc, argv);
 
   if (opts.file == NULL) {
-    fprintf(stderr, "Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>]\n");
+    fprintf(stderr, "Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>] [--ffi <path>] [--ffi-dir <path>]\n");
     return 1;
   }
 
@@ -118,6 +160,15 @@ int main(int argc, char **argv) {
 
   // Register known primitives before parsing (needed for arity checks).
   prim_init();
+
+  // Load FFI libraries before parsing (needed for arity checks and overrides).
+  for (u32 i = 0; i < opts.ffi_loads_len; i++) {
+    if (opts.ffi_loads[i].is_dir) {
+      ffi_load_dir(opts.ffi_loads[i].path);
+    } else {
+      ffi_load(opts.ffi_loads[i].path);
+    }
+  }
 
   // Set debug mode
   DEBUG = opts.debug;

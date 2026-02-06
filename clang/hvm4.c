@@ -342,12 +342,14 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "nick/to_str.c"
 #include "nick/is_init.c"
 #include "nick/is_char.c"
+#include "nick/from_str.c"
 #include "nick/names.c"
 
 // System
 // ======
 
 #include "sys/error.c"
+#include "sys/runtime_error.c"
 #include "sys/path_join.c"
 #include "sys/file_read.c"
 
@@ -370,6 +372,13 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "prim/fn/log_go_2.c"
 #include "prim/init.c"
 #include "print/term.c"
+
+// FFI
+// ===
+
+#include "ffi/api.c"
+#include "ffi/load.c"
+#include "ffi/load_dir.c"
 
 // Parse
 // =====

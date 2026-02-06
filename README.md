@@ -9,6 +9,7 @@ HVM4 is a high-performance runtime for the [Interaction Calculus](docs/theory/in
 ```bash
 # Build
 cd clang && clang -O2 -o main main.c
+# On Linux, add: -ldl
 
 # Run a file (use collapse mode by default)
 ./clang/main test/file.hvm4 -s -C10
@@ -21,6 +22,8 @@ Flags:
 - `-s` shows performance stats
 - `-D` prints each intermediate reduction step with interaction labels
 - `-C10` collapses and flattens superpositions (limit to 10 lines)
+- `--ffi <path>` loads one FFI shared library before parsing
+- `--ffi-dir <path>` loads all FFI shared libraries in a directory before parsing
 
 ## Examples
 
