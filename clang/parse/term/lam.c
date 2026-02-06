@@ -105,6 +105,45 @@ fn Term parse_term_lam(PState *s, u32 depth) {
     }
   }
 
+  // Unscoped lambda: λ$x. body
+  if (parse_peek(s) == '$') {
+    parse_advance(s);  // consume '$'
+    u32 nam = parse_name(s);
+    parse_skip(s);
+
+    // Bind unscoped var at depth+1 (reserve depth+1 for hidden f binder)
+    parse_bind_push(nam, depth + 1, 0, 0, 0);
+    Term body;
+    if (parse_match(s, ",")) {
+      body = parse_term_lam(s, depth + 2);
+    } else {
+      parse_consume(s, ".");
+      body = parse_term(s, depth + 2);
+    }
+    parse_bind_pop();
+
+    // Affine check for unscoped var
+    u32 uses = count_uses(body, depth + 2, BJV, 0);
+    if (uses > 1) {
+      parse_error_affine(s, nam, -1, uses);
+    }
+
+    // Build: !${f,x}; f(body) with fresh f
+    Term f_ref = term_new(0, BJV, 0, depth + 1);
+    Term app   = term_new_app(f_ref, body);
+    u64 loc_x  = heap_alloc(1);
+    HEAP[loc_x] = app;
+    u32 lam_x_ext = depth + 2;
+    if (uses == 0) {
+      lam_x_ext |= LAM_ERA_MASK;
+    }
+    Term lam_x = term_new(0, LAM, lam_x_ext, loc_x);
+    u64 loc_f = heap_alloc(1);
+    HEAP[loc_f] = lam_x;
+    Term lam_f = term_new(0, LAM, depth + 1, loc_f);
+    return term_new_uns(lam_f);
+  }
+
   // Parse argument: [&]name[&[label|(label)]]
   u32 cloned = parse_match(s, "&");
   u32 nam    = parse_name(s);

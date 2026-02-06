@@ -290,7 +290,13 @@ This desugars to:
 ### Unscoped Lambdas
 
 Unscoped lambdas allow a variable to be used outside its binder's lexical
-scope. The direct syntax `λ$x.body` is not yet implemented, so we use:
+scope. You can write them directly as:
+
+```
+λ$x. body
+```
+
+This is sugar for:
 
 ```
 ! f = λ x ; body
@@ -300,15 +306,15 @@ This declares in `body`:
 - `f` = `λy. λ$x. y` — a function that wraps its argument in an unscoped lambda
 - `x` = `$x` — an unscoped variable usable anywhere
 
-So instead of writing `λ$x.body` directly, you construct it as `f(body)`:
+So `λ$x.body` is equivalent to constructing it as `f(body)`:
 
 ```hvm4
-@main = ! f = λ x ; f(x + 1)(10)
+@main = (λ$x. (x + 1))(10)
 //11
 ```
 
-Here `f(x + 1)` produces `λ$x.(x + 1)`, and applying that to `10` binds
-`x` to `10`, yielding `11`.
+Applying the unscoped lambda to `10` binds `x` to `10`, yielding `11`.
+(Equivalent sugar: `! f = λ x ; f(x + 1)(10)`.)
 
 Another example using the unscoped variable in a pair:
 

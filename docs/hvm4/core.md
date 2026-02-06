@@ -51,3 +51,5 @@ Oper  ::= "+" | "-" | "*" | "/" | "%" | "&&" | "||"
   annihilate, different labels commute.
 - Primitives (`%name`) are native functions and must be fully applied with the
   correct arity; `%log` prints a string and yields `#Nil`.
+- Surface sugar accepts `λ$x. body` as an unscoped lambda, equivalent to
+  `! f = λ x ; f(body)` with fresh `f` (see `docs/hvm4/syntax.md`).

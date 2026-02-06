@@ -95,6 +95,7 @@ Lists use built-in `#Nil` and `#Con`:
 
 - `λx. body` is core `Lam`.
 - `λx,y,z. body` desugars to `λx. λy. λz. body`.
+- `λ$x. body` is an unscoped lambda binder (see “Unscoped lambda (UNS)”).
 
 ### Cloned binders (auto-dup)
 
@@ -139,6 +140,9 @@ All of these combine with cloning: `λ&x&L. ...`.
 ### Unscoped lambda (UNS)
 
 - `! f = λ x ; body` desugars to `!${f,x}; body`.
+- `λ$x. body` desugars to `! f = λ x ; f(body)` with fresh `f`.
+  - Commas are allowed: `λ$x,y. body` (x unscoped, y scoped).
+  - The unscoped variable is referenced as plain `x` inside the body.
 
 ## Superposition (`&`) and fork
 
