@@ -5,7 +5,7 @@ fn Term prim_fn_log_go_2(Term *args);
 
 // %log(s)
 // ---------------- log
-// %log_go_0([], s)
+// %log_go_0(λx.x, s)
 fn Term prim_fn_log(Term *args) {
   u64  loc      = heap_alloc(1);
   Term var      = term_new_var(loc);
