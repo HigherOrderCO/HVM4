@@ -578,9 +578,10 @@ kernel void normalize_pass(
       slots[0] = loc;
       need = 1;
     } else if (tag == TAG_DP0 || tag == TAG_DP1) {
-      slots[0] = val;
-      slots[1] = loc;
-      need = 2;
+      // Stuck DP: treat as normalized (no children to enqueue).
+      // The expression is in WHNF but not LAM/SUP/ERA/NUM, so the DUP
+      // can't interact. Re-enqueuing would just relocate forever.
+      need = 0;
     } else {
       uint ari = term_arity(tag);
       need = ari;
