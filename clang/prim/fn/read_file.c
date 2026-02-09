@@ -7,10 +7,10 @@ fn Term term_string_from_hstrerr(const char *prim, const char *arg, int cap, HSt
 fn Term term_string_printf(const char *fmt, ...);
 fn int utf8_decode_next_bytes(const u8 *s, u32 len, u32 *idx, u32 *cp);
 
-// %read_file(path)
-// ----------------
+// %read_file_go_io(path)
+// ----------------------
 // #OK{List<#CHR{NUM}>} | #ERR{String}
-fn Term prim_fn_read_file(Term *args) {
+fn Term prim_fn_read_file_go_io(Term *args) {
   int MAX_PATH = 1024;
   char path[MAX_PATH]; // UTF-8 bytes
   const char *OPEN_PATH_ERR_FMT = "ERROR(read_file): failed to open path '%s': %s (errno=%d)";
@@ -98,8 +98,4 @@ fn Term prim_fn_read_file(Term *args) {
 
   fclose(file);
   return term_new_ctr(NAM_OK, 1, &result);
-}
-
-fn void prim_read_file_init(void) {
-  prim_register("read_file", 9, 1, prim_fn_read_file);
 }

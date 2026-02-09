@@ -5,6 +5,5 @@ fn void prim_init(void) {
   prim_read_bytes_init();
   prim_write_bytes_init();
   prim_read_file_init();
-  prim_lread_file_init();
   prim_write_file_init();
 }
