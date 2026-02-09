@@ -8,6 +8,7 @@ typedef struct HStrErr HStrErr;
 
 // UTF-8 helpers
 fn int utf8_encode_scalar(u32 cp, char out[4]);
+fn int utf8_decode_next_bytes(const u8 *s, u32 len, u32 *idx, u32 *cp);
 fn int utf8_decode_next_cstr(const char *s, u32 *idx, u32 *cp);
 
 // Term <-> c string, conversion helpers
@@ -20,6 +21,8 @@ fn Term term_string_from_hstrerr(const char *prim, const char *arg, int cap, HSt
 
 // Local utility
 fn void hstr_set(HStrErr *err, HStrErrKind kind, int index, int bytes, u64 cp);
+fn int  utf8_seq_expected_len(u8 b0);
+fn int  utf8_decode_seq(const u8 *p, int n, u32 *cp);
 
 enum HStrErrKind {
   HSTR_OK = 0,
@@ -83,82 +86,130 @@ fn int utf8_encode_scalar(u32 cp, char out[4]) {
   return -1;
 }
 
-// Decode one UTF-8 codepoint from a NUL-terminated C string at byte index `*idx`.
-// Returns: 0=end of string, 1..4=bytes consumed, -1=invalid/truncated sequence.
-fn int utf8_decode_next_cstr(const char *s, u32 *idx, u32 *cp) {
-  const u8 *p = (const u8 *)s + *idx;
-  u8        b0 = p[0];
-
-  if (b0 == 0) {
-    return 0;
-  }
-
+// Get UTF-8 sequence length from the first byte.
+// Returns 1..4 on valid leading byte, -1 otherwise.
+fn int utf8_seq_expected_len(u8 b0) {
   if (b0 < 0x80) {
-    *cp  = b0;
-    *idx = *idx + 1;
+    return 1;
+  }
+  if ((b0 & 0xE0) == 0xC0) {
+    return 2;
+  }
+  if ((b0 & 0xF0) == 0xE0) {
+    return 3;
+  }
+  if ((b0 & 0xF8) == 0xF0) {
+    return 4;
+  }
+  return -1;
+}
+
+// Decode exactly one UTF-8 sequence from `p[0..n-1]`.
+// Returns 1 on success, 0 on invalid encoding.
+fn int utf8_decode_seq(const u8 *p, int n, u32 *cp) {
+  u8 b0 = p[0];
+
+  if (n == 1) {
+    *cp = b0;
     return 1;
   }
 
-  if ((b0 & 0xE0) == 0xC0) {
+  if (n == 2) {
     u8 b1 = p[1];
-    if (b1 == 0 || (b1 & 0xC0) != 0x80) {
-      return -1;
+    if ((b1 & 0xC0) != 0x80) {
+      return 0;
     }
     u32 x = ((u32)(b0 & 0x1F) << 6) | (u32)(b1 & 0x3F);
     if (x < 0x80) {
-      return -1;
+      return 0;
     }
-    *cp  = x;
-    *idx = *idx + 2;
-    return 2;
+    *cp = x;
+    return 1;
   }
 
-  if ((b0 & 0xF0) == 0xE0) {
+  if (n == 3) {
     u8 b1 = p[1];
-    if (b1 == 0 || (b1 & 0xC0) != 0x80) {
-      return -1;
-    }
     u8 b2 = p[2];
-    if (b2 == 0 || (b2 & 0xC0) != 0x80) {
-      return -1;
+    if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) {
+      return 0;
     }
     u32 x = ((u32)(b0 & 0x0F) << 12)
           | ((u32)(b1 & 0x3F) << 6)
           | ((u32)(b2 & 0x3F));
     if (x < 0x800 || (x >= 0xD800 && x <= 0xDFFF)) {
-      return -1;
+      return 0;
     }
-    *cp  = x;
-    *idx = *idx + 3;
-    return 3;
+    *cp = x;
+    return 1;
   }
 
-  if ((b0 & 0xF8) == 0xF0) {
+  if (n == 4) {
     u8 b1 = p[1];
-    if (b1 == 0 || (b1 & 0xC0) != 0x80) {
-      return -1;
-    }
     u8 b2 = p[2];
-    if (b2 == 0 || (b2 & 0xC0) != 0x80) {
-      return -1;
-    }
     u8 b3 = p[3];
-    if (b3 == 0 || (b3 & 0xC0) != 0x80) {
-      return -1;
+    if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) {
+      return 0;
     }
     u32 x = ((u32)(b0 & 0x07) << 18)
           | ((u32)(b1 & 0x3F) << 12)
           | ((u32)(b2 & 0x3F) << 6)
           | ((u32)(b3 & 0x3F));
     if (x < 0x10000 || x > 0x10FFFF) {
-      return -1;
+      return 0;
     }
-    *cp  = x;
-    *idx = *idx + 4;
-    return 4;
+    *cp = x;
+    return 1;
   }
 
-  return -1;
+  return 0;
+}
+
+// Decode one UTF-8 codepoint from a byte slice `s[0..len-1]` at byte index `*idx`.
+// Returns: 0=end of slice, 1..4=bytes consumed, -1=invalid sequence, -2=truncated sequence.
+fn int utf8_decode_next_bytes(const u8 *s, u32 len, u32 *idx, u32 *cp) {
+  if (*idx >= len) {
+    return 0;
+  }
+
+  u32 i = *idx;
+  int n = utf8_seq_expected_len(s[i]);
+  if (n < 0) {
+    return -1;
+  }
+  if (i + (u32)n > len) {
+    return -2;
+  }
+  if (!utf8_decode_seq(s + i, n, cp)) {
+    return -1;
+  }
+
+  *idx = i + (u32)n;
+  return n;
+}
+
+// Decode one UTF-8 codepoint from a NUL-terminated C string at byte index `*idx`.
+// Returns: 0=end of string, 1..4=bytes consumed, -1=invalid/truncated sequence.
+fn int utf8_decode_next_cstr(const char *s, u32 *idx, u32 *cp) {
+  const u8 *p = (const u8 *)s + *idx;
+  if (p[0] == 0) {
+    return 0;
+  }
+
+  int n = utf8_seq_expected_len(p[0]);
+  if (n < 0) {
+    return -1;
+  }
+  for (int j = 1; j < n; ++j) {
+    if (p[j] == 0) {
+      return -1;
+    }
+  }
+  if (!utf8_decode_seq(p, n, cp)) {
+    return -1;
+  }
+
+  *idx = *idx + (u32)n;
+  return n;
 }
 
 // Build #CHR{NUM} from a UTF-32 scalar.

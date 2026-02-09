@@ -5,79 +5,7 @@
 fn int term_string_to_utf8_cstr(Term src, char *dst, int cap, int *out_len, HStrErr *err);
 fn Term term_string_from_hstrerr(const char *prim, const char *arg, int cap, HStrErr err);
 fn Term term_string_printf(const char *fmt, ...);
-
-fn int utf8_expected_len(u8 b0) {
-  if (b0 < 0x80) {
-    return 1;
-  }
-  if ((b0 & 0xE0) == 0xC0) {
-    return 2;
-  }
-  if ((b0 & 0xF0) == 0xE0) {
-    return 3;
-  }
-  if ((b0 & 0xF8) == 0xF0) {
-    return 4;
-  }
-  return -1;
-}
-
-fn int utf8_decode_seq(const u8 seq[4], int n, u32 *cp) {
-  u8 b0 = seq[0];
-  if (n == 1) {
-    *cp = b0;
-    return 1;
-  }
-
-  if (n == 2) {
-    u8 b1 = seq[1];
-    if ((b1 & 0xC0) != 0x80) {
-      return 0;
-    }
-    u32 x = ((u32)(b0 & 0x1F) << 6) | (u32)(b1 & 0x3F);
-    if (x < 0x80) {
-      return 0;
-    }
-    *cp = x;
-    return 1;
-  }
-
-  if (n == 3) {
-    u8 b1 = seq[1];
-    u8 b2 = seq[2];
-    if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) {
-      return 0;
-    }
-    u32 x = ((u32)(b0 & 0x0F) << 12)
-          | ((u32)(b1 & 0x3F) << 6)
-          | ((u32)(b2 & 0x3F));
-    if (x < 0x800 || (x >= 0xD800 && x <= 0xDFFF)) {
-      return 0;
-    }
-    *cp = x;
-    return 1;
-  }
-
-  if (n == 4) {
-    u8 b1 = seq[1];
-    u8 b2 = seq[2];
-    u8 b3 = seq[3];
-    if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) {
-      return 0;
-    }
-    u32 x = ((u32)(b0 & 0x07) << 18)
-          | ((u32)(b1 & 0x3F) << 12)
-          | ((u32)(b2 & 0x3F) << 6)
-          | ((u32)(b3 & 0x3F));
-    if (x < 0x10000 || x > 0x10FFFF) {
-      return 0;
-    }
-    *cp = x;
-    return 1;
-  }
-
-  return 0;
-}
+fn int utf8_decode_next_bytes(const u8 *s, u32 len, u32 *idx, u32 *cp);
 
 // %read_file(path)
 // ----------------
@@ -108,57 +36,50 @@ fn Term prim_fn_read_file(Term *args) {
   u8   has_node = 0;
 
   // Incremental UTF-8 decoder state.
+  // `seq` stores bytes of the current candidate codepoint.
   u8 seq[4];
   int seq_len = 0;
-  int seq_need = 0;
   int byte_i = 0;
 
   u8 b;
   while (fread(&b, 1, 1, file) == 1) {
-    if (seq_len == 0) {
-      seq[0] = b;
-      seq_len = 1;
-      seq_need = utf8_expected_len(b);
-      if (seq_need < 0) {
-        fclose(file);
-        return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf(INVALID_UTF8_FMT, byte_i) });
-      }
+    if (seq_len >= 4) {
+      int seq_start = byte_i - seq_len;
+      fclose(file);
+      return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf(INVALID_UTF8_FMT, seq_start) });
+    }
+    seq[seq_len] = b;
+    seq_len += 1;
+
+    // Try to decode the current sequence from byte slice (not NUL-terminated).
+    u32 seq_idx = 0;
+    u32 cp = 0;
+    int dec = utf8_decode_next_bytes(seq, (u32)seq_len, &seq_idx, &cp);
+    if (dec == -2) {
+      // Need more bytes for the current codepoint.
+      byte_i += 1;
+      continue;
+    }
+    if (dec < 0) {
+      int seq_start = byte_i - (seq_len - 1);
+      fclose(file);
+      return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf(INVALID_UTF8_FMT, seq_start) });
+    }
+
+    Term num = term_new_num(cp);
+    Term chr = term_new_ctr(NAM_CHR, 1, &num);
+    Term h_t[2] = {chr, Nil};
+    Term node = term_new_ctr(NAM_CON, 2, h_t);
+
+    if (!has_node) {
+      result = node;
+      has_node = 1;
     } else {
-      // Continuation bytes must start with bits `10`.
-      if ((b & 0xC0) != 0x80) {
-        int seq_start = byte_i - seq_len;
-        fclose(file);
-        return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf(INVALID_UTF8_FMT, seq_start) });
-      }
-      seq[seq_len] = b;
-      seq_len += 1;
+      heap_set(term_val(curr) + 1, node);
     }
+    curr = node;
 
-    if (seq_len == seq_need) {
-      u32 cp = 0;
-      if (!utf8_decode_seq(seq, seq_need, &cp)) {
-        int seq_start = byte_i - (seq_need - 1);
-        fclose(file);
-        return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf(INVALID_UTF8_FMT, seq_start) });
-      }
-
-      Term num = term_new_num(cp);
-      Term chr = term_new_ctr(NAM_CHR, 1, &num);
-      Term h_t[2] = {chr, Nil};
-      Term node = term_new_ctr(NAM_CON, 2, h_t);
-
-      if (!has_node) {
-        result = node;
-        has_node = 1;
-      } else {
-        heap_set(term_val(curr) + 1, node);
-      }
-      curr = node;
-
-      seq_len = 0;
-      seq_need = 0;
-    }
-
+    seq_len = 0;
     byte_i += 1;
   }
 

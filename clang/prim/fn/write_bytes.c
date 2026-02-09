@@ -39,8 +39,7 @@ fn Term prim_fn_write_bytes(Term *args) {
     // wnf(data_item) must be List<#BYT{b}>
     if (term_ext(data_item) != NAM_CON) {
       fclose(file);
-      Term msg = term_string_printf("%s", DATA_EXPECTED);
-      return term_new_ctr(NAM_ERR, 1, &msg);
+      return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf("%s", DATA_EXPECTED) });
     }
 
     Term head_loc = term_val(data_item);
@@ -51,8 +50,7 @@ fn Term prim_fn_write_bytes(Term *args) {
     // wnf(head) must be #BYT{b}
     if (term_tag(head) != C01 || term_ext(head) != NAM_BYT) {
       fclose(file);
-      Term msg = term_string_printf("%s", DATA_EXPECTED);
-      return term_new_ctr(NAM_ERR, 1, &msg);
+      return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf("%s", DATA_EXPECTED) });
     }
 
     Term b_loc = term_val(head);
@@ -62,8 +60,7 @@ fn Term prim_fn_write_bytes(Term *args) {
     // b in #BYT{b} must be NUM
     if (term_tag(b_trm) != NUM) {
       fclose(file);
-      Term msg = term_string_printf("%s", DATA_EXPECTED);
-      return term_new_ctr(NAM_ERR, 1, &msg);
+      return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf("%s", DATA_EXPECTED) });
     }
 
     // NUM must fit one byte.
@@ -88,8 +85,7 @@ fn Term prim_fn_write_bytes(Term *args) {
 
   if (term_tag(data_item) != C00 || term_ext(data_item) != NAM_NIL) {
     fclose(file);
-    Term msg = term_string_printf("%s", DATA_EXPECTED);
-    return term_new_ctr(NAM_ERR, 1, &msg);
+    return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf("%s", DATA_EXPECTED) });
   }
 
   if (fflush(file) != 0) {
