@@ -1,0 +1,2 @@
+@main = !!&h = %timer_start(0); !!x = %timer_poll(h); %timer_poll(h)
+//!#Err{3}

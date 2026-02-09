@@ -1,0 +1,4 @@
+@main =
+  !!&h = %tcp_connect("127.0.0.1", 1);
+  #Pack{%tcp_poll(h), %tcp_poll(h)}
+//EXPECT_CONTAINS:#Err{3}

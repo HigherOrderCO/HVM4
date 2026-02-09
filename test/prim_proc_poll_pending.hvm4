@@ -1,0 +1,2 @@
+@main = %proc_poll(%proc_spawn("sleep 1"))
+//!#Pend{#Proc{1,1}}

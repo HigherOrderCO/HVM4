@@ -1,0 +1,2 @@
+@main = %tcp_poll(#Tcp{1,0})
+//!#Err{2}

@@ -1,0 +1,2 @@
+@main = !!&k = %key_open(0); !!x = %key_poll(k); %key_poll(k)
+//!#Err{3}

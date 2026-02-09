@@ -370,6 +370,10 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "prim/fn/log_go_0.c"
 #include "prim/fn/log_go_1.c"
 #include "prim/fn/log_go_2.c"
+#include "prim/fn/proc_spawn.c"
+#include "prim/fn/tcp_connect.c"
+#include "prim/fn/key_open.c"
+#include "prim/fn/timer_start.c"
 #include "prim/init.c"
 #include "print/term.c"
 

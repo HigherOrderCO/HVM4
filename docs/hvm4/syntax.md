@@ -232,6 +232,23 @@ can be written as `_ : d` or as a bare `d`.
 ### Primitives
 
 - `%log` prints a string (list of `#Chr`) to stdout and returns `#Nil`.
+- `%timer_start(ms)` returns `#Time{id,seq}` for a one-shot timer.
+- `%timer_poll(timer)` returns `#Pend{timer2}` or `#Rdy{timer2}`.
+- `%timer_wait(timer)` blocks until ready and returns `#Rdy{timer2}`.
+- `%key_open(seed)` returns `#Key{id,seq}` for keyboard events.
+- `%key_poll(key)` returns `#Pend{key2}` or `#Rdy{key2,#Chr{code}}`.
+- `%key_wait(key)` blocks for one key event and returns `#Rdy{key2,#Chr{code}}`.
+- `%proc_spawn(cmd)` returns `#Proc{id,seq}` for a spawned child process.
+- `%proc_poll(proc)` returns `#Pend{proc2}` or `#Rdy{proc2,#Exit{code}}`.
+- `%proc_wait(proc)` blocks until exit and returns `#Rdy{proc2,#Exit{code}}`.
+- `%proc_kill(proc)` sends `SIGTERM` and returns `#Pend{proc2}`.
+- `%tcp_connect(host,port)` returns `#Tcp{id,seq}` (IPv4 host string + port).
+- `%tcp_poll(tcp)` returns `#Pend{tcp2}` while connecting, or `#Rdy{tcp2}`.
+- `%tcp_wait(tcp)` blocks until connected and returns `#Rdy{tcp2}`.
+- `%tcp_send(tcp,data)` sends a byte-list and returns `#Rdy{tcp2,#Sent{n}}`.
+- `%tcp_recv_poll(tcp)` returns `#Pend{tcp2}` or `#Rdy{tcp2,#Chr{b}|#Nil}`.
+- `%tcp_recv_wait(tcp)` blocks for one byte/EOF and returns `#Rdy{tcp2,...}`.
+- `%tcp_close(tcp)` closes the socket and returns `#Rdy{tcp2}`.
 
 ## Priority wrapper and wildcard
 

@@ -1,0 +1,2 @@
+@main = %proc_spawn("exit 0")
+//!#Proc{1,0}

@@ -50,6 +50,13 @@ Oper  ::= "+" | "-" | "*" | "/" | "%" | "&&" | "||"
 - Labels determine how duplications and superpositions interact; equal labels
   annihilate, different labels commute.
 - Primitives (`%name`) are native functions and must be fully applied with the
-  correct arity; `%log` prints a string and yields `#Nil`.
+  correct arity; `%log` prints a string and yields `#Nil`; timer primitives
+  (`%timer_start`, `%timer_poll`, `%timer_wait`) implement one-shot async timers
+  with `#Time`, `#Pend`, and `#Rdy` constructors; keyboard primitives
+  (`%key_open`, `%key_poll`, `%key_wait`) use `#Key`, `#Pend`, and `#Rdy`;
+  process primitives (`%proc_spawn`, `%proc_poll`, `%proc_wait`, `%proc_kill`)
+  use `#Proc`, `#Pend`, `#Rdy`, and `#Exit`; TCP primitives
+  (`%tcp_connect`, `%tcp_poll`, `%tcp_wait`, `%tcp_send`, `%tcp_recv_poll`,
+  `%tcp_recv_wait`, `%tcp_close`) use `#Tcp`, `#Pend`, `#Rdy`, and `#Sent`.
 - Surface sugar accepts `λ$x. body` as an unscoped lambda, equivalent to
   `! f = λ x ; f(body)` with fresh `f` (see `docs/hvm4/syntax.md`).

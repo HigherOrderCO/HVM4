@@ -1,0 +1,2 @@
+@main = !!&p = %proc_spawn("exit 0"); !!x = %proc_poll(p); %proc_poll(p)
+//!#Err{3}

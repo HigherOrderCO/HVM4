@@ -1,0 +1,2 @@
+@main = %proc_wait(%proc_spawn("exit 7"))
+//!#Rdy{#Proc{1,1},#Exit{7}}

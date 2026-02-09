@@ -1,0 +1,2 @@
+@main = %proc_poll(0)
+//!#Err{2}

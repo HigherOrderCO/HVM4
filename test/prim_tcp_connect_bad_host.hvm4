@@ -1,0 +1,2 @@
+@main = %tcp_connect("localhost", 8080)
+//!#Err{1}

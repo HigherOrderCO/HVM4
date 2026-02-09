@@ -1,0 +1,2 @@
+@main = %tcp_send(#Tcp{1,0}, "x")
+//!#Err{2}

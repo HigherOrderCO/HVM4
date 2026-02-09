@@ -1,0 +1,2 @@
+@main = %proc_kill(%proc_spawn("sleep 5"))
+//!#Pend{#Proc{1,1}}
