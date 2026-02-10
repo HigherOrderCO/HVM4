@@ -1,0 +1,2 @@
+@main = %https_cancel(#Http{0,0})
+//EXPECT_CONTAINS:ERROR(https_cancel): E2

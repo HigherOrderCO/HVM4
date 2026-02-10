@@ -8,6 +8,7 @@ fn void prim_init(void) {
   prim_process_init();
   prim_stream_init();
   prim_timer_init();
+  prim_https_init();
   prim_env_init();
   prim_cwd_init();
   prim_chdir_init();

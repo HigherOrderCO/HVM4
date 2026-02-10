@@ -243,6 +243,10 @@ can be written as `_ : d` or as a bare `d`.
 - `%timer_start(ms)` returns `#OK{#Time{id,seq}}` or `#ERR{String}`.
 - `%timer_poll(time)` returns `#OK{#Pend{time2}|#Rdy{time2}}` or `#ERR{String}`.
 - `%timer_wait(time)` returns `#OK{#Rdy{time2}}` or `#ERR{String}`.
+- `%https_get(url)` returns `#OK{#Http{id,seq}}` or `#ERR{String}`.
+- `%https_poll(http)` returns `#OK{#Pend{http2}|#Rdy{http2,#Resp{status,#Nil,body}|#Fail{code,msg}|#Canceled}}` or `#ERR{String}`.
+- `%https_wait(http)` returns `#OK{#Rdy{http2,#Resp{status,#Nil,body}|#Fail{code,msg}|#Canceled}}` or `#ERR{String}`.
+- `%https_cancel(http)` returns `#OK{#Pend{http2}|#Rdy{http2,#Resp{status,#Nil,body}|#Fail{code,msg}|#Canceled}}` or `#ERR{String}`.
 
 ## Priority wrapper and wildcard
 

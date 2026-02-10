@@ -59,4 +59,7 @@ Oper  ::= "+" | "-" | "*" | "/" | "%" | "&&" | "||"
   `#Pend`, and `#Rdy` under `#OK{...}`, or `#ERR{String}`; stream primitives
   (`%stream_stdin_open`, `%stream_file_open`, `%stream_poll`, `%stream_wait`,
   `%stream_close`) use `#Strm`, `#Pend`, `#Rdy`, `#Byt`, and `#Eof` under
-  `#OK{...}`, or `#ERR{String}` (`%stream_close` returns `#OK{#Nil}`).
+  `#OK{...}`, or `#ERR{String}` (`%stream_close` returns `#OK{#Nil}`); https
+  primitives (`%https_get`, `%https_poll`, `%https_wait`, `%https_cancel`) use
+  `#Http`, `#Pend`, and `#Rdy` under `#OK{...}`, with outcomes `#Resp{status,#Nil,body}`,
+  `#Fail{code,msg}`, or `#Canceled`, or return `#ERR{String}`.
