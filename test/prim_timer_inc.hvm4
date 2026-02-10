@@ -1,0 +1,2 @@
+@main = %timer_wait(↑%timer_start(0))
+//!↑#Rdy{#Time{1,1}}

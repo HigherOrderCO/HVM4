@@ -1,0 +1,2 @@
+@main = %timer_poll(#Time{1,0})
+//EXPECT_CONTAINS:E2 unknown timer id

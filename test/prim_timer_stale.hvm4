@@ -1,0 +1,5 @@
+@main =
+  !!&h = %timer_start(0);
+  !!x  = %timer_poll(h);
+  %timer_poll(h)
+//EXPECT_CONTAINS:E3 stale timer handle
