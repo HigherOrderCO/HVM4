@@ -1,5 +1,5 @@
 @main =
-  !!&h = %timer_start(0);
-  !!x  = %timer_poll(h);
-  %timer_poll(h)
+  !!x = %timer_start(0);
+  !!y = %timer_poll(#Time{1,0});
+  %timer_poll(#Time{1,0})
 //EXPECT_CONTAINS:E3 stale timer handle

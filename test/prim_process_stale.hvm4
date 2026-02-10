@@ -1,5 +1,5 @@
 @main =
-  !!&p = %process_spawn("exit 0");
-  !!x  = %process_poll(p);
-  %process_poll(p)
+  !!x = %process_spawn("sleep 1");
+  !!y = %process_poll(#Proc{1,0});
+  %process_poll(#Proc{1,0})
 //EXPECT_CONTAINS:E3 stale process handle

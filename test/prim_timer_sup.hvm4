@@ -1,2 +1,5 @@
-@main = %timer_wait(&L{%timer_start(0), %timer_start(0)})
-//!&L{#Rdy{#Time{1,1}},#Rdy{#Time{2,1}}}
+@main =
+  !!a = %timer_start(0);
+  !!b = %timer_start(0);
+  %timer_wait(&L{#Time{1,0}, #Time{2,0}})
+//!&L{#OK{#Rdy{#Time{1,1}}},#OK{#Rdy{#Time{2,1}}}}

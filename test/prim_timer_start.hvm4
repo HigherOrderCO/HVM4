@@ -1,2 +1,2 @@
 @main = %timer_start(0)
-//!#Time{1,0}
+//!#OK{#Time{1,0}}

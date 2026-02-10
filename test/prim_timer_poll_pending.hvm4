@@ -1,2 +1,4 @@
-@main = %timer_poll(%timer_start(1000))
-//!#Pend{#Time{1,1}}
+@main =
+  !!x = %timer_start(1000);
+  %timer_poll(#Time{1,0})
+//!#OK{#Pend{#Time{1,1}}}
