@@ -55,7 +55,7 @@ fn Term process_kill_go_proc(Term *args) {
 
 // %process_kill_go_io(proc)
 // -------------------------
-// #Pend{#Proc{id,seq+1}} | #Rdy{#Proc{id,seq+1},#Exit{n}|#Sig{n}} | #ERR{String}
+// #OK{#Pend{#Proc{id,seq+1}}|#Rdy{#Proc{id,seq+1},#Exit{n}|#Sig{n}}} | #ERR{String}
 fn Term prim_fn_process_kill_go_io(Term *args) {
   u32 id  = 0;
   u32 seq = 0;
@@ -76,7 +76,7 @@ fn Term prim_fn_process_kill_go_io(Term *args) {
   }
 
   if (finished) {
-    return process_new_rdy(id, seq + 1, signaled, code);
+    return process_new_ok(process_new_rdy(id, seq + 1, signaled, code));
   }
 
   if (kill(pid, SIGTERM) < 0 && errno != ESRCH) {
@@ -97,12 +97,12 @@ fn Term prim_fn_process_kill_go_io(Term *args) {
   }
 
   if (got == 0) {
-    return process_new_pend(id, seq + 1);
+    return process_new_ok(process_new_pend(id, seq + 1));
   }
 
   process_status_from_wait(status, &signaled, &code);
   process_set_finished(id, signaled, code);
-  return process_new_rdy(id, seq + 1, signaled, code);
+  return process_new_ok(process_new_rdy(id, seq + 1, signaled, code));
 }
 
 fn void prim_process_kill_init(void) {

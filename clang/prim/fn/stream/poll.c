@@ -55,7 +55,7 @@ fn Term stream_poll_go_strm(Term *args) {
 
 // %stream_poll_go_io(strm)
 // ------------------------
-// #Pend{#Strm{id,seq+1}} | #Rdy{#Strm{id,seq+1},#Byt{n}|#Eof} | #ERR{String}
+// #OK{#Pend{#Strm{id,seq+1}}|#Rdy{#Strm{id,seq+1},#Byt{n}|#Eof}} | #ERR{String}
 fn Term prim_fn_stream_poll_go_io(Term *args) {
   u32 id  = 0;
   u32 seq = 0;
@@ -89,12 +89,12 @@ fn Term prim_fn_stream_poll_go_io(Term *args) {
     return stream_new_err("stream_poll", STREAM_ERR_IO, strerror(errno));
   }
   if (read_ret == 0) {
-    return stream_new_pend(id, seq + 1);
+    return stream_new_ok(stream_new_pend(id, seq + 1));
   }
   if (eof) {
-    return stream_new_rdy_eof(id, seq + 1);
+    return stream_new_ok(stream_new_rdy_eof(id, seq + 1));
   }
-  return stream_new_rdy_byt(id, seq + 1, byt);
+  return stream_new_ok(stream_new_rdy_byt(id, seq + 1, byt));
 }
 
 fn void prim_stream_poll_init(void) {

@@ -55,7 +55,7 @@ fn Term process_spawn_go_cmd(Term *args) {
 
 // %process_spawn_go_io(cmd)
 // -------------------------
-// #Proc{id,0} | #ERR{String}
+// #OK{#Proc{id,0}} | #ERR{String}
 fn Term prim_fn_process_spawn_go_io(Term *args) {
   int MAX_CMD = 4096;
   char cmd[MAX_CMD];
@@ -93,7 +93,7 @@ fn Term prim_fn_process_spawn_go_io(Term *args) {
   PROCESS_SLOTS[id].code         = 0;
 
   pthread_mutex_unlock(&PROCESS_LOCK);
-  return process_new_proc(id, 0);
+  return process_new_ok(process_new_proc(id, 0));
 }
 
 fn void prim_process_spawn_init(void) {

@@ -35,6 +35,10 @@ fn Term stream_new_err(const char *prim, u32 code, const char *msg) {
   return term_new_ctr(NAM_ERR, 1, &txt);
 }
 
+fn Term stream_new_ok(Term val) {
+  return term_new_ctr(NAM_OK, 1, &val);
+}
+
 fn Term stream_new_handle(u32 id, u32 seq) {
   Term args[2] = {term_new_num(id), term_new_num(seq)};
   return term_new_ctr(STREAM_NAM_STRM, 2, args);

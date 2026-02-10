@@ -55,7 +55,7 @@ fn Term stream_stdin_open_go_seed(Term *args) {
 
 // %stream_stdin_open_go_io(seed)
 // -------------------------------
-// #Strm{id,0} | #ERR{String}
+// #OK{#Strm{id,0}} | #ERR{String}
 fn Term prim_fn_stream_stdin_open_go_io(Term *args) {
   (void)args;
 
@@ -74,7 +74,7 @@ fn Term prim_fn_stream_stdin_open_go_io(Term *args) {
   STREAM_SLOTS[id].fd           = 0;
 
   pthread_mutex_unlock(&STREAM_LOCK);
-  return stream_new_handle(id, 0);
+  return stream_new_ok(stream_new_handle(id, 0));
 }
 
 fn void prim_stream_stdin_open_init(void) {

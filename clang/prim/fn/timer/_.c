@@ -44,6 +44,10 @@ fn Term timer_new_err(const char *prim, u32 code, const char *msg) {
   return term_new_ctr(NAM_ERR, 1, &txt);
 }
 
+fn Term timer_new_ok(Term val) {
+  return term_new_ctr(NAM_OK, 1, &val);
+}
+
 fn Term timer_new_time(u32 id, u32 seq) {
   Term args[2] = {term_new_num(id), term_new_num(seq)};
   return term_new_ctr(TIMER_NAM_TIME, 2, args);

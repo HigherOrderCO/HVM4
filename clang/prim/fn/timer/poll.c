@@ -55,7 +55,7 @@ fn Term timer_poll_go_time(Term *args) {
 
 // %timer_poll_go_io(time)
 // -----------------------
-// #Pend{#Time{id,seq+1}} | #Rdy{#Time{id,seq+1}} | #ERR{String}
+// #OK{#Pend{#Time{id,seq+1}}|#Rdy{#Time{id,seq+1}}} | #ERR{String}
 fn Term prim_fn_timer_poll_go_io(Term *args) {
   u32 id  = 0;
   u32 seq = 0;
@@ -74,9 +74,9 @@ fn Term prim_fn_timer_poll_go_io(Term *args) {
 
   u64 now = timer_now_ns();
   if (now >= due_ns) {
-    return timer_new_rdy(id, seq + 1);
+    return timer_new_ok(timer_new_rdy(id, seq + 1));
   }
-  return timer_new_pend(id, seq + 1);
+  return timer_new_ok(timer_new_pend(id, seq + 1));
 }
 
 fn void prim_timer_poll_init(void) {

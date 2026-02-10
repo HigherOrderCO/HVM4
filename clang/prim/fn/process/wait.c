@@ -55,7 +55,7 @@ fn Term process_wait_go_proc(Term *args) {
 
 // %process_wait_go_io(proc)
 // -------------------------
-// #Rdy{#Proc{id,seq+1},#Exit{n}|#Sig{n}} | #ERR{String}
+// #OK{#Rdy{#Proc{id,seq+1},#Exit{n}|#Sig{n}}} | #ERR{String}
 fn Term prim_fn_process_wait_go_io(Term *args) {
   u32 id  = 0;
   u32 seq = 0;
@@ -76,7 +76,7 @@ fn Term prim_fn_process_wait_go_io(Term *args) {
   }
 
   if (finished) {
-    return process_new_rdy(id, seq + 1, signaled, code);
+    return process_new_ok(process_new_rdy(id, seq + 1, signaled, code));
   }
 
   int status = 0;
@@ -94,7 +94,7 @@ fn Term prim_fn_process_wait_go_io(Term *args) {
 
   process_status_from_wait(status, &signaled, &code);
   process_set_finished(id, signaled, code);
-  return process_new_rdy(id, seq + 1, signaled, code);
+  return process_new_ok(process_new_rdy(id, seq + 1, signaled, code));
 }
 
 fn void prim_process_wait_init(void) {

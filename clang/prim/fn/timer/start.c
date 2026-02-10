@@ -55,7 +55,7 @@ fn Term timer_start_go_ms(Term *args) {
 
 // %timer_start_go_io(ms)
 // ----------------------
-// #Time{id,0} | #ERR{String}
+// #OK{#Time{id,0}} | #ERR{String}
 fn Term prim_fn_timer_start_go_io(Term *args) {
   u32 ms = 0;
   if (!timer_parse_num(args[0], &ms)) {
@@ -81,7 +81,7 @@ fn Term prim_fn_timer_start_go_io(Term *args) {
   TIMER_SLOTS[id].due_ns       = due;
 
   pthread_mutex_unlock(&TIMER_LOCK);
-  return timer_new_time(id, 0);
+  return timer_new_ok(timer_new_time(id, 0));
 }
 
 fn void prim_timer_start_init(void) {

@@ -35,6 +35,10 @@ fn Term process_new_err(const char *prim, u32 code, const char *msg) {
   return term_new_ctr(NAM_ERR, 1, &txt);
 }
 
+fn Term process_new_ok(Term val) {
+  return term_new_ctr(NAM_OK, 1, &val);
+}
+
 fn Term process_new_proc(u32 id, u32 seq) {
   Term args[2] = {term_new_num(id), term_new_num(seq)};
   return term_new_ctr(PROCESS_NAM_PROC, 2, args);

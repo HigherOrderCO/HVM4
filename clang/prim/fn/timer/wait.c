@@ -55,7 +55,7 @@ fn Term timer_wait_go_time(Term *args) {
 
 // %timer_wait_go_io(time)
 // -----------------------
-// #Rdy{#Time{id,seq+1}} | #ERR{String}
+// #OK{#Rdy{#Time{id,seq+1}}} | #ERR{String}
 fn Term prim_fn_timer_wait_go_io(Term *args) {
   u32 id  = 0;
   u32 seq = 0;
@@ -77,7 +77,7 @@ fn Term prim_fn_timer_wait_go_io(Term *args) {
     timer_sleep_ns(due_ns - now);
   }
 
-  return timer_new_rdy(id, seq + 1);
+  return timer_new_ok(timer_new_rdy(id, seq + 1));
 }
 
 fn void prim_timer_wait_init(void) {
