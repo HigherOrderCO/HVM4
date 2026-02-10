@@ -2,6 +2,8 @@ fn void prim_init(void) {
   prim_log_init();
   prim_panic_init();
   prim_rand_init();
+  prim_uuid_init();
+  prim_uid_init();
   prim_process_init();
   prim_stream_init();
   prim_timer_init();
