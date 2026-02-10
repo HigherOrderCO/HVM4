@@ -83,11 +83,7 @@ fn Term write_file_go_path(Term *args) {
       }
       // %write_file_go_path(acc, x, data)
       // ---------------------------------- write-file-go-path-fallback
-      // %write_file_go_io(acc(x), data)
-      Term path = term_new_app(acc, list_wnf);
-      Term io_args[2] = {path, data};
-      Term io = term_new_pri(table_find("write_file_go_io", 16), 2, io_args);
-      return wnf(io);
+      // fallthrough default
     }
     default: {
       // %write_file_go_path(acc, x, data)
@@ -167,13 +163,7 @@ fn Term write_file_go_chr(Term *args) {
       }
       // %write_file_go_chr(acc, h, t, data)
       // ------------------------------------ write-file-go-chr-fallback
-      // %write_file_go_io(acc(#Con{h, t}), data)
-      Term con_args[2] = {head_wnf, tail};
-      Term con = term_new_ctr(NAM_CON, 2, con_args);
-      Term path = term_new_app(acc, con);
-      Term io_args[2] = {path, data};
-      Term io = term_new_pri(table_find("write_file_go_io", 16), 2, io_args);
-      return wnf(io);
+      // fallthrough default
     }
     default: {
       // %write_file_go_chr(acc, h, t, data)

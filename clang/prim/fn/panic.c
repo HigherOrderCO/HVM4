@@ -88,11 +88,7 @@ fn Term panic_go_msg(Term *args) {
       }
       // %panic_go_msg(acc, x)
       // ---------------------- panic-go-msg-fallback
-      // %panic_go_abort(acc(x))
-      Term str = term_new_app(acc, list_wnf);
-      Term args0[1] = {str};
-      Term t = term_new_pri(table_find("panic_go_abort", 14), 1, args0);
-      return wnf(t);
+      // fallthrough default
     }
     default: {
       // %panic_go_msg(acc, x)
@@ -167,13 +163,7 @@ fn Term panic_go_chr(Term *args) {
       }
       // %panic_go_chr(acc, h, t)
       // ------------------------- panic-go-chr-fallback
-      // %panic_go_abort(acc(#Con{h, t}))
-      Term con_args[2] = {head_wnf, tail};
-      Term con = term_new_ctr(NAM_CON, 2, con_args);
-      Term str = term_new_app(acc, con);
-      Term args0[1] = {str};
-      Term t = term_new_pri(table_find("panic_go_abort", 14), 1, args0);
-      return wnf(t);
+      // fallthrough default
     }
     default: {
       // %panic_go_chr(acc, h, t)

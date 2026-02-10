@@ -78,11 +78,7 @@ fn Term read_file_go_path(Term *args) {
       }
       // %read_file_go_path(acc, x)
       // ------------------------- read-file-go-path-fallback
-      // %read_file_go_io(acc(x))
-      Term path = term_new_app(acc, list_wnf);
-      Term io_args[1] = {path};
-      Term io = term_new_pri(table_find("read_file_go_io", 15), 1, io_args);
-      return wnf(io);
+      // fallthrough default
     }
     default: {
       // %read_file_go_path(acc, x)
@@ -157,13 +153,7 @@ fn Term read_file_go_chr(Term *args) {
       }
       // %read_file_go_chr(acc, h, t)
       // ---------------------------- read-file-go-chr-fallback
-      // %read_file_go_io(acc(#Con{h, t}))
-      Term con_args[2] = {head_wnf, tail};
-      Term con = term_new_ctr(NAM_CON, 2, con_args);
-      Term path = term_new_app(acc, con);
-      Term io_args[1] = {path};
-      Term io = term_new_pri(table_find("read_file_go_io", 15), 1, io_args);
-      return wnf(io);
+      // fallthrough default
     }
     default: {
       // %read_file_go_chr(acc, h, t)
