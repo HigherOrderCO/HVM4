@@ -4,6 +4,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <errno.h>
 #include <sched.h>
 #include <stdatomic.h>
 #include <pthread.h>
@@ -358,10 +359,18 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "print/name.c"
 #include "print/utf8.c"
 #include "prim/register.c"
+#include "prim/string.c"
 #include "prim/fn/log.c"
 #include "prim/fn/log_go_0.c"
 #include "prim/fn/log_go_1.c"
 #include "prim/fn/log_go_2.c"
+#include "prim/fn/panic.c"
+#include "prim/fn/rand.c"
+#include "prim/fn/read_bytes.c"
+#include "prim/fn/write_bytes.c"
+#include "prim/fn/read_file.c"
+#include "prim/fn/write_file.c"
+#include "prim/fn/timer/_.c"
 #include "prim/init.c"
 #include "print/term.c"
 

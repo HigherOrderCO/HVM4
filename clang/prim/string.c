@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+fn Term wnf(Term term);
+
 // Type helpers
 typedef enum HStrErrKind HStrErrKind;
 typedef struct HStrErr HStrErr;
