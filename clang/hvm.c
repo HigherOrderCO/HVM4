@@ -227,6 +227,15 @@ static u64 STEPS_ITRS_LIM = 0;
 static u64 STEPS_ROOT_LOC = 0;
 static str STEPS_LAST_ITR = NULL;
 
+// Program args (tokens after bare `--` in CLI).
+static int   PRIM_ARGC = 0;
+static char **PRIM_ARGV = NULL;
+
+fn void prim_set_argv(int argc, char **argv) {
+  PRIM_ARGC = argc;
+  PRIM_ARGV = argv;
+}
+
 // Nick Alphabet
 // =============
 
@@ -365,7 +374,10 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "prim/fn/log_go_1.c"
 #include "prim/fn/log_go_2.c"
 #include "prim/fn/panic.c"
+#include "prim/fn/argv.c"
 #include "prim/fn/env.c"
+#include "prim/fn/cwd.c"
+#include "prim/fn/chdir.c"
 #include "prim/fn/rand.c"
 #include "prim/fn/uuid.c"
 #include "prim/fn/uid.c"
