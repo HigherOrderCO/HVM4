@@ -52,3 +52,11 @@ Oper  ::= "+" | "-" | "*" | "/" | "%" | "&&" | "||"
   correct arity; `%log` prints a string and yields `#Nil`.
 - Surface sugar accepts `λ$x. body` as an unscoped lambda, equivalent to
   `! f = λ x ; f(body)` with fresh `f` (see `docs/hvm/syntax.md`).
+  correct arity; `%log` prints a string and yields `#Nil`; process primitives
+  (`%process_spawn`, `%process_poll`, `%process_wait`, `%process_kill`) use
+  `#Proc`, `#Pend`, `#Rdy`, `#Exit`, and `#Sig` under `#OK{...}`, or `#ERR{String}`;
+  timer primitives (`%timer_start`, `%timer_poll`, `%timer_wait`) use `#Time`,
+  `#Pend`, and `#Rdy` under `#OK{...}`, or `#ERR{String}`; stream primitives
+  (`%stream_stdin_open`, `%stream_file_open`, `%stream_poll`, `%stream_wait`,
+  `%stream_close`) use `#Strm`, `#Pend`, `#Rdy`, `#Byt`, and `#Eof` under
+  `#OK{...}`, or `#ERR{String}` (`%stream_close` returns `#OK{#Nil}`).

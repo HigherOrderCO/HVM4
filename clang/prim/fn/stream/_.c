@@ -1,5 +1,6 @@
 #include <poll.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #define STREAM_CAP (1u << 20)
 
@@ -10,6 +11,7 @@
 #define STREAM_ERR_IO         5
 
 #define STREAM_KIND_STDIN 1
+#define STREAM_KIND_FILE  2
 
 typedef struct {
   u32 expected_seq;
@@ -214,8 +216,10 @@ fn int stream_stdin_read(int fd, int timeout_ms, u8 *out_byt, u8 *out_eof) {
 }
 
 #include "stdin_open.c"
+#include "file_open.c"
 #include "poll.c"
 #include "wait.c"
+#include "close.c"
 
 fn void prim_stream_init(void) {
   STREAM_NAM_STRM = nick_from_str("Strm", 4);
@@ -225,6 +229,8 @@ fn void prim_stream_init(void) {
   STREAM_NAM_EOF  = nick_from_str("Eof", 3);
 
   prim_stream_stdin_open_init();
+  prim_stream_file_open_init();
   prim_stream_poll_init();
   prim_stream_wait_init();
+  prim_stream_close_init();
 }

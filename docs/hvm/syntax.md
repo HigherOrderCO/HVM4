@@ -231,6 +231,18 @@ can be written as `_ : d` or as a bare `d`.
 ### Primitives
 
 - `%log` prints a string (list of `#Chr`) to stdout and returns `#Nil`.
+- `%process_spawn(cmd)` returns `#OK{#Proc{id,seq}}` or `#ERR{String}`.
+- `%process_poll(proc)` returns `#OK{#Pend{proc2}|#Rdy{proc2,#Exit{n}|#Sig{n}}}` or `#ERR{String}`.
+- `%process_wait(proc)` returns `#OK{#Rdy{proc2,#Exit{n}|#Sig{n}}}` or `#ERR{String}`.
+- `%process_kill(proc)` returns `#OK{#Pend{proc2}|#Rdy{...}}` or `#ERR{String}`.
+- `%stream_stdin_open(seed)` returns `#OK{#Strm{id,0}}` or `#ERR{String}`.
+- `%stream_file_open(path)` returns `#OK{#Strm{id,0}}` or `#ERR{String}`.
+- `%stream_poll(strm)` returns `#OK{#Pend{strm2}|#Rdy{strm2,#Byt{n}|#Eof}}` or `#ERR{String}`.
+- `%stream_wait(strm)` returns `#OK{#Rdy{strm2,#Byt{n}|#Eof}}` or `#ERR{String}`.
+- `%stream_close(strm)` returns `#OK{#Nil}` or `#ERR{String}`.
+- `%timer_start(ms)` returns `#OK{#Time{id,seq}}` or `#ERR{String}`.
+- `%timer_poll(time)` returns `#OK{#Pend{time2}|#Rdy{time2}}` or `#ERR{String}`.
+- `%timer_wait(time)` returns `#OK{#Rdy{time2}}` or `#ERR{String}`.
 
 ## Priority wrapper and wildcard
 

@@ -1,0 +1,4 @@
+@main =
+  !!x = %stream_file_open("/dev/null");
+  %stream_wait(#Strm{1,0})
+//!#OK{#Rdy{#Strm{1,1},#Eof{}}}

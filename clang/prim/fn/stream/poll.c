@@ -78,8 +78,25 @@ fn Term prim_fn_stream_poll_go_io(Term *args) {
     return stream_new_err("stream_poll", STREAM_ERR_BAD_HANDLE, "stream is closed");
   }
 
-  if (kind != STREAM_KIND_STDIN) {
+  if (kind != STREAM_KIND_STDIN && kind != STREAM_KIND_FILE) {
     return stream_new_err("stream_poll", STREAM_ERR_BAD_HANDLE, "unsupported stream kind");
+  }
+
+  if (kind == STREAM_KIND_FILE) {
+    while (1) {
+      u8      byt = 0;
+      ssize_t rd  = read(fd, &byt, 1);
+      if (rd == 1) {
+        return stream_new_ok(stream_new_rdy_byt(id, seq + 1, byt));
+      }
+      if (rd == 0) {
+        return stream_new_ok(stream_new_rdy_eof(id, seq + 1));
+      }
+      if (errno == EINTR) {
+        continue;
+      }
+      return stream_new_err("stream_poll", STREAM_ERR_IO, strerror(errno));
+    }
   }
 
   u8  byt      = 0;
@@ -88,11 +105,11 @@ fn Term prim_fn_stream_poll_go_io(Term *args) {
   if (read_ret < 0) {
     return stream_new_err("stream_poll", STREAM_ERR_IO, strerror(errno));
   }
-  if (read_ret == 0) {
-    return stream_new_ok(stream_new_pend(id, seq + 1));
-  }
   if (eof) {
     return stream_new_ok(stream_new_rdy_eof(id, seq + 1));
+  }
+  if (read_ret == 0) {
+    return stream_new_ok(stream_new_pend(id, seq + 1));
   }
   return stream_new_ok(stream_new_rdy_byt(id, seq + 1, byt));
 }

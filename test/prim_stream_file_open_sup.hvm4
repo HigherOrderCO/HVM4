@@ -1,0 +1,2 @@
+@main = %stream_file_open(&L{"/dev/null", "/dev/null"})
+//!&L{#OK{#Strm{1,0}},#OK{#Strm{2,0}}}

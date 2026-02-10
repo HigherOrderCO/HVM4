@@ -1,0 +1,5 @@
+@main =
+  !!x = %stream_file_open("/dev/null");
+  !!y = %stream_close(#Strm{1,0});
+  %stream_poll(#Strm{1,1})
+//EXPECT_CONTAINS:E2 stream is closed
