@@ -1,0 +1,2 @@
+@main = %stream_poll(%stream_stdin_open(0))
+//EXPECT_CONTAINS:#Strm{1,1}

@@ -1,0 +1,5 @@
+@main =
+  !!&s = %stream_stdin_open(0);
+  !!x  = %stream_poll(s);
+  %stream_poll(s)
+//EXPECT_CONTAINS:E3 stale stream handle

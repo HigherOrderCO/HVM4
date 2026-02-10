@@ -1,0 +1,2 @@
+@main = %stream_stdin_open(&L{0,0})
+//!&L{#Strm{1,0},#Strm{2,0}}
