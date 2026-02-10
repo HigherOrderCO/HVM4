@@ -1,0 +1,2 @@
+@main = %process_poll(↑#Proc{1,0})
+//!↑#ERR{"ERROR(process_poll): E2 unknown process id"}

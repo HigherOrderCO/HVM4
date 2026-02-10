@@ -366,6 +366,7 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "prim/fn/log_go_2.c"
 #include "prim/fn/panic.c"
 #include "prim/fn/rand.c"
+#include "prim/fn/process/_.c"
 #include "prim/fn/read_bytes.c"
 #include "prim/fn/write_bytes.c"
 #include "prim/fn/read_file.c"

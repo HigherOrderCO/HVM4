@@ -1,0 +1,2 @@
+@main = %process_wait(&L{%process_spawn("exit 0"), %process_spawn("exit 0")})
+//!&L{#Rdy{#Proc{1,1},#Exit{0}},#Rdy{#Proc{2,1},#Exit{0}}}
