@@ -1,0 +1,10 @@
+@tag = λr.
+  λ{
+    #OK:  λx. "OK"
+    #ERR: λe. "ERR"
+    &{}
+  }(r)
+
+// prim_env_bad_shape_err
+@main = @tag(%env(1))
+//!"ERR"

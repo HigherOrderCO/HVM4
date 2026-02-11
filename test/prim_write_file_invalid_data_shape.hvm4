@@ -1,0 +1,11 @@
+@tag = λr.
+  λ{
+    #OK:  λx. "OK"
+    #ERR: λe. "ERR"
+    &{}
+  }(r)
+
+// prim_write_file_invalid_data_shape
+@path_009 = "/tmp/hvm4_io_009.txt"
+@main     = @tag(%write_file(@path_009, 1))
+//!"ERR"

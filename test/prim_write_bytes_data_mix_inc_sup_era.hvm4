@@ -1,0 +1,5 @@
+// prim_write_bytes_data_mix_inc_sup_era
+@path_017  = "/tmp/hvm4_io_017.bin"
+@bytes_017 = #CON{#BYT{33}, #NIL}
+@main      = %write_bytes(@path_017, &L{↑@bytes_017, &{}})
+//!&L{↑#OK{[]},&{}}

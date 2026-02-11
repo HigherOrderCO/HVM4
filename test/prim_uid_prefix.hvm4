@@ -1,0 +1,2 @@
+@main = %uid(0)
+//EXPECT_PREFIX:"uid-

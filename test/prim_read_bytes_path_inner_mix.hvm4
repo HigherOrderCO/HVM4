@@ -1,0 +1,13 @@
+@bind = λr. λk.
+  λ{
+    #OK:  λx.k(x)
+    #ERR: λe.#ERR{e}
+    &{}
+  }(r)
+
+// prim_read_bytes_path_inner_mix
+@path_020       = "/tmp/hvm4_io_020.bin"
+@bytes_020      = #CON{#BYT{9}, #NIL}
+@path_inner_020 = '/'<>&L{&{},↑"tmp/hvm4_io_020.bin"}
+@main           = @bind(%write_bytes(@path_020, @bytes_020), λx.%read_bytes(@path_inner_020))
+//!&L{&{},↑#OK{[#BYT{9}]}}

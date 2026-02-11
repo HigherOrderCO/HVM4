@@ -1,0 +1,10 @@
+@tag = λr.
+  λ{
+    #OK:  λx. "OK"
+    #ERR: λe. "ERR"
+    &{}
+  }(r)
+
+// prim_chdir_invalid_shape_err
+@main = @tag(%chdir(1))
+//!"ERR"

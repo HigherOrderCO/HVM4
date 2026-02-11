@@ -1,0 +1,11 @@
+@bind = λr. λk.
+  λ{
+    #OK:  λx.k(x)
+    #ERR: λe.#ERR{e}
+    &{}
+  }(r)
+
+// prim_read_file_path_mix_inc_sup_era
+@path_013 = "/tmp/hvm4_io_013.txt"
+@main     = @bind(%write_file(@path_013, "mix-rf"), λx.%read_file(↑&L{&{},@path_013}))
+//!↑&L{&{},#OK{"mix-rf"}}

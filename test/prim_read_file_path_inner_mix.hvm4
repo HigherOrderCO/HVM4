@@ -1,0 +1,12 @@
+@bind = λr. λk.
+  λ{
+    #OK:  λx.k(x)
+    #ERR: λe.#ERR{e}
+    &{}
+  }(r)
+
+// prim_read_file_path_inner_mix
+@path_018       = "/tmp/hvm4_io_018.txt"
+@path_inner_018 = '/'<>&L{&{},↑"tmp/hvm4_io_018.txt"}
+@main           = @bind(%write_file(@path_018, "inner-path"), λx.%read_file(@path_inner_018))
+//!&L{&{},↑#OK{"inner-path"}}

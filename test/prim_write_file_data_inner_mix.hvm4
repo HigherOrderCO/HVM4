@@ -1,0 +1,5 @@
+// prim_write_file_data_inner_mix
+@path_019 = "/tmp/hvm4_io_019.txt"
+@text_019 = 'a'<>&L{&{},↑'b'}<>'c'<>[]
+@main     = %write_file(@path_019, @text_019)
+//!&L{&{},↑#OK{[]}}

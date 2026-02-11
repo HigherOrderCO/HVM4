@@ -1,0 +1,4 @@
+// prim_write_file_data_mix_inc_sup_era
+@path_016 = "/tmp/hvm4_io_016.txt"
+@main     = %write_file(@path_016, &L{↑"mix-data", &{}})
+//!&L{↑#OK{[]},&{}}

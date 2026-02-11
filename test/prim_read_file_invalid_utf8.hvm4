@@ -1,0 +1,19 @@
+@bind = λr. λk.
+  λ{
+    #OK:  λx.k(x)
+    #ERR: λe.#ERR{e}
+    &{}
+  }(r)
+
+@tag = λr.
+  λ{
+    #OK:  λx. "OK"
+    #ERR: λe. "ERR"
+    &{}
+  }(r)
+
+// prim_read_file_invalid_utf8
+@path_005  = "/tmp/hvm4_io_005.bin"
+@bytes_005 = #CON{#BYT{195}, #NIL}
+@main      = @bind(%write_bytes(@path_005, @bytes_005), λx.@tag(%read_file(@path_005)))
+//!"ERR"

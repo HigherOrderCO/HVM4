@@ -1,0 +1,3 @@
+// prim_chdir_path_inner_mix
+@main = %chdir('/'<>&L{&{},↑"tmp"})
+//!&L{&{},↑#OK{[]}}

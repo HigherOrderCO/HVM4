@@ -1,0 +1,10 @@
+@tag = λr.
+  λ{
+    #OK:  λx. "OK"
+    #ERR: λe. "ERR"
+    &{}
+  }(r)
+
+// prim_env_missing_var_err
+@main = @tag(%env("__HVM4_SHOULD_NOT_EXIST__"))
+//!"ERR"

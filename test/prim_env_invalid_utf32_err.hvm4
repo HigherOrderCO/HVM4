@@ -1,0 +1,10 @@
+@tag = λr.
+  λ{
+    #OK:  λx. "OK"
+    #ERR: λe. "ERR"
+    &{}
+  }(r)
+
+// prim_env_invalid_utf32_err
+@main = @tag(%env(#CON{#CHR{55296}, #NIL}))
+//!"ERR"

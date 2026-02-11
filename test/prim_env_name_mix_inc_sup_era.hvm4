@@ -1,0 +1,10 @@
+@tag = λr.
+  λ{
+    #OK:  λx. "OK"
+    #ERR: λe. "ERR"
+    &{}
+  }(r)
+
+// prim_env_name_mix_inc_sup_era
+@main = @tag(%env(↑&L{&{}, "PATH"}))
+//!↑&L{&{},"OK"}

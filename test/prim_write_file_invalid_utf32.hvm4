@@ -1,0 +1,12 @@
+@tag = λr.
+  λ{
+    #OK:  λx. "OK"
+    #ERR: λe. "ERR"
+    &{}
+  }(r)
+
+// prim_write_file_invalid_utf32
+@path_012 = "/tmp/hvm4_io_012.txt"
+@text_012 = #CON{#CHR{55296}, #NIL}
+@main     = @tag(%write_file(@path_012, @text_012))
+//!"ERR"

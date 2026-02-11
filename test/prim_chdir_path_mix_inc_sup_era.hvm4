@@ -1,0 +1,3 @@
+// prim_chdir_path_mix_inc_sup_era
+@main = %chdir(↑&L{&{}, "."})
+//!↑&L{&{},#OK{[]}}

@@ -1,0 +1,10 @@
+@bind = λr. λk.
+  λ{
+    #OK:  λx.k(x)
+    #ERR: λe.#ERR{e}
+    &{}
+  }(r)
+
+// prim_cwd_after_chdir_tmp
+@main = @bind(%chdir("/tmp"), λx.%cwd(0))
+//!#OK{"/tmp"}

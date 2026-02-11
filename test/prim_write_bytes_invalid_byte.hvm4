@@ -1,0 +1,12 @@
+@tag = λr.
+  λ{
+    #OK:  λx. "OK"
+    #ERR: λe. "ERR"
+    &{}
+  }(r)
+
+// prim_write_bytes_invalid_byte
+@path_011  = "/tmp/hvm4_io_011.bin"
+@bytes_011 = #CON{#BYT{300}, #NIL}
+@main      = @tag(%write_bytes(@path_011, @bytes_011))
+//!"ERR"
