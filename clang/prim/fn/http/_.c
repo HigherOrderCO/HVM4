@@ -656,13 +656,13 @@ fn u8 http_parse_body_bytes_list(Term term, HttpReq *req, Term *err_out) {
     Term tail = heap_read(loc + 1);
 
     if (term_tag(head) != C01 || term_ext(head) != NAM_BYT) {
-      *err_out = http_new_err("http_request", HTTP_ERR_BAD_ARG, "invalid `body`; expected List<#Byt{n}>");
+      *err_out = http_new_err("http_request", HTTP_ERR_BAD_ARG, "invalid `body`; expected List<#BYT{n}>");
       return 0;
     }
 
     Term num = wnf(heap_read(term_val(head)));
     if (term_tag(num) != NUM) {
-      *err_out = http_new_err("http_request", HTTP_ERR_BAD_ARG, "invalid `body`; expected #Byt{NUM}");
+      *err_out = http_new_err("http_request", HTTP_ERR_BAD_ARG, "invalid `body`; expected #BYT{NUM}");
       return 0;
     }
 
@@ -681,7 +681,7 @@ fn u8 http_parse_body_bytes_list(Term term, HttpReq *req, Term *err_out) {
   }
 
   if (term_tag(cur) != C00 || term_ext(cur) != NAM_NIL) {
-    *err_out = http_new_err("http_request", HTTP_ERR_BAD_ARG, "invalid `body`; expected List<#Byt{n}>");
+    *err_out = http_new_err("http_request", HTTP_ERR_BAD_ARG, "invalid `body`; expected List<#BYT{n}>");
     return 0;
   }
 

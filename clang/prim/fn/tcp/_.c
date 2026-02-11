@@ -542,14 +542,14 @@ fn u8 tcp_decode_bytes(
 
     if (term_tag(head) != C01 || term_ext(head) != NAM_BYT) {
       free(buf);
-      *err_out = tcp_new_err("tcp_send", TCP_ERR_BAD_ARG, "invalid `bytes`; expected List<#Byt{n}>");
+      *err_out = tcp_new_err("tcp_send", TCP_ERR_BAD_ARG, "invalid `bytes`; expected List<#BYT{n}>");
       return 0;
     }
 
     Term num = wnf(heap_read(term_val(head)));
     if (term_tag(num) != NUM) {
       free(buf);
-      *err_out = tcp_new_err("tcp_send", TCP_ERR_BAD_ARG, "invalid `bytes`; expected #Byt{NUM}");
+      *err_out = tcp_new_err("tcp_send", TCP_ERR_BAD_ARG, "invalid `bytes`; expected #BYT{NUM}");
       return 0;
     }
 
@@ -595,7 +595,7 @@ fn u8 tcp_decode_bytes(
 
   if (term_tag(cur) != C00 || term_ext(cur) != NAM_NIL) {
     free(buf);
-    *err_out = tcp_new_err("tcp_send", TCP_ERR_BAD_ARG, "invalid `bytes`; expected List<#Byt{n}>");
+    *err_out = tcp_new_err("tcp_send", TCP_ERR_BAD_ARG, "invalid `bytes`; expected List<#BYT{n}>");
     return 0;
   }
 

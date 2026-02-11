@@ -237,8 +237,8 @@ can be written as `_ : d` or as a bare `d`.
 - `%process_kill(proc)` returns `#OK{#Pend{proc2}|#Rdy{...}}` or `#ERR{String}`.
 - `%stream_stdin_open(seed)` returns `#OK{#Strm{id,0}}` or `#ERR{String}`.
 - `%stream_file_open(path)` returns `#OK{#Strm{id,0}}` or `#ERR{String}`.
-- `%stream_poll(strm)` returns `#OK{#Pend{strm2}|#Rdy{strm2,#Byt{n}|#Eof}}` or `#ERR{String}`.
-- `%stream_wait(strm)` returns `#OK{#Rdy{strm2,#Byt{n}|#Eof}}` or `#ERR{String}`.
+- `%stream_poll(strm)` returns `#OK{#Pend{strm2}|#Rdy{strm2,#BYT{n}|#Eof}}` or `#ERR{String}`.
+- `%stream_wait(strm)` returns `#OK{#Rdy{strm2,#BYT{n}|#Eof}}` or `#ERR{String}`.
 - `%stream_close(strm)` returns `#OK{#Nil}` or `#ERR{String}`.
 - `%timer_start(ms)` returns `#OK{#Time{id,seq}}` or `#ERR{String}`.
 - `%timer_poll(time)` returns `#OK{#Pend{time2}|#Rdy{time2}}` or `#ERR{String}`.
@@ -247,7 +247,7 @@ can be written as `_ : d` or as a bare `d`.
 - `req` must be `#Req{method,url,headers,body,opts}`:
   - `method`: `#Get|#Post|#Put|#Patch|#Delete|#Head|#Options`
   - `headers`: `List<#Hdr{name,value}>`
-  - `body`: `#NoBody|#BodyText{String}|#BodyBytes{List<#Byt{n}>}`
+  - `body`: `#NoBody|#BodyText{String}|#BodyBytes{List<#BYT{n}>}`
   - `opts`: `#Opts{timeout_ms,connect_timeout_ms,follow_redirects,max_redirects,verify_tls,max_body_bytes}`
 - `%http_poll(http)` returns `#OK{#Pend{http2}|#Rdy{http2,#Resp{status,headers,body}|#Fail{reason,msg}|#Canceled}}` or `#ERR{String}`.
 - `%http_wait(http)` returns `#OK{#Rdy{http2,#Resp{status,headers,body}|#Fail{reason,msg}|#Canceled}}` or `#ERR{String}`.

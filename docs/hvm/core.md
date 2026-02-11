@@ -58,7 +58,7 @@ Oper  ::= "+" | "-" | "*" | "/" | "%" | "&&" | "||"
   timer primitives (`%timer_start`, `%timer_poll`, `%timer_wait`) use `#Time`,
   `#Pend`, and `#Rdy` under `#OK{...}`, or `#ERR{String}`; stream primitives
   (`%stream_stdin_open`, `%stream_file_open`, `%stream_poll`, `%stream_wait`,
-  `%stream_close`) use `#Strm`, `#Pend`, `#Rdy`, `#Byt`, and `#Eof` under
+  `%stream_close`) use `#Strm`, `#Pend`, `#Rdy`, `#BYT`, and `#Eof` under
   `#OK{...}`, or `#ERR{String}` (`%stream_close` returns `#OK{#Nil}`); http
   primitives (`%http_request`, `%http_poll`, `%http_wait`, `%http_cancel`) use
   `#Http`, `#Pend`, and `#Rdy` under `#OK{...}`, where `%http_request` expects

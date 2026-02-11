@@ -27,7 +27,6 @@ static pthread_mutex_t STREAM_LOCK = PTHREAD_MUTEX_INITIALIZER;
 static u32 STREAM_NAM_STRM = 0;
 static u32 STREAM_NAM_PEND = 0;
 static u32 STREAM_NAM_RDY  = 0;
-static u32 STREAM_NAM_BYT  = 0;
 static u32 STREAM_NAM_EOF  = 0;
 
 fn Term wnf(Term term);
@@ -53,7 +52,7 @@ fn Term stream_new_pend(u32 id, u32 seq) {
 
 fn Term stream_new_byt(u32 byt) {
   Term arg = term_new_num(byt);
-  return term_new_ctr(STREAM_NAM_BYT, 1, &arg);
+  return term_new_ctr(NAM_BYT, 1, &arg);
 }
 
 fn Term stream_new_eof(void) {
@@ -225,7 +224,6 @@ fn void prim_stream_init(void) {
   STREAM_NAM_STRM = nick_from_str("Strm", 4);
   STREAM_NAM_PEND = nick_from_str("Pend", 4);
   STREAM_NAM_RDY  = nick_from_str("Rdy", 3);
-  STREAM_NAM_BYT  = nick_from_str("Byt", 3);
   STREAM_NAM_EOF  = nick_from_str("Eof", 3);
 
   prim_stream_stdin_open_init();
