@@ -59,7 +59,15 @@ Oper  ::= "+" | "-" | "*" | "/" | "%" | "&&" | "||"
   `#Pend`, and `#Rdy` under `#OK{...}`, or `#ERR{String}`; stream primitives
   (`%stream_stdin_open`, `%stream_file_open`, `%stream_poll`, `%stream_wait`,
   `%stream_close`) use `#Strm`, `#Pend`, `#Rdy`, `#Byt`, and `#Eof` under
-  `#OK{...}`, or `#ERR{String}` (`%stream_close` returns `#OK{#Nil}`); https
-  primitives (`%https_get`, `%https_poll`, `%https_wait`, `%https_cancel`) use
-  `#Http`, `#Pend`, and `#Rdy` under `#OK{...}`, with outcomes `#Resp{status,#Nil,body}`,
-  `#Fail{code,msg}`, or `#Canceled`, or return `#ERR{String}`.
+  `#OK{...}`, or `#ERR{String}` (`%stream_close` returns `#OK{#Nil}`); http
+  primitives (`%http_request`, `%http_poll`, `%http_wait`, `%http_cancel`) use
+  `#Http`, `#Pend`, and `#Rdy` under `#OK{...}`, where `%http_request` expects
+  `#Req{method,url,headers,body,opts}` and outcomes are
+  `#Resp{status,headers,body}`, `#Fail{reason,msg}`, or `#Canceled`
+  (all under `#OK{...}`), or `#ERR{String}`; tcp primitives (`%tcp_connect`,
+  `%tcp_connect_poll`, `%tcp_connect_wait`, `%tcp_recv_poll`, `%tcp_recv_wait`,
+  `%tcp_send_poll`, `%tcp_send_wait`, `%tcp_close`) use `#Tcp`, `#Pend`, and
+  `#Rdy` under `#OK{...}`; `%tcp_connect` expects
+  `#TcpReq{host,port,#TcpOpts{connect_timeout_ms,read_timeout_ms,write_timeout_ms,nodelay,keepalive}}`
+  and outcomes are `#Conn`, `#Recv`, `#Sent`, `#Eof`, `#Closed`, or
+  `#Fail{reason,msg}` with reason in `#Timeout|#Dns|#Refused|#Unreachable|#Reset|#BrokenPipe|#Protocol|#NotConnected|#Sys{errno}`.

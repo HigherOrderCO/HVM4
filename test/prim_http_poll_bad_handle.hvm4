@@ -1,0 +1,2 @@
+@main = %http_poll(#Http{0,0})
+//EXPECT_CONTAINS:ERROR(http_poll): E2

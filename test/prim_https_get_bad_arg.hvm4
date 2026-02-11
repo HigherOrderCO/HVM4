@@ -1,2 +1,0 @@
-@main = %https_get(0)
-//EXPECT_CONTAINS:ERROR(https_get): invalid `url`

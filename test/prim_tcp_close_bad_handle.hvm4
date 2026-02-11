@@ -1,0 +1,2 @@
+@main = %tcp_close(#Tcp{0,0})
+//EXPECT_CONTAINS:ERROR(tcp_close): E2

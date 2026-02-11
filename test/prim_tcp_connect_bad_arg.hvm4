@@ -1,0 +1,2 @@
+@main = %tcp_connect(0)
+//EXPECT_CONTAINS:ERROR(tcp_connect): E1

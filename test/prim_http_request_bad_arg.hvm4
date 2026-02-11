@@ -1,0 +1,2 @@
+@main = %http_request(0)
+//EXPECT_CONTAINS:ERROR(http_request): E1

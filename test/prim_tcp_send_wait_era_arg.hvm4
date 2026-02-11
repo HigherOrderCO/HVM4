@@ -1,0 +1,2 @@
+@main = %tcp_send_wait(#Tcp{0,0}, &{})
+//!&{}
