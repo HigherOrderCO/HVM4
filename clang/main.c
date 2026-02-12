@@ -4,7 +4,8 @@
 // This file provides the command-line interface for the HVM4 runtime,
 // mirroring the structure of main.hs for the Haskell implementation.
 //
-// Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>]
+// Usage: ./main <file.hvm4> [-c] [-s] [-S] [-D] [-C[N]] [-T<N>]
+//   -c:  Use compiled-def mode (generate/load .so and dispatch saturated REFs)
 //   -s:  Show statistics (interactions, time, performance)
 //   -S:  Silent output (omit term printing)
 //   -D:  Step-by-step reduction (print intermediate terms)
@@ -25,6 +26,7 @@ typedef struct {
 } FfiLoad;
 
 typedef struct {
+  int   compiled;
   int   stats;
   int   silent;
   int   do_collapse;
@@ -39,6 +41,7 @@ typedef struct {
 
 fn CliOpts parse_opts(int argc, char **argv) {
   CliOpts opts = {
+    .compiled = 0,
     .stats = 0,
     .silent = 0,
     .do_collapse = 0,
@@ -53,6 +56,8 @@ fn CliOpts parse_opts(int argc, char **argv) {
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-s") == 0) {
       opts.stats = 1;
+    } else if (strcmp(argv[i], "-c") == 0) {
+      opts.compiled = 1;
     } else if (strcmp(argv[i], "-S") == 0) {
       opts.silent = 1;
     } else if (strncmp(argv[i], "-C", 2) == 0) {
@@ -134,7 +139,7 @@ int main(int argc, char **argv) {
   CliOpts opts = parse_opts(argc, argv);
 
   if (opts.file == NULL) {
-    fprintf(stderr, "Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>] [--ffi <path>] [--ffi-dir <path>]\n");
+    fprintf(stderr, "Usage: ./main <file.hvm4> [-c] [-s] [-S] [-D] [-C[N]] [-T<N>] [--ffi <path>] [--ffi-dir <path>]\n");
     return 1;
   }
 
@@ -203,6 +208,10 @@ int main(int argc, char **argv) {
   parse_def(&s);
   free(src);
 
+  if (opts.compiled) {
+    cdef_init(opts.file);
+  }
+
   // Get @main id
   u32 main_id = table_find("main", 4);
 
@@ -214,6 +223,9 @@ int main(int argc, char **argv) {
 
   // Evaluate
   struct timespec start, end;
+  if (opts.compiled) {
+    atomic_store_explicit(&CDEF_CALLS, 0, memory_order_relaxed);
+  }
   clock_gettime(CLOCK_MONOTONIC, &start);
 
   Term main_ref = term_new_ref(main_id);
@@ -234,10 +246,14 @@ int main(int argc, char **argv) {
 
   // Print stats if requested
   u64 total_itrs = wnf_itrs_total();
+  u64 cdef_calls = atomic_load_explicit(&CDEF_CALLS, memory_order_relaxed);
   if (opts.stats) {
     double dt  = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
     double ips = total_itrs / dt;
     printf("- Itrs: %llu interactions\n", total_itrs);
+    if (opts.compiled) {
+      printf("- CDef: %llu compiled-def calls\n", (unsigned long long)cdef_calls);
+    }
     if (thread_get_count() > 1) {
       for (u32 t = 0; t < thread_get_count(); t++) {
         printf("- Itrs[%u]: %llu interactions\n", t, wnf_itrs_thread(t));
@@ -253,6 +269,7 @@ int main(int argc, char **argv) {
   free(HEAP);
   free(BOOK);
   free(TABLE);
+  cdef_free();
   wnf_stack_free();
 
   return 0;

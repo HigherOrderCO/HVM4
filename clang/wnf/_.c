@@ -136,6 +136,46 @@ __attribute__((hot)) fn Term wnf(Term term) {
 
       case REF: {
         u32 nam = term_ext(next);
+
+        if (CDEF_FUNS != NULL && nam < CDEF_CAP && CDEF_FUNS[nam] != NULL) {
+          u32 arity      = CDEF_ARIS[nam];
+          u32 app_frames = 0;
+          for (u32 i = s_pos; i > base && app_frames < arity; i--) {
+            Term frame = stack[i - 1];
+            if (term_tag(frame) != APP) {
+              break;
+            }
+            app_frames++;
+          }
+
+          if (app_frames >= arity) {
+            Term args_stack[16];
+            Term *args = args_stack;
+            if (arity > 16) {
+              args = malloc(arity * sizeof(Term));
+              if (args == NULL) {
+                fprintf(stderr, "RUNTIME_ERROR: compiled-def args allocation failed\n");
+                exit(1);
+              }
+            }
+
+            for (u32 i = 0; i < arity; i++) {
+              Term app = stack[s_pos - 1 - i];
+              u32  loc = term_val(app);
+              args[i] = heap_read(loc + 1);
+            }
+
+            atomic_fetch_add_explicit(&CDEF_CALLS, 1, memory_order_relaxed);
+            s_pos -= arity;
+            // Keep local stack position here. If this call can re-enter wnf, sync WNF_S_POS before/after.
+            next = CDEF_FUNS[nam](args, arity);
+            if (args != args_stack) {
+              free(args);
+            }
+            goto enter;
+          }
+        }
+
         if (BOOK[nam] != 0) {
           u64 alo_loc = heap_alloc(1);
           heap_set(alo_loc, (u64)BOOK[nam]);

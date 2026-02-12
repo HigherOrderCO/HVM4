@@ -35,6 +35,14 @@ typedef struct {
 
 typedef u64 Term;
 
+#include "cdef/api_types.c" // Regenerate api_blob.h before build:
+#include "cdef/api_blob.h"  // `xxd -i clang/cdef/api_types.c > clang/cdef/api_blob.h`
+#define CDEF_API_BLOB     api_types_c
+#define CDEF_API_BLOB_LEN api_types_c_len
+
+typedef Hvm4DefFun      CDefFun;
+typedef Hvm4DefRegister CDefRegister;
+
 typedef struct {
   Term k0;
   Term k1;
@@ -169,9 +177,9 @@ typedef struct {
 // Capacities
 // ==========
 
-#define HEAP_CAP (1ULL << 32)
+#define HEAP_CAP (1ULL << 31)
 #define BOOK_CAP (1ULL << 24)
-#define WNF_CAP  (1ULL << 32)
+#define WNF_CAP  (1ULL << 31)
 #define MAX_THREADS 64
 
 // Thread Globals
@@ -196,6 +204,16 @@ static u64      HEAP_END[MAX_THREADS * HEAP_STRIDE] __attribute__((aligned(256))
 // ============
 
 static u32 *BOOK;
+
+// Compiled-Def Globals
+// ====================
+
+static const Hvm4DefApi CDEF_API;
+static CDefFun *CDEF_FUNS   = NULL;
+static u32     *CDEF_ARIS   = NULL;
+static u32      CDEF_CAP   = 0;
+static void    *CDEF_HANDLE = NULL;
+static _Atomic u64 CDEF_CALLS = 0;
 
 // WNF Globals
 // ===========
@@ -374,6 +392,21 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "ffi/api.c"
 #include "ffi/load.c"
 #include "ffi/load_dir.c"
+
+// Compiled Defs
+// =============
+
+#include "cdef/reset.c"
+#include "cdef/arity.c"
+#include "cdef/fill.c"
+#include "cdef/apply.c"
+#include "cdef/path.c"
+#include "cdef/gen.c"
+#include "cdef/build.c"
+#include "cdef/load.c"
+#include "cdef/free.c"
+#include "cdef/init.c"
+#include "cdef/api_table.c"
 
 // Parse
 // =====
