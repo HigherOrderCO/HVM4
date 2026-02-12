@@ -17,6 +17,13 @@
 // --- Kernel parameter struct (must match hvm4.metal Params) ---
 typedef struct {
   uint32_t frontier_count;
+  uint32_t book_count;
+  uint32_t book_heap_words;
+  uint32_t shard_base;
+  uint32_t shard_words;
+  uint32_t pad0;
+  uint32_t pad1;
+  uint32_t pad2;
 } MetalParams;
 
 // Lock array size: 1 bit per heap word, packed into uint32_t
@@ -34,8 +41,15 @@ static id<MTLBuffer>               g_params       = nil;  // Params struct
 static id<MTLBuffer>               g_locks        = nil;  // atomic_uint[] (bitpacked DP locks)
 static id<MTLBuffer>               g_itr_count    = nil;  // atomic_uint (interaction counter)
 static id<MTLBuffer>               g_alloc_buf    = nil;  // atomic_uint (global alloc cursor)
+static id<MTLBuffer>               g_book         = nil;  // uint[] name -> static term loc
+static id<MTLBuffer>               g_book_heap    = nil;  // ulong[] static book heap
 static uint32_t                    g_alloc_cursor = 0;
 static uint32_t                    g_lock_hwm     = 0;    // lock clear high-water mark
+static uint32_t                    g_book_count   = 0;
+static uint32_t                    g_book_heap_words = 0;
+static int                         g_last_error   = 0;
+
+#define SHARD_WORDS_PER_THREAD 8u
 
 // ============================================================================
 // Initialization
@@ -104,6 +118,8 @@ int metal_init(void) {
     NSUInteger countBytes    = sizeof(uint32_t);
     NSUInteger paramsBytes   = sizeof(MetalParams);
     NSUInteger lockBytes     = (NSUInteger)LOCK_WORDS * sizeof(uint32_t);
+    NSUInteger bookBytes     = sizeof(uint32_t);
+    NSUInteger bookHeapBytes = sizeof(uint64_t);
 
     g_heap       = [g_device newBufferWithLength:heapBytes
                     options:MTLResourceStorageModeShared];
@@ -121,16 +137,25 @@ int metal_init(void) {
                     options:MTLResourceStorageModeShared];
     g_alloc_buf  = [g_device newBufferWithLength:sizeof(uint32_t)
                     options:MTLResourceStorageModeShared];
+    g_book       = [g_device newBufferWithLength:bookBytes
+                    options:MTLResourceStorageModeShared];
+    g_book_heap  = [g_device newBufferWithLength:bookHeapBytes
+                    options:MTLResourceStorageModeShared];
 
     if (!g_heap || !g_frontier_a || !g_frontier_b ||
-        !g_next_count || !g_params || !g_locks || !g_itr_count || !g_alloc_buf) {
+        !g_next_count || !g_params || !g_locks || !g_itr_count || !g_alloc_buf ||
+        !g_book || !g_book_heap) {
       fprintf(stderr, "metal_init: buffer allocation failed\n");
       return -1;
     }
 
     memset([g_heap contents], 0, heapBytes);
     memset([g_locks contents], 0, lockBytes);
+    *(uint32_t *)[g_book contents] = 0;
+    *(uint64_t *)[g_book_heap contents] = 0;
     g_alloc_cursor = 0;
+    g_book_count = 0;
+    g_book_heap_words = 0;
 
     fprintf(stderr, "metal: initialized (heap=%uMB, locks=%uMB, max_frontier=%u)\n",
             (uint32_t)(heapBytes / (1024*1024)),
@@ -151,17 +176,54 @@ void metal_heap_upload(const uint64_t *src, uint32_t count) {
 }
 
 // ============================================================================
+// Book upload
+// ============================================================================
+
+int metal_book_upload(const uint32_t *book, uint32_t book_count,
+                      const uint64_t *book_heap, uint32_t book_heap_words) {
+  @autoreleasepool {
+    if (!g_device) {
+      fprintf(stderr, "metal_book_upload: runtime not initialized\n");
+      return -1;
+    }
+    if (!book || !book_heap || book_count == 0 || book_heap_words == 0) {
+      fprintf(stderr, "metal_book_upload: invalid inputs\n");
+      return -1;
+    }
+    NSUInteger bookBytes = (NSUInteger)book_count * sizeof(uint32_t);
+    NSUInteger heapBytes = (NSUInteger)book_heap_words * sizeof(uint64_t);
+
+    g_book = [g_device newBufferWithLength:bookBytes
+                                  options:MTLResourceStorageModeShared];
+    g_book_heap = [g_device newBufferWithLength:heapBytes
+                                        options:MTLResourceStorageModeShared];
+    if (!g_book || !g_book_heap) {
+      fprintf(stderr, "metal_book_upload: buffer allocation failed\n");
+      return -1;
+    }
+
+    memcpy([g_book contents], book, bookBytes);
+    memcpy([g_book_heap contents], book_heap, heapBytes);
+    g_book_count = book_count;
+    g_book_heap_words = book_heap_words;
+
+    fprintf(stderr, "metal: book uploaded (entries=%u, heap=%u words)\n",
+            book_count, book_heap_words);
+    return 0;
+  }
+}
+
+// ============================================================================
 // Normalize (BFS frontier loop)
 // ============================================================================
 
 uint64_t metal_normalize(uint32_t root_loc) {
   @autoreleasepool {
-    // --- Seed frontier with root ---
+    g_last_error = 0;
     uint32_t *fA = (uint32_t *)[g_frontier_a contents];
     fA[0] = root_loc;
     uint32_t frontier_count = 1;
 
-    // --- Clear interaction + bailout counters ---
     uint32_t *itr_ptr = (uint32_t *)[g_itr_count contents];
     itr_ptr[0] = 0;
     itr_ptr[1] = 0;
@@ -169,10 +231,8 @@ uint64_t metal_normalize(uint32_t root_loc) {
     id<MTLBuffer> cur_frontier  = g_frontier_a;
     id<MTLBuffer> next_frontier = g_frontier_b;
 
-    // --- Set global alloc cursor ---
     *(uint32_t *)[g_alloc_buf contents] = g_alloc_cursor;
 
-    // --- Clear stale locks from previous normalize call ---
     if (g_lock_hwm > 0) {
       uint32_t hwm_clear = (g_lock_hwm + 31) / 32;
       memset([g_locks contents], 0, (size_t)hwm_clear * sizeof(uint32_t));
@@ -188,26 +248,44 @@ uint64_t metal_normalize(uint32_t root_loc) {
     if (tg_size > 256) tg_size = 256;
 
     while (frontier_count > 0) {
-      // --- Check allocation space ---
       uint32_t cur_alloc = *(uint32_t *)[g_alloc_buf contents];
       if (cur_alloc >= METAL_HEAP_WORDS) {
         fprintf(stderr,
                 "metal_normalize: out of heap (pass %u, alloc %u/%u)\n",
                 pass, cur_alloc, METAL_HEAP_WORDS);
+        g_last_error = 1;
         break;
       }
 
-      // --- Set kernel parameters ---
+      uint32_t dispatch_count = frontier_count < METAL_MAX_DISPATCH
+                                ? frontier_count : METAL_MAX_DISPATCH;
+      if (SHARD_WORDS_PER_THREAD > 0) {
+        uint64_t reserve = (uint64_t)dispatch_count * (uint64_t)SHARD_WORDS_PER_THREAD;
+        if ((uint64_t)cur_alloc + reserve >= METAL_HEAP_WORDS) {
+          fprintf(stderr,
+                  "metal_normalize: out of heap reserving shards (pass %u, alloc %u + %llu)\n",
+                  pass, cur_alloc, (unsigned long long)reserve);
+          g_last_error = 1;
+          break;
+        }
+        *(uint32_t *)[g_alloc_buf contents] = cur_alloc + (uint32_t)reserve;
+      }
+
       MetalParams *p = (MetalParams *)[g_params contents];
       p->frontier_count = frontier_count;
+      p->book_count = g_book_count;
+      p->book_heap_words = g_book_heap_words;
+      p->shard_base = cur_alloc;
+      p->shard_words = SHARD_WORDS_PER_THREAD;
+      p->pad0 = 0;
+      p->pad1 = 0;
+      p->pad2 = 0;
 
-      // --- Reset next_count and clear locks (only up to alloc cursor) ---
       uint32_t *nc = (uint32_t *)[g_next_count contents];
       *nc = 0;
-      uint32_t lock_clear_words = (cur_alloc + 31) / 32;
+      uint32_t lock_clear_words = (*(uint32_t *)[g_alloc_buf contents] + 31) / 32;
       memset([g_locks contents], 0, (size_t)lock_clear_words * sizeof(uint32_t));
 
-      // --- Encode and dispatch ---
       id<MTLCommandBuffer> cmd = [g_queue commandBuffer];
       id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
 
@@ -220,11 +298,9 @@ uint64_t metal_normalize(uint32_t root_loc) {
       [enc setBuffer:g_locks       offset:0 atIndex:5];
       [enc setBuffer:g_itr_count   offset:0 atIndex:6];
       [enc setBuffer:g_alloc_buf   offset:0 atIndex:7];
+      [enc setBuffer:g_book        offset:0 atIndex:8];
+      [enc setBuffer:g_book_heap   offset:0 atIndex:9];
 
-      // Thread coarsening: cap dispatch at optimal thread count.
-      // Each thread processes ceil(frontier_count / dispatch_count) entries.
-      uint32_t dispatch_count = frontier_count < METAL_MAX_DISPATCH
-                                ? frontier_count : METAL_MAX_DISPATCH;
       MTLSize grid = MTLSizeMake(dispatch_count, 1, 1);
       MTLSize tg   = MTLSizeMake(
         dispatch_count < tg_size ? dispatch_count : tg_size, 1, 1);
@@ -241,10 +317,10 @@ uint64_t metal_normalize(uint32_t root_loc) {
         fprintf(stderr, "metal_normalize: GPU error pass %u: %s\n",
                 pass,
                 [[[cmd error] localizedDescription] UTF8String]);
+        g_last_error = 1;
         break;
       }
 
-      // --- Read back next_count and per-pass interactions ---
       uint32_t next = *nc;
       uint32_t cur_total_itrs = itr_ptr[0];
       uint32_t pass_itrs = cur_total_itrs - prev_itrs;
@@ -254,7 +330,6 @@ uint64_t metal_normalize(uint32_t root_loc) {
       fprintf(stderr, "  pass %u: frontier=%u, itrs=%u, time=%.2fms\n",
               pass, frontier_count, pass_itrs, pass_ns / 1e6);
 
-      // --- Swap frontiers ---
       id<MTLBuffer> tmp = cur_frontier;
       cur_frontier  = next_frontier;
       next_frontier = tmp;
@@ -265,6 +340,7 @@ uint64_t metal_normalize(uint32_t root_loc) {
         fprintf(stderr,
                 "metal_normalize: frontier overflow (%u > %u)\n",
                 frontier_count, METAL_MAX_FRONTIER);
+        g_last_error = 1;
         break;
       }
     }
@@ -289,6 +365,10 @@ uint64_t metal_heap_read(uint32_t loc) {
   return heap[loc];
 }
 
+int metal_last_error(void) {
+  return g_last_error;
+}
+
 uint64_t* metal_heap_ptr(void) {
   return (uint64_t *)[g_heap contents];
 }
@@ -311,6 +391,8 @@ void metal_shutdown(void) {
   g_locks = nil;
   g_itr_count = nil;
   g_alloc_buf = nil;
+  g_book = nil;
+  g_book_heap = nil;
   g_queue = nil;
   g_device = nil;
 }

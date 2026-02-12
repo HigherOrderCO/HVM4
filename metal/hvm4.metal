@@ -6,7 +6,7 @@ using namespace metal;
 // ============================================================================
 //
 // Implements WNF (Weak Normal Form) for HVM4's Interaction Calculus on Metal.
-// Only base terms: APP, LAM, SUP, DUP, VAR, DP0, DP1, ERA, NUM.
+// Base runtime terms plus REF/ALO support for static definition books.
 //
 // Architecture:
 // - Frontier-based BFS normalization (CPU orchestrates passes)
@@ -26,8 +26,14 @@ constant uchar TAG_DP0 = 3;
 constant uchar TAG_DP1 = 4;
 constant uchar TAG_SUP = 5;
 constant uchar TAG_DUP = 6;
+constant uchar TAG_ALO = 7;
+constant uchar TAG_REF = 8;
+constant uchar TAG_DRY = 10;
 constant uchar TAG_ERA = 11;
 constant uchar TAG_NUM = 30;
+constant uchar TAG_BJV = 42;
+constant uchar TAG_BJ0 = 43;
+constant uchar TAG_BJ1 = 44;
 
 // --- Bit layout: [63:SUB] [62-56:TAG 7b] [55-32:EXT 24b] [31-0:VAL 32b] ---
 constant ulong SUB_BIT = 1UL << 63;
@@ -36,9 +42,9 @@ constant ulong SUB_BIT = 1UL << 63;
 constant uint LAM_ERA_MASK = 0x800000;
 
 // --- Breadcrumb tags for pointer-reversal WNF (frames stored in heap) ---
-constant uchar TAG_BC_APP = 7;    // APP breadcrumb (fun slot)
-constant uchar TAG_BC_DP0 = 8;    // DP0 breadcrumb (shared expr slot)
-constant uchar TAG_BC_DP1 = 9;    // DP1 breadcrumb (shared expr slot)
+constant uchar TAG_BC_APP = 46;   // APP breadcrumb (fun slot)
+constant uchar TAG_BC_DP0 = 47;   // DP0 breadcrumb (shared expr slot)
+constant uchar TAG_BC_DP1 = 48;   // DP1 breadcrumb (shared expr slot)
 constant uint  BC_SENTINEL = 0xFFFFFFFF;
 
 // --- Limits ---
@@ -47,6 +53,13 @@ constant uint WNF_MAX_ITERS = ~0u; // max uint32 (~4.3G iters per WNF call)
 // --- Kernel parameters (set by host each pass) ---
 struct Params {
   uint frontier_count;
+  uint book_count;
+  uint book_heap_words;
+  uint shard_base;
+  uint shard_words;
+  uint _pad0;
+  uint _pad1;
+  uint _pad2;
 };
 
 // --- Clone result ---
@@ -81,6 +94,7 @@ inline uint term_arity(uchar tag) {
     case TAG_LAM: return 1;
     case TAG_SUP: return 2;
     case TAG_DUP: return 2;
+    case TAG_DRY: return 2;
     default:      return 0;
   }
 }
@@ -173,6 +187,7 @@ inline Term heap_subst_cop(device ulong* heap, uint side, uint loc,
 inline Term term_new_var(uint loc)           { return term_new(0, TAG_VAR, 0, loc); }
 inline Term term_new_era()                   { return term_new(0, TAG_ERA, 0, 0); }
 inline Term term_new_num(uint n)             { return term_new(0, TAG_NUM, 0, n); }
+inline Term term_new_ref(uint nam)           { return term_new(0, TAG_REF, nam, 0); }
 inline Term term_new_dp0(uint lab, uint loc) { return term_new(0, TAG_DP0, lab, loc); }
 inline Term term_new_dp1(uint lab, uint loc) { return term_new(0, TAG_DP1, lab, loc); }
 
@@ -200,12 +215,98 @@ inline Term term_new_sup(device ulong* heap, thread Alloc& alloc,
   return term_new_sup_at(heap, heap_alloc(alloc, 2), lab, tm0, tm1);
 }
 
+inline Term term_new_dup_at(device ulong* heap, uint loc,
+                            uint lab, Term val, Term bod) {
+  heap_set(heap, loc + 0, val);
+  heap_set(heap, loc + 1, bod);
+  return term_new(0, TAG_DUP, lab, loc);
+}
+
+inline Term term_new_dup(device ulong* heap, thread Alloc& alloc,
+                         uint lab, Term val, Term bod) {
+  return term_new_dup_at(heap, heap_alloc(alloc, 2), lab, val, bod);
+}
+
 // ============================================================================
 // Clone (creates DP0/DP1 pair pointing to same location)
 // ============================================================================
 
 inline Copy term_clone_at(uint loc, uint lab) {
   return Copy { term_new_dp0(lab, loc), term_new_dp1(lab, loc) };
+}
+
+// ============================================================================
+// REF/ALO helpers
+// ============================================================================
+
+inline uint book_lookup(uint nam, uint book_count, device uint* book) {
+  if (nam >= book_count) return 0;
+  return book[nam];
+}
+
+inline uint alo_bind_lookup(device ulong* heap, uint ls, uint len, uint lvl) {
+  if (lvl == 0 || lvl > len) return 0;
+  uint idx = len - lvl;
+  uint it = ls;
+  for (uint i = 0; i < idx && it != 0; i++) {
+    it = (uint)(heap_read(heap, it) & 0xFFFFFFFF);
+  }
+  return it != 0 ? (uint)(heap_read(heap, it) >> 32) : 0;
+}
+
+inline Term term_new_alo(device ulong* heap, thread Alloc& alloc,
+                         uint len, uint ls_loc, uint tm_loc) {
+  uint alo_loc = heap_alloc(alloc, 1);
+  heap_set(heap, alo_loc, ((ulong)ls_loc << 32) | tm_loc);
+  return term_new(0, TAG_ALO, len, alo_loc);
+}
+
+inline Term wnf_alo_var(device ulong* heap, uint ls, uint len, uint lvl, uchar tag) {
+  uint bind = alo_bind_lookup(heap, ls, len, lvl);
+  return bind ? term_new_var(bind) : term_new(0, tag, 0, lvl);
+}
+
+inline Term wnf_alo_cop(device ulong* heap, uint ls, uint len, uint lvl,
+                        uint lab, uint side, uchar tag) {
+  uint bind = alo_bind_lookup(heap, ls, len, lvl);
+  uchar out_tag = side == 0 ? TAG_DP0 : TAG_DP1;
+  return bind ? term_new(0, out_tag, lab, bind) : term_new(0, tag, lab, lvl);
+}
+
+inline Term wnf_alo_lam(device ulong* heap, thread Alloc& alloc,
+                        uint ls_loc, uint len, uint lam_ext, uint body_loc) {
+  uint lam_body = heap_alloc(alloc, 1);
+  uint bind_ent = heap_alloc(alloc, 1);
+  heap_set(heap, bind_ent, ((ulong)lam_body << 32) | ls_loc);
+  uint alo_loc = heap_alloc(alloc, 1);
+  heap_set(heap, alo_loc, ((ulong)bind_ent << 32) | body_loc);
+  heap_set(heap, lam_body, term_new(0, TAG_ALO, len + 1, alo_loc));
+  return term_new(0, TAG_LAM, lam_ext, lam_body);
+}
+
+inline Term wnf_alo_dup(device ulong* heap, thread Alloc& alloc,
+                        uint ls_loc, uint len, uint book_loc, uint lab) {
+  uint dup_term_val = heap_alloc(alloc, 1);
+  uint bind_ent = heap_alloc(alloc, 1);
+  heap_set(heap, bind_ent, ((ulong)dup_term_val << 32) | ls_loc);
+  Term alo0 = term_new_alo(heap, alloc, len, ls_loc, book_loc + 0);
+  heap_set(heap, dup_term_val, alo0);
+  Term alo1 = term_new_alo(heap, alloc, len, ls_loc, book_loc + 0);
+  Term alo2 = term_new_alo(heap, alloc, len + 1, bind_ent, book_loc + 1);
+  return term_new_dup(heap, alloc, lab, alo1, alo2);
+}
+
+inline Term wnf_alo_nod(device ulong* heap, thread Alloc& alloc,
+                        uint ls_loc, uint len, uint loc, uchar tag, uint ext, uint ari) {
+  Term a0 = 0;
+  Term a1 = 0;
+  if (ari > 0) a0 = term_new_alo(heap, alloc, len, ls_loc, loc + 0);
+  if (ari > 1) a1 = term_new_alo(heap, alloc, len, ls_loc, loc + 1);
+  if (tag == TAG_APP) return term_new_app(heap, alloc, a0, a1);
+  if (tag == TAG_SUP) return term_new_sup(heap, alloc, ext, a0, a1);
+  if (tag == TAG_DUP) return term_new_dup(heap, alloc, ext, a0, a1);
+  if (tag == TAG_DRY) return term_new_app(heap, alloc, a0, a1);
+  return term_new(0, tag, ext, 0);
 }
 
 // ============================================================================
@@ -319,6 +420,8 @@ inline Term wnf_dup_nod(device ulong* heap, uint loc, uint side, Term term) {
 // (saved_prev) so we can correctly interleave APP and DP unwinds in LIFO order.
 
 Term wnf(device ulong* heap, device atomic_uint* locks,
+         device uint* book, device ulong* book_heap, uint book_count,
+         uint book_heap_words,
          Term term, thread Alloc& alloc, thread uint& itrs, thread uint& bailouts) {
   // Unified breadcrumb chain: both APP and DP frames stored in heap.
   // Zero thread-local stack → maximum GPU occupancy.
@@ -388,6 +491,62 @@ Term wnf(device ulong* heap, device atomic_uint* locks,
       if (tag == TAG_DUP) {
         uint loc = term_val(cur);
         cur = heap_read(heap, loc + 1);
+        continue;
+      }
+
+      if (tag == TAG_REF) {
+        uint nam = term_ext(cur);
+        uint book_loc = book_lookup(nam, book_count, book);
+        if (book_loc != 0) {
+          uint alo_loc = heap_alloc(alloc, 1);
+          heap_set(heap, alo_loc, (ulong)book_loc);
+          cur = term_new(0, TAG_ALO, 0, alo_loc);
+          continue;
+        }
+        entering = false;
+        continue;
+      }
+
+      if (tag == TAG_ALO) {
+        uint alo_loc = term_val(cur);
+        ulong pair = heap_read(heap, alo_loc);
+        uint tm_loc = (uint)(pair & 0xFFFFFFFF);
+        uint ls_loc = (uint)(pair >> 32);
+        uint len = term_ext(cur);
+        if (tm_loc >= book_heap_words) {
+          entering = false;
+          continue;
+        }
+        Term book_tm = book_heap[tm_loc];
+        uchar b_tag = term_tag(book_tm);
+
+        if (b_tag == TAG_VAR || b_tag == TAG_BJV) {
+          cur = wnf_alo_var(heap, ls_loc, len, term_val(book_tm), b_tag);
+          continue;
+        }
+        if (b_tag == TAG_DP0 || b_tag == TAG_DP1 || b_tag == TAG_BJ0 || b_tag == TAG_BJ1) {
+          uint side = (b_tag == TAG_DP0 || b_tag == TAG_BJ0) ? 0 : 1;
+          cur = wnf_alo_cop(heap, ls_loc, len, term_val(book_tm), term_ext(book_tm), side, b_tag);
+          continue;
+        }
+        if (b_tag == TAG_LAM) {
+          cur = wnf_alo_lam(heap, alloc, ls_loc, len, term_ext(book_tm), term_val(book_tm));
+          continue;
+        }
+        if (b_tag == TAG_DUP) {
+          cur = wnf_alo_dup(heap, alloc, ls_loc, len, term_val(book_tm), term_ext(book_tm));
+          continue;
+        }
+        if (b_tag == TAG_APP || b_tag == TAG_SUP || b_tag == TAG_DRY) {
+          cur = wnf_alo_nod(heap, alloc, ls_loc, len, term_val(book_tm), b_tag,
+                            term_ext(book_tm), term_arity(b_tag));
+          continue;
+        }
+        if (b_tag == TAG_NUM || b_tag == TAG_ERA || b_tag == TAG_REF) {
+          cur = book_tm;
+          continue;
+        }
+        entering = false;
         continue;
       }
 
@@ -502,6 +661,8 @@ Term wnf(device ulong* heap, device atomic_uint* locks,
 // ============================================================================
 
 inline Term wnf_at(device ulong* heap, device atomic_uint* locks,
+                   device uint* book, device ulong* book_heap, uint book_count,
+                   uint book_heap_words,
                    uint loc, thread Alloc& alloc, thread uint& itrs, thread uint& bailouts) {
   Term cur = heap_read(heap, loc);
   uchar tag = term_tag(cur);
@@ -511,7 +672,9 @@ inline Term wnf_at(device ulong* heap, device atomic_uint* locks,
     return cur;
   }
 
-  Term res = wnf(heap, locks, cur, alloc, itrs, bailouts);
+  Term res = wnf(heap, locks, book, book_heap, book_count,
+                 book_heap_words,
+                 cur, alloc, itrs, bailouts);
   if (res != cur) {
     heap_set(heap, loc, res);
   }
@@ -535,31 +698,46 @@ kernel void normalize_pass(
   device atomic_uint*   locks          [[buffer(5)]],
   device atomic_uint*   itr_count      [[buffer(6)]],
   device atomic_uint*   alloc_cursor   [[buffer(7)]],
+  device uint*          book           [[buffer(8)]],
+  device ulong*         book_heap      [[buffer(9)]],
   uint                  tid            [[thread_position_in_grid]],
   uint                  grid_size      [[threads_per_grid]])
 {
   uint frontier_count = params.frontier_count;
+  if (frontier_count == 0 || frontier_count > (1u << 23)) {
+    return;
+  }
+  uint book_count = params.book_count;
+  uint book_heap_words = params.book_heap_words;
 
   uint local_itrs = 0;
   uint local_bailouts = 0;
 
-  // --- Per-thread slab allocator (persists across coarsened iterations) ---
-  Alloc alloc = { 0, 0, alloc_cursor };
+  // --- Per-thread shard allocator ---
+  // Each dispatched thread gets an equal pre-reserved local chunk:
+  // [shard_base + tid*shard_words, shard_base + (tid+1)*shard_words).
+  // If exhausted, heap_alloc falls back to the global atomic cursor.
+  uint shard_pos = params.shard_base + tid * params.shard_words;
+  Alloc alloc = params.shard_words == 0
+    ? Alloc{ 0, 0, alloc_cursor }
+    : Alloc{ shard_pos, shard_pos + params.shard_words, alloc_cursor };
 
   // --- Thread coarsening: each thread processes multiple frontier entries ---
-  // The host caps grid_size at the GPU's optimal thread count (~2048).
-  // Threads stride over the frontier so all entries are covered.
   for (uint fi = tid; fi < frontier_count; fi += grid_size) {
 
     // --- WNF at frontier location ---
     uint loc    = frontier[fi];
     uint prev_bailouts = local_bailouts;
-    Term result = wnf_at(heap, locks, loc, alloc, local_itrs, local_bailouts);
+    Term result = wnf_at(heap, locks, book, book_heap, book_count,
+                         book_heap_words,
+                         loc, alloc, local_itrs, local_bailouts);
 
     // --- If result is a DP, retry (another thread may have resolved it) ---
     uchar tag = term_tag(result);
     if (tag == TAG_DP0 || tag == TAG_DP1) {
-      Term retry = wnf(heap, locks, result, alloc, local_itrs, local_bailouts);
+      Term retry = wnf(heap, locks, book, book_heap, book_count,
+                       book_heap_words,
+                       result, alloc, local_itrs, local_bailouts);
       if (retry != result) {
         result = retry;
         heap_set(heap, loc, result);
@@ -578,9 +756,6 @@ kernel void normalize_pass(
       slots[0] = loc;
       need = 1;
     } else if (tag == TAG_DP0 || tag == TAG_DP1) {
-      // Stuck DP: treat as normalized (no children to enqueue).
-      // The expression is in WHNF but not LAM/SUP/ERA/NUM, so the DUP
-      // can't interact. Re-enqueuing would just relocate forever.
       need = 0;
     } else {
       uint ari = term_arity(tag);

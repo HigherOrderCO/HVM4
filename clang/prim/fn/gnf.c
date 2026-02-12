@@ -7,6 +7,7 @@
 static int     gnf_metal_ready = 0;
 static u64    *gnf_mheap       = NULL;
 static u32     gnf_mcursor     = 1; // Metal heap alloc cursor (0 is reserved)
+static int     gnf_book_ready  = 0;
 
 fn double gnf_time_diff_sec(struct timespec a, struct timespec b) {
   return (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) / 1e9;
@@ -98,6 +99,87 @@ fn void gnf_map_set(GnfMap *m, u32 key, u32 val) {
     m->used_pages[m->used_len++] = page;
   }
   pg[slot] = val;
+}
+
+// ============================================================================
+// Static book upload (for REF/ALO resolution on GPU)
+// ============================================================================
+
+fn u32 gnf_book_max_name(void) {
+  for (u32 i = BOOK_CAP; i > 0; i--) {
+    if (BOOK[i - 1] != 0) return i - 1;
+  }
+  return 0;
+}
+
+fn void gnf_book_mark_loc(GnfMap *seen, u32 loc) {
+  gnf_map_set(seen, loc, 1);
+}
+
+fn int gnf_book_loc_seen(GnfMap *seen, u32 loc) {
+  return gnf_map_get(seen, loc) != GNF_MAP_EMPTY;
+}
+
+fn u32 gnf_book_max_loc_rec(u32 loc, GnfMap *seen) {
+  if (loc == 0 || gnf_book_loc_seen(seen, loc)) {
+    return 0;
+  }
+  gnf_book_mark_loc(seen, loc);
+
+  Term t = heap_read(loc);
+  u8  tag = term_tag(t);
+  u32 val = term_val(t);
+  u32 ext = term_ext(t);
+  u32 max_loc = loc;
+  u32 ari = term_arity(t);
+
+  if (ari > 0 && val + ari - 1 > max_loc) {
+    max_loc = val + ari - 1;
+  }
+
+  if (tag == LAM) {
+    u32 m = gnf_book_max_loc_rec(val, seen);
+    if (m > max_loc) max_loc = m;
+  } else if (ari > 0) {
+    for (u32 i = 0; i < ari; i++) {
+      u32 m = gnf_book_max_loc_rec(val + i, seen);
+      if (m > max_loc) max_loc = m;
+    }
+  }
+
+  if (tag == REF && BOOK[ext] != 0) {
+    u32 m = gnf_book_max_loc_rec(BOOK[ext], seen);
+    if (m > max_loc) max_loc = m;
+  }
+
+  return max_loc;
+}
+
+fn void gnf_upload_book_once(void) {
+  if (gnf_book_ready) return;
+
+  u32 max_name = gnf_book_max_name();
+  u32 book_count = max_name + 1;
+  if (book_count == 0) book_count = 1;
+
+  GnfMap seen;
+  gnf_map_init(&seen);
+  u32 max_loc = 0;
+  for (u32 i = 0; i < book_count; i++) {
+    if (BOOK[i] == 0) continue;
+    u32 m = gnf_book_max_loc_rec(BOOK[i], &seen);
+    if (m > max_loc) max_loc = m;
+  }
+  gnf_map_free(&seen);
+
+  u32 heap_words = max_loc + 1;
+  if (heap_words == 0) heap_words = 1;
+
+  if (metal_book_upload(BOOK, book_count, HEAP, heap_words) != 0) {
+    fprintf(stderr, "gnf: failed to upload definition book to Metal\n");
+    exit(1);
+  }
+  gnf_book_ready = 1;
 }
 
 // ============================================================================
@@ -201,6 +283,43 @@ fn Term gnf_instantiate(u32 book_loc, u32 *bind_stack, u32 bind_len, u64 *mheap)
 // gnf_copy_to_metal: deep-copy a dynamic (linked) term to Metal heap
 // ============================================================================
 
+fn Term gnf_copy_to_metal(Term t, GnfMap *remap, u64 *mheap);
+
+fn u32 gnf_copy_bind_list_to_metal(u32 ls_loc, GnfMap *remap, u64 *mheap) {
+  if (ls_loc == 0) return 0;
+  u32 existing = gnf_map_get(remap, ls_loc);
+  if (existing != GNF_MAP_EMPTY) return existing;
+
+  u32 m_ls = gnf_metal_alloc(1);
+  gnf_map_set(remap, ls_loc, m_ls);
+
+  u64 entry = HEAP[ls_loc];
+  u32 bind_loc = (u32)(entry >> 32);
+  u32 next_loc = (u32)(entry & 0xFFFFFFFF);
+
+  u32 m_bind = 0;
+  if (bind_loc != 0) {
+    u32 bind_existing = gnf_map_get(remap, bind_loc);
+    if (bind_existing != GNF_MAP_EMPTY) {
+      m_bind = bind_existing;
+    } else {
+      m_bind = gnf_metal_alloc(1);
+      gnf_map_set(remap, bind_loc, m_bind);
+      Term cell = HEAP[bind_loc];
+      if (term_sub_get(cell)) {
+        Term copied = gnf_copy_to_metal(term_sub_set(cell, 0), remap, mheap);
+        mheap[m_bind] = term_sub_set(copied, 1);
+      } else {
+        mheap[m_bind] = gnf_copy_to_metal(cell, remap, mheap);
+      }
+    }
+  }
+
+  u32 m_next = gnf_copy_bind_list_to_metal(next_loc, remap, mheap);
+  mheap[m_ls] = ((u64)m_bind << 32) | m_next;
+  return m_ls;
+}
+
 fn Term gnf_copy_to_metal(Term t, GnfMap *remap, u64 *mheap) {
   u8  tag = term_tag(t);
   u32 ext = term_ext(t);
@@ -223,66 +342,27 @@ fn Term gnf_copy_to_metal(Term t, GnfMap *remap, u64 *mheap) {
     return term_new(0, tag, ext, mloc);
   }
 
-  // Expand REF: look up book definition, instantiate directly
+  // Keep REF as-is. GPU resolves name -> book location.
   if (tag == REF) {
-    u32 nam = ext;
-    if (BOOK[nam] == 0) {
-      fprintf(stderr, "gnf: undefined REF @%u\n", nam);
-      exit(1);
-    }
-    u32 bind_stack[GNF_BIND_CAP];
-    return gnf_instantiate(BOOK[nam], bind_stack, 0, mheap);
+    return term_new_ref(ext);
   }
 
-  // Expand ALO: resolve the substitution chain, instantiate book term
+  // Keep ALO as-is. Copy ALO node + bind list; book term location stays static.
   if (tag == ALO) {
     u32 alo_loc = val;
-    u64 pair    = heap_read(alo_loc);
+    u32 existing = gnf_map_get(remap, alo_loc);
+    if (existing != GNF_MAP_EMPTY) {
+      return term_new(0, ALO, ext, existing);
+    }
+    u32 m_alo = gnf_metal_alloc(1);
+    gnf_map_set(remap, alo_loc, m_alo);
+
+    u64 pair    = HEAP[alo_loc];
     u32 tm_loc  = (u32)(pair & 0xFFFFFFFF);
     u32 ls_loc  = (u32)(pair >> 32);
-    u32 len     = ext;
-
-    // Build bind stack from the linked list of bindings.
-    // The list is newest→oldest (innermost first). We reverse it into
-    // oldest-first ordering so gnf_instantiate resolves BJV(lvl) via
-    // bind_stack[lvl - 1].
-    u32 bind_stack[GNF_BIND_CAP];
-    u32 bind_count = 0;
-
-    // First pass: collect C heap bind_locs in linked-list order (newest first)
-    u32 temp_locs[GNF_BIND_CAP];
-    u32 it = ls_loc;
-    while (it != 0 && bind_count < len) {
-      u64 entry = heap_read(it);
-      u32 bind_loc = (u32)(entry >> 32);
-      u32 next     = (u32)(entry & 0xFFFFFFFF);
-      temp_locs[bind_count] = bind_loc;
-      bind_count++;
-      it = next;
-    }
-
-    // Second pass: reverse and remap to Metal heap
-    for (u32 i = 0; i < bind_count; i++) {
-      u32 bind_loc = temp_locs[bind_count - 1 - i];
-      u32 existing = gnf_map_get(remap, bind_loc);
-      if (existing != GNF_MAP_EMPTY) {
-        bind_stack[i] = existing;
-      } else {
-        u32 mloc = gnf_metal_alloc(1);
-        gnf_map_set(remap, bind_loc, mloc);
-        Term cell = HEAP[bind_loc];
-        if (term_sub_get(cell)) {
-          // Substituted binding: copy the value with SUB bit so GPU follows it
-          Term copied = gnf_copy_to_metal(term_sub_set(cell, 0), remap, mheap);
-          mheap[mloc] = term_sub_set(copied, 1);
-        } else {
-          mheap[mloc] = gnf_copy_to_metal(cell, remap, mheap);
-        }
-        bind_stack[i] = mloc;
-      }
-    }
-
-    return gnf_instantiate(tm_loc, bind_stack, bind_count, mheap);
+    u32 m_ls = gnf_copy_bind_list_to_metal(ls_loc, remap, mheap);
+    mheap[m_alo] = ((u64)m_ls << 32) | tm_loc;
+    return term_new(0, ALO, ext, m_alo);
   }
 
   // Unsupported tags
@@ -403,6 +483,10 @@ fn Term gnf_copy_from_metal(Term t, GnfMap *remap, u64 *mheap, u64 *copied_words
     }
 
     // ERA, NUM: immediate.
+    if (tag == REF) {
+      out = term_new_ref(ext);
+      goto produced;
+    }
     if (tag == ERA) {
       out = term_new(0, ERA, 0, 0);
       goto produced;
@@ -422,6 +506,9 @@ fn Term gnf_copy_from_metal(Term t, GnfMap *remap, u64 *mheap, u64 *copied_words
 
     u32 ari = TERM_ARITY[tag];
     if (ari == 0) {
+      if (tag == ALO) {
+        fprintf(stderr, "gnf: copy-back of residual ALO is not supported yet\n");
+      }
       fprintf(stderr, "gnf: unsupported tag %u in metal term\n", tag);
       free(stk);
       exit(1);
@@ -489,6 +576,7 @@ fn Term prim_fn_gnf(Term *args) {
     gnf_mcursor = 1; // reserve slot 0
     gnf_metal_ready = 1;
   }
+  gnf_upload_book_once();
 
   // 2. WNF the argument
   Term term = wnf(args[0]);
@@ -509,6 +597,10 @@ fn Term prim_fn_gnf(Term *args) {
   u64 itrs = metal_normalize(mroot_loc);
   clock_gettime(CLOCK_MONOTONIC, &gpu_t1);
   ITRS += itrs;
+  if (metal_last_error()) {
+    fprintf(stderr, "gnf: metal normalize failed (runtime error)\n");
+    return term;
+  }
 
   // 5. Copy result back to C heap
   clock_gettime(CLOCK_MONOTONIC, &copy_t0);

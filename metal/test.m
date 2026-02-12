@@ -26,8 +26,11 @@ typedef uint64_t Term;
 #define TAG_DP1 4
 #define TAG_SUP 5
 #define TAG_DUP 6
+#define TAG_ALO 7
+#define TAG_REF 8
 #define TAG_ERA 11
 #define TAG_NUM 30
+#define TAG_BJV 42
 
 #define LAM_ERA_MASK 0x800000
 
@@ -64,6 +67,7 @@ static void heap_set(uint32_t loc, Term val) { HEAP[loc] = val; }
 static Term new_num(uint32_t n)    { return mk(0, TAG_NUM, 0, n); }
 static Term new_era(void)          { return mk(0, TAG_ERA, 0, 0); }
 static Term new_var(uint32_t loc)  { return mk(0, TAG_VAR, 0, loc); }
+static Term new_ref(uint32_t nam)  { return mk(0, TAG_REF, nam, 0); }
 
 static Term new_lam(uint32_t ext, Term body) {
   uint32_t loc = alloc(1);
@@ -87,6 +91,11 @@ static Term new_sup(uint32_t lab, Term a, Term b) {
 
 static Term new_dp0(uint32_t lab, uint32_t loc) { return mk(0, TAG_DP0, lab, loc); }
 static Term new_dp1(uint32_t lab, uint32_t loc) { return mk(0, TAG_DP1, lab, loc); }
+static Term new_alo(uint32_t len, uint32_t ls_loc, uint32_t tm_loc) {
+  uint32_t alo_loc = alloc(1);
+  heap_set(alo_loc, ((uint64_t)ls_loc << 32) | tm_loc);
+  return mk(0, TAG_ALO, len, alo_loc);
+}
 
 // Build λx.x (identity)
 static Term new_id(void) {
@@ -105,6 +114,8 @@ static const char* tag_name(uint8_t tag) {
     case TAG_DP1: return "DP1";
     case TAG_SUP: return "SUP";
     case TAG_DUP: return "DUP";
+    case TAG_ALO: return "ALO";
+    case TAG_REF: return "REF";
     case TAG_ERA: return "ERA";
     case TAG_NUM: return "NUM";
     default: return "???";
@@ -415,6 +426,24 @@ static int test_app_lam(void) {
   uint32_t root = alloc(1);
   heap_set(root, app);
   return run_check_num(root, 42);
+}
+
+static int test_ref_app(void) {
+  printf("test REF-APP: (@id 9) → 9 ... ");
+  RESET();
+  Term app = new_app(new_ref(1), new_num(9));
+  uint32_t root = alloc(1);
+  heap_set(root, app);
+  return run_check_num(root, 9);
+}
+
+static int test_alo_app(void) {
+  printf("test ALO-APP: (@{id} 11) → 11 ... ");
+  RESET();
+  Term app = new_app(new_alo(0, 0, 1), new_num(11));
+  uint32_t root = alloc(1);
+  heap_set(root, app);
+  return run_check_num(root, 11);
 }
 
 static int test_app_lam_era(void) {
@@ -988,11 +1017,24 @@ int main(int argc, const char *argv[]) {
     }
     HEAP = metal_heap_ptr();
 
+    // Minimal static book: @id = λx.x (book root at loc 1, body at loc 2)
+    uint32_t book[2] = {0};
+    uint64_t book_heap[3] = {0};
+    book[1] = 1;
+    book_heap[1] = mk(0, TAG_LAM, 0, 2);
+    book_heap[2] = mk(0, TAG_BJV, 0, 1);
+    if (metal_book_upload(book, 2, book_heap, 3) != 0) {
+      fprintf(stderr, "Failed to upload test book\n");
+      return 1;
+    }
+
     int failures = 0;
     printf("--- HVM4 Metal Tests ---\n");
 
     // Basic interactions
     failures += test_app_lam();
+    failures += test_ref_app();
+    failures += test_alo_app();
     failures += test_app_lam_era();
     failures += test_app_era();
     failures += test_nested_app_lam();
