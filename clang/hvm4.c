@@ -232,6 +232,7 @@ static u32 FRESH = 1;
 
 static int DEBUG          = 0;
 static int SILENT         = 0;
+static int SHOW_STATS     = 0;
 static int STEPS_ENABLE   = 0;
 static u64 STEPS_ITRS_LIM = 0;
 static u32 STEPS_ROOT_LOC = 0;

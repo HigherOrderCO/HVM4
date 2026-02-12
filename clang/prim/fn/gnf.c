@@ -8,6 +8,10 @@ static int     gnf_metal_ready = 0;
 static u64    *gnf_mheap       = NULL;
 static u32     gnf_mcursor     = 1; // Metal heap alloc cursor (0 is reserved)
 
+fn double gnf_time_diff_sec(struct timespec a, struct timespec b) {
+  return (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) / 1e9;
+}
+
 // ============================================================================
 // Metal heap allocator (bump allocator on the shared Metal buffer)
 // ============================================================================
@@ -23,48 +27,77 @@ fn u32 gnf_metal_alloc(u32 size) {
 }
 
 // ============================================================================
-// Simple hash map for location remapping (open addressing, power-of-2)
+// Paged direct map for location remapping (u32 key -> u32 val)
 // ============================================================================
 
-#define GNF_MAP_CAP (1u << 20) // 1M entries
-#define GNF_MAP_MASK (GNF_MAP_CAP - 1)
 #define GNF_MAP_EMPTY 0xFFFFFFFF
+#define GNF_MAP_PAGE_BITS 14
+#define GNF_MAP_PAGE_SIZE (1u << GNF_MAP_PAGE_BITS)
+#define GNF_MAP_PAGE_MASK (GNF_MAP_PAGE_SIZE - 1)
+#define GNF_MAP_TOP_SIZE  (1u << (32 - GNF_MAP_PAGE_BITS))
 
 typedef struct {
-  u32 *keys;
-  u32 *vals;
+  u32 **pages;
+  u32  *used_pages;
+  u32   used_len;
+  u32   used_cap;
 } GnfMap;
 
 fn void gnf_map_init(GnfMap *m) {
-  m->keys = malloc(GNF_MAP_CAP * sizeof(u32));
-  m->vals = malloc(GNF_MAP_CAP * sizeof(u32));
-  memset(m->keys, 0xFF, GNF_MAP_CAP * sizeof(u32)); // fill with GNF_MAP_EMPTY
+  m->pages = calloc(GNF_MAP_TOP_SIZE, sizeof(u32 *));
+  m->used_cap = 1024;
+  m->used_len = 0;
+  m->used_pages = malloc((size_t)m->used_cap * sizeof(u32));
+  if (!m->pages || !m->used_pages) {
+    fprintf(stderr, "gnf: remap allocation failed\n");
+    exit(1);
+  }
 }
 
 fn void gnf_map_free(GnfMap *m) {
-  free(m->keys);
-  free(m->vals);
+  for (u32 i = 0; i < m->used_len; i++) {
+    free(m->pages[m->used_pages[i]]);
+  }
+  free(m->pages);
+  free(m->used_pages);
+  m->pages = NULL;
+  m->used_pages = NULL;
+  m->used_len = 0;
+  m->used_cap = 0;
 }
 
 fn u32 gnf_map_get(GnfMap *m, u32 key) {
-  u32 h = (key * 2654435761u) & GNF_MAP_MASK;
-  for (;;) {
-    if (m->keys[h] == key) return m->vals[h];
-    if (m->keys[h] == GNF_MAP_EMPTY) return GNF_MAP_EMPTY;
-    h = (h + 1) & GNF_MAP_MASK;
-  }
+  u32 page = key >> GNF_MAP_PAGE_BITS;
+  u32 slot = key & GNF_MAP_PAGE_MASK;
+  u32 *pg = m->pages[page];
+  return pg ? pg[slot] : GNF_MAP_EMPTY;
 }
 
 fn void gnf_map_set(GnfMap *m, u32 key, u32 val) {
-  u32 h = (key * 2654435761u) & GNF_MAP_MASK;
-  for (;;) {
-    if (m->keys[h] == GNF_MAP_EMPTY || m->keys[h] == key) {
-      m->keys[h] = key;
-      m->vals[h] = val;
-      return;
+  u32 page = key >> GNF_MAP_PAGE_BITS;
+  u32 slot = key & GNF_MAP_PAGE_MASK;
+  u32 *pg = m->pages[page];
+  if (pg == NULL) {
+    pg = malloc((size_t)GNF_MAP_PAGE_SIZE * sizeof(u32));
+    if (!pg) {
+      fprintf(stderr, "gnf: remap page allocation failed\n");
+      exit(1);
     }
-    h = (h + 1) & GNF_MAP_MASK;
+    memset(pg, 0xFF, (size_t)GNF_MAP_PAGE_SIZE * sizeof(u32));
+    m->pages[page] = pg;
+    if (m->used_len >= m->used_cap) {
+      u32 new_cap = m->used_cap << 1;
+      u32 *new_used = realloc(m->used_pages, (size_t)new_cap * sizeof(u32));
+      if (!new_used) {
+        fprintf(stderr, "gnf: remap page list allocation failed\n");
+        exit(1);
+      }
+      m->used_pages = new_used;
+      m->used_cap = new_cap;
+    }
+    m->used_pages[m->used_len++] = page;
   }
+  pg[slot] = val;
 }
 
 // ============================================================================
@@ -286,64 +319,159 @@ fn Term gnf_copy_to_metal(Term t, GnfMap *remap, u64 *mheap) {
 // gnf_copy_from_metal: deep-copy Metal heap term back to C heap
 // ============================================================================
 
-fn Term gnf_copy_from_metal(Term t, GnfMap *remap, u64 *mheap) {
-  u8  tag = term_tag(t);
-  u32 ext = term_ext(t);
-  u32 val = term_val(t);
+typedef struct {
+  u8  out_tag;
+  u32 out_ext;
+  u32 cloc;
+  u32 mloc;
+  u32 ari;
+  u32 idx;
+} GnfCopyFrame;
 
-  // Follow substitutions on Metal heap (with cycle detection)
-  if (tag == VAR || tag == DP0 || tag == DP1) {
-    u32 mloc = val;
-    // Follow SUB chain, but stop if we see the same location twice (cycle)
-    u32 sub_steps = 0;
-    while (sub_steps < 256) {
-      Term cell = mheap[mloc];
-      if (!term_sub_get(cell)) break;
-      Term unsub = term_sub_set(cell, 0);
-      u8 utag = term_tag(unsub);
-      if (utag == VAR || utag == DP0 || utag == DP1) {
-        mloc = term_val(unsub);
-        tag = utag;
-        ext = term_ext(unsub);
-        sub_steps++;
-      } else {
-        return gnf_copy_from_metal(unsub, remap, mheap);
+fn Term gnf_copy_from_metal(Term t, GnfMap *remap, u64 *mheap, u64 *copied_words) {
+  u64 heap_idx  = (u64)WNF_TID * HEAP_STRIDE;
+  u64 heap_next = HEAP_NEXT[heap_idx];
+  u64 heap_end  = HEAP_END[heap_idx];
+
+  u32 cap = 1024;
+  u32 len = 0;
+  GnfCopyFrame *stk = malloc((size_t)cap * sizeof(GnfCopyFrame));
+  if (!stk) {
+    fprintf(stderr, "gnf: copy stack allocation failed\n");
+    exit(1);
+  }
+
+  Term cur = t;
+  Term out = 0;
+
+  for (;;) {
+    u8  tag = term_tag(cur);
+    u32 ext = term_ext(cur);
+    u32 val = term_val(cur);
+
+    // Follow substitutions on Metal heap (with cycle detection).
+    if (tag == VAR || tag == DP0 || tag == DP1) {
+      u32 mloc = val;
+      u32 sub_steps = 0;
+      while (sub_steps < 256) {
+        Term cell = mheap[mloc];
+        if (!term_sub_get(cell)) break;
+        Term unsub = term_sub_set(cell, 0);
+        u8 utag = term_tag(unsub);
+        if (utag == VAR || utag == DP0 || utag == DP1) {
+          mloc = term_val(unsub);
+          tag  = utag;
+          ext  = term_ext(unsub);
+          sub_steps++;
+        } else {
+          cur = unsub;
+          goto next_node;
+        }
       }
+
+      u32 existing = gnf_map_get(remap, mloc);
+      if (existing != GNF_MAP_EMPTY) {
+        out = term_new(0, tag, ext, existing);
+        goto produced;
+      }
+
+      u64 cloc64 = heap_next;
+      heap_next += 1;
+      if (__builtin_expect(heap_next > heap_end || heap_next < cloc64, 0)) {
+        fprintf(stderr, "gnf: out of C heap memory during copy-back\n");
+        free(stk);
+        exit(1);
+      }
+      u32 cloc = (u32)cloc64;
+      *copied_words += 1;
+      gnf_map_set(remap, mloc, cloc);
+
+      if (len == cap) {
+        cap <<= 1;
+        GnfCopyFrame *new_stk = realloc(stk, (size_t)cap * sizeof(GnfCopyFrame));
+        if (!new_stk) {
+          fprintf(stderr, "gnf: copy stack reallocation failed\n");
+          exit(1);
+        }
+        stk = new_stk;
+      }
+      stk[len++] = (GnfCopyFrame){
+        .out_tag = tag, .out_ext = ext, .cloc = cloc, .mloc = mloc, .ari = 1, .idx = 0
+      };
+      cur = mheap[mloc];
+      goto next_node;
     }
-    // Either no SUB or we've resolved to an unsubstituted location
+
+    // ERA, NUM: immediate.
+    if (tag == ERA) {
+      out = term_new(0, ERA, 0, 0);
+      goto produced;
+    }
+    if (tag == NUM) {
+      out = term_new(0, NUM, 0, val);
+      goto produced;
+    }
+
+    // APP(2), LAM(1), SUP(2), DUP(2).
+    u32 mloc = val;
     u32 existing = gnf_map_get(remap, mloc);
     if (existing != GNF_MAP_EMPTY) {
-      return term_new(0, tag, ext, existing);
+      out = term_new(0, tag, ext, existing);
+      goto produced;
     }
-    u32 cloc = heap_alloc(1);
+
+    u32 ari = TERM_ARITY[tag];
+    if (ari == 0) {
+      fprintf(stderr, "gnf: unsupported tag %u in metal term\n", tag);
+      free(stk);
+      exit(1);
+    }
+
+    u64 cloc64 = heap_next;
+    heap_next += ari;
+    if (__builtin_expect(heap_next > heap_end || heap_next < cloc64, 0)) {
+      fprintf(stderr, "gnf: out of C heap memory during copy-back\n");
+      free(stk);
+      exit(1);
+    }
+    u32 cloc = (u32)cloc64;
+    *copied_words += ari;
     gnf_map_set(remap, mloc, cloc);
-    Term cell = mheap[mloc];
-    Term child = gnf_copy_from_metal(cell, remap, mheap);
-    heap_set(cloc, child);
-    return term_new(0, tag, ext, cloc);
+
+    if (len == cap) {
+      cap <<= 1;
+      GnfCopyFrame *new_stk = realloc(stk, (size_t)cap * sizeof(GnfCopyFrame));
+      if (!new_stk) {
+        fprintf(stderr, "gnf: copy stack reallocation failed\n");
+        exit(1);
+      }
+      stk = new_stk;
+    }
+    stk[len++] = (GnfCopyFrame){
+      .out_tag = tag, .out_ext = ext, .cloc = cloc, .mloc = mloc, .ari = ari, .idx = 0
+    };
+    cur = mheap[mloc];
+    goto next_node;
+
+produced:
+    while (len > 0) {
+      GnfCopyFrame *fr = &stk[len - 1];
+      HEAP[fr->cloc + fr->idx] = out;
+      fr->idx++;
+      if (fr->idx < fr->ari) {
+        cur = mheap[fr->mloc + fr->idx];
+        goto next_node;
+      }
+      out = term_new(0, fr->out_tag, fr->out_ext, fr->cloc);
+      len--;
+    }
+    HEAP_NEXT[heap_idx] = heap_next;
+    free(stk);
+    return out;
+
+next_node:
+    continue;
   }
-
-  // ERA, NUM: immediate
-  if (tag == ERA) return term_new(0, ERA, 0, 0);
-  if (tag == NUM) return term_new(0, NUM, 0, val);
-
-  // APP(2), LAM(1), SUP(2), DUP(2)
-  u32 mloc = val;
-  u32 existing = gnf_map_get(remap, mloc);
-  if (existing != GNF_MAP_EMPTY) {
-    return term_new(0, tag, ext, existing);
-  }
-
-  u32 ari = TERM_ARITY[tag];
-  u32 cloc = heap_alloc(ari);
-  gnf_map_set(remap, mloc, cloc);
-
-  for (u32 i = 0; i < ari; i++) {
-    Term child = gnf_copy_from_metal(mheap[mloc + i], remap, mheap);
-    heap_set(cloc + i, child);
-  }
-
-  return term_new(0, tag, ext, cloc);
 }
 
 // ============================================================================
@@ -375,17 +503,35 @@ fn Term prim_fn_gnf(Term *args) {
   gnf_map_free(&remap);
 
   // 4. Set alloc cursor and run GPU normalization
+  struct timespec gpu_t0, gpu_t1, copy_t0, copy_t1;
   metal_set_alloc_cursor(gnf_mcursor);
+  clock_gettime(CLOCK_MONOTONIC, &gpu_t0);
   u64 itrs = metal_normalize(mroot_loc);
+  clock_gettime(CLOCK_MONOTONIC, &gpu_t1);
+  ITRS += itrs;
 
   // 5. Copy result back to C heap
+  clock_gettime(CLOCK_MONOTONIC, &copy_t0);
   Term mresult = gnf_mheap[mroot_loc];
   GnfMap remap_back;
   gnf_map_init(&remap_back);
+  u64 copied_words = 0;
 
-  Term result = gnf_copy_from_metal(mresult, &remap_back, gnf_mheap);
+  Term result = gnf_copy_from_metal(mresult, &remap_back, gnf_mheap, &copied_words);
 
   gnf_map_free(&remap_back);
+  clock_gettime(CLOCK_MONOTONIC, &copy_t1);
+
+  if (SHOW_STATS) {
+    double gpu_dt  = gnf_time_diff_sec(gpu_t0, gpu_t1);
+    double copy_dt = gnf_time_diff_sec(copy_t0, copy_t1);
+    double gpu_mips = gpu_dt > 0.0 ? ((double)itrs / gpu_dt) / 1e6 : 0.0;
+    double copied_mb = ((double)copied_words * sizeof(u64)) / (1024.0 * 1024.0);
+    fprintf(stderr,
+            "gnf: itrs=%llu gpu=%.3fms perf=%.2f MIPS copy_back=%.3fms copied_slots=%llu copied=%.2fMB\n",
+            (unsigned long long)itrs, gpu_dt * 1e3, gpu_mips, copy_dt * 1e3,
+            (unsigned long long)copied_words, copied_mb);
+  }
 
   // 6. Return the result
   return result;

@@ -177,6 +177,7 @@ int main(int argc, char **argv) {
   // Set debug mode
   DEBUG = opts.debug;
   SILENT = opts.silent;
+  SHOW_STATS = opts.stats;
   STEPS_ENABLE = opts.step_by_step;
 
   // Read and parse user file
