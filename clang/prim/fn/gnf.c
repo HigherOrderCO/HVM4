@@ -255,6 +255,14 @@ fn Term gnf_instantiate(u32 book_loc, u32 *bind_stack, u32 bind_len, u64 *mheap)
       mheap[mloc + 1] = mt1;
       return term_new(0, SUP, ext, mloc);
     }
+    case OP2: {
+      u32 mloc = gnf_metal_alloc(2);
+      Term mx = gnf_instantiate(val, bind_stack, bind_len, mheap);
+      Term my = gnf_instantiate(val + 1, bind_stack, bind_len, mheap);
+      mheap[mloc]     = mx;
+      mheap[mloc + 1] = my;
+      return term_new(0, OP2, ext, mloc);
+    }
     case ERA: {
       return term_new(0, ERA, 0, 0);
     }
@@ -367,6 +375,7 @@ fn Term gnf_copy_to_metal(Term t, GnfMap *remap, u64 *mheap) {
 
   // Unsupported tags
   if (tag != APP && tag != LAM && tag != SUP && tag != DUP &&
+      tag != OP2 &&
       tag != ERA && tag != NUM) {
     fprintf(stderr, "gnf: unsupported tag %u in dynamic term\n", tag);
     exit(1);

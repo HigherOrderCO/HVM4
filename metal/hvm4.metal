@@ -30,10 +30,39 @@ constant uchar TAG_ALO = 7;
 constant uchar TAG_REF = 8;
 constant uchar TAG_DRY = 10;
 constant uchar TAG_ERA = 11;
+constant uchar TAG_MAT = 15;
 constant uchar TAG_NUM = 30;
+constant uchar TAG_SWI = 31;
+constant uchar TAG_USE = 32;
+constant uchar TAG_OP2 = 33;
+constant uchar TAG_DSU = 34;
+constant uchar TAG_DDU = 35;
+constant uchar TAG_EQL = 36;
+constant uchar TAG_AND = 37;
+constant uchar TAG_OR  = 38;
+constant uchar TAG_INC = 41;
 constant uchar TAG_BJV = 42;
 constant uchar TAG_BJ0 = 43;
 constant uchar TAG_BJ1 = 44;
+
+// --- OP2 operation codes (EXT field of OP2) ---
+constant uint OP_ADD = 0;
+constant uint OP_SUB = 1;
+constant uint OP_MUL = 2;
+constant uint OP_DIV = 3;
+constant uint OP_MOD = 4;
+constant uint OP_AND = 5;
+constant uint OP_OR  = 6;
+constant uint OP_XOR = 7;
+constant uint OP_LSH = 8;
+constant uint OP_RSH = 9;
+constant uint OP_NOT = 10; // unary: Op2(OP_NOT, 0, x)
+constant uint OP_EQ  = 11;
+constant uint OP_NE  = 12;
+constant uint OP_LT  = 13;
+constant uint OP_LE  = 14;
+constant uint OP_GT  = 15;
+constant uint OP_GE  = 16;
 
 // --- Bit layout: [63:SUB] [62-56:TAG 7b] [55-32:EXT 24b] [31-0:VAL 32b] ---
 constant ulong SUB_BIT = 1UL << 63;
@@ -45,6 +74,8 @@ constant uint LAM_ERA_MASK = 0x800000;
 constant uchar TAG_BC_APP = 46;   // APP breadcrumb (fun slot)
 constant uchar TAG_BC_DP0 = 47;   // DP0 breadcrumb (shared expr slot)
 constant uchar TAG_BC_DP1 = 48;   // DP1 breadcrumb (shared expr slot)
+constant uchar TAG_BC_OP2 = 49;   // OP2 breadcrumb (lhs slot)
+constant uchar TAG_BC_OP2_NUM = 50; // OP2-NUM breadcrumb (rhs slot)
 constant uint  BC_SENTINEL = 0xFFFFFFFF;
 
 // --- Limits ---
@@ -95,6 +126,16 @@ inline uint term_arity(uchar tag) {
     case TAG_SUP: return 2;
     case TAG_DUP: return 2;
     case TAG_DRY: return 2;
+    case TAG_MAT: return 2;
+    case TAG_SWI: return 2;
+    case TAG_USE: return 1;
+    case TAG_OP2: return 2;
+    case TAG_DSU: return 3;
+    case TAG_DDU: return 3;
+    case TAG_EQL: return 2;
+    case TAG_AND: return 2;
+    case TAG_OR:  return 2;
+    case TAG_INC: return 1;
     default:      return 0;
   }
 }
@@ -215,6 +256,18 @@ inline Term term_new_sup(device ulong* heap, thread Alloc& alloc,
   return term_new_sup_at(heap, heap_alloc(alloc, 2), lab, tm0, tm1);
 }
 
+inline Term term_new_op2_at(device ulong* heap, uint loc,
+                            uint opr, Term x, Term y) {
+  heap_set(heap, loc + 0, x);
+  heap_set(heap, loc + 1, y);
+  return term_new(0, TAG_OP2, opr, loc);
+}
+
+inline Term term_new_op2(device ulong* heap, thread Alloc& alloc,
+                         uint opr, Term x, Term y) {
+  return term_new_op2_at(heap, heap_alloc(alloc, 2), opr, x, y);
+}
+
 inline Term term_new_dup_at(device ulong* heap, uint loc,
                             uint lab, Term val, Term bod) {
   heap_set(heap, loc + 0, val);
@@ -298,15 +351,14 @@ inline Term wnf_alo_dup(device ulong* heap, thread Alloc& alloc,
 
 inline Term wnf_alo_nod(device ulong* heap, thread Alloc& alloc,
                         uint ls_loc, uint len, uint loc, uchar tag, uint ext, uint ari) {
-  Term a0 = 0;
-  Term a1 = 0;
-  if (ari > 0) a0 = term_new_alo(heap, alloc, len, ls_loc, loc + 0);
-  if (ari > 1) a1 = term_new_alo(heap, alloc, len, ls_loc, loc + 1);
-  if (tag == TAG_APP) return term_new_app(heap, alloc, a0, a1);
-  if (tag == TAG_SUP) return term_new_sup(heap, alloc, ext, a0, a1);
-  if (tag == TAG_DUP) return term_new_dup(heap, alloc, ext, a0, a1);
-  if (tag == TAG_DRY) return term_new_app(heap, alloc, a0, a1);
-  return term_new(0, tag, ext, 0);
+  if (ari == 0) {
+    return term_new(0, tag, ext, 0);
+  }
+  uint out_loc = heap_alloc(alloc, ari);
+  for (uint i = 0; i < ari; i++) {
+    heap_set(heap, out_loc + i, term_new_alo(heap, alloc, len, ls_loc, loc + i));
+  }
+  return term_new(0, tag, ext, out_loc);
 }
 
 // ============================================================================
@@ -407,6 +459,69 @@ inline Term wnf_dup_nod(device ulong* heap, uint loc, uint side, Term term) {
   return term;
 }
 
+// (#a op #b) -> #(a op b)
+inline Term wnf_op2_num_num_raw(uint opr, uint a, uint b) {
+  if (opr == OP_SUB) {
+    return term_new_num(a - b);
+  }
+  uint result = 0;
+  switch (opr) {
+    case OP_ADD: result = a + b; break;
+    case OP_SUB: result = a - b; break;
+    case OP_MUL: result = a * b; break;
+    case OP_DIV: result = b != 0 ? a / b : 0; break;
+    case OP_MOD: result = b != 0 ? a % b : 0; break;
+    case OP_AND: result = a & b; break;
+    case OP_OR:  result = a | b; break;
+    case OP_XOR: result = a ^ b; break;
+    case OP_LSH: result = a << b; break;
+    case OP_RSH: result = a >> b; break;
+    case OP_NOT: result = ~b; break;
+    case OP_EQ:  result = a == b ? 1u : 0u; break;
+    case OP_NE:  result = a != b ? 1u : 0u; break;
+    case OP_LT:  result = a < b ? 1u : 0u; break;
+    case OP_LE:  result = a <= b ? 1u : 0u; break;
+    case OP_GT:  result = a > b ? 1u : 0u; break;
+    case OP_GE:  result = a >= b ? 1u : 0u; break;
+    default:     result = 0; break;
+  }
+  return term_new_num(result);
+}
+
+inline Term wnf_op2_era() {
+  return term_new_era();
+}
+
+inline Term wnf_op2_num_era() {
+  return term_new_era();
+}
+
+// @@opr(&L{a,b}, y) -> &L{@@opr(a,Y0), @@opr(b,Y1)}
+inline Term wnf_op2_sup(device ulong* heap, thread Alloc& alloc,
+                        uint opr, Term sup, Term y) {
+  uint lab     = term_ext(sup);
+  uint sup_loc = term_val(sup);
+  uint y_loc   = heap_alloc(alloc, 1);
+  heap_set(heap, y_loc, y);
+  Copy Y       = term_clone_at(y_loc, lab);
+  Term op0     = term_new_op2(heap, alloc, opr, heap_read(heap, sup_loc + 0), Y.k0);
+  Term op1     = term_new_op2(heap, alloc, opr, heap_read(heap, sup_loc + 1), Y.k1);
+  return term_new_sup(heap, alloc, lab, op0, op1);
+}
+
+// (x op &L{a,b}) where x is NUM -> &L{(X0 op a), (X1 op b)}
+inline Term wnf_op2_num_sup(device ulong* heap, thread Alloc& alloc,
+                            uint opr, Term x, Term sup) {
+  uint lab     = term_ext(sup);
+  uint sup_loc = term_val(sup);
+  uint x_loc   = heap_alloc(alloc, 1);
+  heap_set(heap, x_loc, x);
+  Copy X       = term_clone_at(x_loc, lab);
+  Term op0     = term_new_op2(heap, alloc, opr, X.k0, heap_read(heap, sup_loc + 0));
+  Term op1     = term_new_op2(heap, alloc, opr, X.k1, heap_read(heap, sup_loc + 1));
+  return term_new_sup(heap, alloc, lab, op0, op1);
+}
+
 // ============================================================================
 // WNF Evaluator (pointer-reversal for APP frames, small stack for DP frames)
 // ============================================================================
@@ -488,6 +603,16 @@ Term wnf(device ulong* heap, device atomic_uint* locks,
         continue;
       }
 
+      if (tag == TAG_OP2) {
+        uint op2_loc = term_val(cur);
+        Term x = heap_read(heap, op2_loc + 0);
+        // Write OP2 breadcrumb into lhs slot (pointer reversal)
+        heap_set(heap, op2_loc + 0, term_new(0, TAG_BC_OP2, term_ext(cur), prev));
+        prev = op2_loc + 0;
+        cur = x;
+        continue;
+      }
+
       if (tag == TAG_DUP) {
         uint loc = term_val(cur);
         cur = heap_read(heap, loc + 1);
@@ -537,16 +662,13 @@ Term wnf(device ulong* heap, device atomic_uint* locks,
           cur = wnf_alo_dup(heap, alloc, ls_loc, len, term_val(book_tm), term_ext(book_tm));
           continue;
         }
-        if (b_tag == TAG_APP || b_tag == TAG_SUP || b_tag == TAG_DRY) {
+        uint b_ari = term_arity(b_tag);
+        if (b_ari > 0) {
           cur = wnf_alo_nod(heap, alloc, ls_loc, len, term_val(book_tm), b_tag,
-                            term_ext(book_tm), term_arity(b_tag));
+                            term_ext(book_tm), b_ari);
           continue;
         }
-        if (b_tag == TAG_NUM || b_tag == TAG_ERA || b_tag == TAG_REF) {
-          cur = book_tm;
-          continue;
-        }
-        entering = false;
+        cur = book_tm;
         continue;
       }
 
@@ -628,6 +750,76 @@ Term wnf(device ulong* heap, device atomic_uint* locks,
       continue;
     }
 
+    if (bc_tag == TAG_BC_OP2) {
+      // --- OP2 breadcrumb (x reduced): (x op y) ---
+      uint op2_loc = prev;
+      uint opr     = term_ext(bc);
+      Term y       = heap_read(heap, op2_loc + 1);
+      uchar w_tag  = term_tag(cur);
+      prev = parent;
+
+      if (w_tag == TAG_ERA) {
+        itrs++;
+        cur = wnf_op2_era();
+        continue;
+      }
+      if (w_tag == TAG_NUM) {
+        uchar y_tag = term_tag(y);
+        if (y_tag == TAG_NUM) {
+          itrs++;
+          cur = wnf_op2_num_num_raw(opr, term_val(cur), term_val(y));
+          continue;
+        }
+        // x is NUM, now reduce y
+        heap_set(heap, op2_loc + 0, cur);
+        heap_set(heap, op2_loc + 1, term_new(0, TAG_BC_OP2_NUM, opr, prev));
+        prev = op2_loc + 1;
+        cur = y;
+        entering = true;
+        continue;
+      }
+      if (w_tag == TAG_SUP) {
+        itrs++;
+        cur = wnf_op2_sup(heap, alloc, opr, cur, y);
+        continue;
+      }
+
+      // Stuck OP2: restore lhs slot and rebuild
+      heap_set(heap, op2_loc + 0, cur);
+      cur = term_new(0, TAG_OP2, opr, op2_loc);
+      continue;
+    }
+
+    if (bc_tag == TAG_BC_OP2_NUM) {
+      // --- OP2-NUM breadcrumb (y reduced): (x op y), x is NUM ---
+      uint op2_loc = prev - 1;
+      uint opr     = term_ext(bc);
+      Term x       = heap_read(heap, op2_loc + 0);
+      uchar w_tag  = term_tag(cur);
+      prev = parent;
+
+      if (w_tag == TAG_ERA) {
+        itrs++;
+        cur = wnf_op2_num_era();
+        continue;
+      }
+      if (w_tag == TAG_NUM) {
+        itrs++;
+        cur = wnf_op2_num_num_raw(opr, term_val(x), term_val(cur));
+        continue;
+      }
+      if (w_tag == TAG_SUP) {
+        itrs++;
+        cur = wnf_op2_num_sup(heap, alloc, opr, x, cur);
+        continue;
+      }
+
+      // Stuck OP2-NUM: restore rhs slot and rebuild
+      heap_set(heap, op2_loc + 1, cur);
+      cur = term_new(0, TAG_OP2, opr, op2_loc);
+      continue;
+    }
+
     // Unknown breadcrumb (shouldn't happen)
     return cur;
   }
@@ -646,6 +838,16 @@ Term wnf(device ulong* heap, device atomic_uint* locks,
       uchar dp_tag = (bc_tag == TAG_BC_DP0) ? TAG_DP0 : TAG_DP1;
       heap_set(heap, loc, cur);
       cur = term_new(0, dp_tag, lab, loc);
+    } else if (bc_tag == TAG_BC_OP2) {
+      uint op2_loc = prev;
+      uint opr     = term_ext(bc);
+      Term y       = heap_read(heap, op2_loc + 1);
+      cur = term_new_op2_at(heap, op2_loc, opr, cur, y);
+    } else if (bc_tag == TAG_BC_OP2_NUM) {
+      uint op2_loc = prev - 1;
+      uint opr     = term_ext(bc);
+      Term x       = heap_read(heap, op2_loc + 0);
+      cur = term_new_op2_at(heap, op2_loc, opr, x, cur);
     } else {
       // APP breadcrumb: restore APP node
       Term arg = heap_read(heap, prev + 1);
@@ -748,7 +950,7 @@ kernel void normalize_pass(
     // --- Compute frontier entries to enqueue ---
     uint val   = term_val(result);
     uint need  = 0;
-    uint slots[2];
+    uint slots[16];
     bool bailed = (local_bailouts > prev_bailouts);
 
     if (bailed && tag != TAG_LAM && tag != TAG_SUP &&
@@ -763,27 +965,23 @@ kernel void normalize_pass(
       for (uint i = 0; i < ari; i++) slots[i] = val + i;
     }
 
-    // --- SIMD-cooperative frontier enqueue (1 atomic per 32 threads) ---
-    uint lane_offset = simd_prefix_exclusive_sum(need);
-    uint group_total = simd_sum(need);
-    uint group_base  = 0;
-    if (simd_is_first()) {
-      group_base = atomic_fetch_add_explicit(next_count, group_total, memory_order_relaxed);
+    // --- Frontier enqueue ---
+    // Use per-thread atomic reservation for correctness when only a subset of
+    // lanes are active (small/deep frontiers).
+    uint my_base = 0;
+    if (need > 0) {
+      my_base = atomic_fetch_add_explicit(next_count, need, memory_order_relaxed);
     }
-    group_base = simd_broadcast_first(group_base);
-    uint my_base = group_base + lane_offset;
     for (uint i = 0; i < need; i++) {
       next_frontier[my_base + i] = slots[i];
     }
   }
 
-  // --- SIMD-cooperative interaction + bailout reporting ---
-  uint group_itrs = simd_sum(local_itrs);
-  if (simd_is_first() && group_itrs > 0) {
-    atomic_fetch_add_explicit(itr_count, group_itrs, memory_order_relaxed);
+  // --- Report interactions + bailouts ---
+  if (local_itrs > 0) {
+    atomic_fetch_add_explicit(itr_count, local_itrs, memory_order_relaxed);
   }
-  uint group_bailouts = simd_sum(local_bailouts);
-  if (simd_is_first() && group_bailouts > 0) {
-    atomic_fetch_add_explicit(itr_count + 1, group_bailouts, memory_order_relaxed);
+  if (local_bailouts > 0) {
+    atomic_fetch_add_explicit(itr_count + 1, local_bailouts, memory_order_relaxed);
   }
 }
