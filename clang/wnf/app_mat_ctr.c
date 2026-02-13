@@ -14,6 +14,7 @@ fn Term wnf_app_mat_ctr(Term mat, Term ctr) {
     u32 ari = term_tag(ctr) - C00;
     Term res = heap_read(mat_loc);
     if (ari == 0) {
+      heap_free(mat_loc, 2);
       return res;
     }
     u32 ctr_loc = term_val(ctr);
@@ -21,6 +22,8 @@ fn Term wnf_app_mat_ctr(Term mat, Term ctr) {
     for (u32 i = 0; i < ari; i++) {
       res = term_new_app_at((u32)(apps + 2 * (u64)i), res, heap_read(ctr_loc + i));
     }
+    heap_free(mat_loc, 2);
+    heap_free(ctr_loc, ari);
     return res;
   } else {
     ITRS_INC("APP-MAT-CTR-MIS");
