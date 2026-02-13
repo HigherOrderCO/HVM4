@@ -192,11 +192,31 @@ fn void eval_collapse(Term term, int limit, int show_itrs, int silent) {
 
   C.silent = silent;
   C.show_itrs = show_itrs;
-  if (!wspq_init(&C.ws, n)) {
+
+  // Compute wspq sizing from hints.
+  u32 col_brackets = WSPQ_BRACKETS;
+  u32 col_cap_pow2 = WSPQ_CAP_POW2;
+  if (HVM_HINTS.node_count > 0) {
+    col_brackets = HVM_HINTS.max_depth + 4;
+    if (col_brackets > WSPQ_BRACKETS) col_brackets = WSPQ_BRACKETS;
+    if (col_brackets < 4) col_brackets = 4;
+    if (HVM_HINTS.has_sup) {
+      col_cap_pow2 = hints_cap_pow2(HVM_HINTS.sup_count * 4, 8, 24);
+    } else {
+      col_cap_pow2 = 8; // minimal: 256 entries per bucket
+    }
+  }
+  if (!wspq_init_sized(&C.ws, n, col_brackets, col_cap_pow2)) {
     fprintf(stderr, "eval_collapse: queue allocation failed\n");
     exit(1);
   }
-  if (!cnf_pool_init(&C.cnf, n)) {
+
+  // Compute cnf pool sizing from hints.
+  u32 cnf_cap_pow2 = CNF_POOL_WS_CAP_POW2;
+  if (HVM_HINTS.node_count > 0) {
+    cnf_cap_pow2 = hints_cap_pow2(HVM_HINTS.node_count / 8, 8, 20);
+  }
+  if (!cnf_pool_init_sized(&C.cnf, n, cnf_cap_pow2)) {
     fprintf(stderr, "eval_collapse: cnf queue allocation failed\n");
     exit(1);
   }

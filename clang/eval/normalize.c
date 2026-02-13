@@ -140,13 +140,28 @@ fn Term eval_normalize(Term term) {
   u32 n = thread_get_count();
   ctx.n = n;
   atomic_store_explicit(&ctx.pending.v, n, memory_order_relaxed);
+
+  // Compute queue capacity from hints.
+  u32 norm_cap_pow2 = EVAL_NORMALIZE_WS_CAP_POW2;
+  if (HVM_HINTS.node_count > 0) {
+    norm_cap_pow2 = hints_cap_pow2(HVM_HINTS.node_count / 4, 8, 24);
+  }
   for (u32 i = 0; i < n; i++) {
-    if (!wsq_init(&ctx.W[i].dq, EVAL_NORMALIZE_WS_CAP_POW2)) {
+    if (!wsq_init(&ctx.W[i].dq, norm_cap_pow2)) {
       fprintf(stderr, "eval_normalize: queue allocation failed\n");
       exit(1);
     }
   }
-  uset_init(&ctx.seen);
+
+  // Compute uset size from hints.
+  if (HVM_HINTS.static_heap > 0) {
+    u64 uset_locs = HVM_HINTS.static_heap * 64;
+    if (uset_locs < 4096) uset_locs = 4096;
+    if (uset_locs > HEAP_CAP) uset_locs = HEAP_CAP;
+    uset_init_sized(&ctx.seen, uset_locs);
+  } else {
+    uset_init(&ctx.seen);
+  }
 
   eval_normalize_enqueue(&ctx, &ctx.W[0], root_loc);
 

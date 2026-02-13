@@ -4,13 +4,14 @@
 // This file provides the command-line interface for the HVM4 runtime,
 // mirroring the structure of main.hs for the Haskell implementation.
 //
-// Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>]
+// Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>] [-v]
 //   -s:  Show statistics (interactions, time, performance)
 //   -S:  Silent output (omit term printing)
 //   -D:  Step-by-step reduction (print intermediate terms)
 //   -C:  Collapse and flatten (enumerate all superposition branches)
 //   -CN: Collapse and flatten, limit to N results
 //   -T:  Use N threads (e.g. -T4)
+//   -v:  Verbose: print program hints after parsing
 
 #include "hvm4.c"
 
@@ -32,6 +33,8 @@ typedef struct {
   int   debug;
   int   step_by_step;
   int   threads;
+  int   verbose;
+  int   test_ring;
   u32     ffi_loads_len;
   FfiLoad ffi_loads[FFI_MAX];
   char *file;
@@ -46,6 +49,8 @@ fn CliOpts parse_opts(int argc, char **argv) {
     .debug = 0,
     .step_by_step = 0,
     .threads = 0,
+    .verbose = 0,
+    .test_ring = 0,
     .ffi_loads_len = 0,
     .file = NULL
   };
@@ -74,6 +79,10 @@ fn CliOpts parse_opts(int argc, char **argv) {
         fprintf(stderr, "Error: -T value (%d) exceeds MAX_THREADS (%d)\n", opts.threads, MAX_THREADS);
         exit(1);
       }
+    } else if (strcmp(argv[i], "-v") == 0) {
+      opts.verbose = 1;
+    } else if (strcmp(argv[i], "--test-ring") == 0) {
+      opts.test_ring = 1;
     } else if (strcmp(argv[i], "-d") == 0) {
       opts.debug = 1;
     } else if (strcmp(argv[i], "-D") == 0) {
@@ -133,8 +142,12 @@ int main(int argc, char **argv) {
   // Parse command line
   CliOpts opts = parse_opts(argc, argv);
 
+  if (opts.test_ring) {
+    return ring_test();
+  }
+
   if (opts.file == NULL) {
-    fprintf(stderr, "Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>] [--ffi <path>] [--ffi-dir <path>]\n");
+    fprintf(stderr, "Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>] [-v] [--ffi <path>] [--ffi-dir <path>]\n");
     return 1;
   }
 
@@ -202,6 +215,12 @@ int main(int argc, char **argv) {
   };
   parse_def(&s);
   free(src);
+
+  // Analyze program and compute buffer sizing hints
+  HVM_HINTS = hvm_analyze();
+  if (opts.verbose) {
+    hvm_hints_print(&HVM_HINTS);
+  }
 
   // Get @main id
   u32 main_id = table_find("main", 4);
