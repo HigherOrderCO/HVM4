@@ -174,22 +174,23 @@ fn void ring_free(ElasticRing *r) {
 
 // Double the buffer capacity. Live data is preserved.
 // Returns true on success, false on failure (buffer unchanged).
+//
+// Zero-copy path: ftruncate extends the backing fd, and existing data at
+// fd offsets [0, old_cap) is preserved. After remapping at 2*cap, the live
+// data is still at its original offsets. Two cases:
+//   - No wrap (tail < head): data at [tail, head) — already contiguous, no copy.
+//   - Wrapped (tail >= head, count > 0): data at [tail, old_cap) and [0, head).
+//     After remap, move the [0, head) prefix to [old_cap, old_cap+head) via
+//     memmove within the mapping. This makes the live range [tail, old_cap+head)
+//     contiguous in the new buffer.
 fn bool ring_grow(ElasticRing *r) {
-  size_t old_cap = r->cap;
-  size_t new_cap = old_cap * 2;
-  size_t used    = r->count;
+  size_t old_cap  = r->cap;
+  size_t new_cap  = old_cap * 2;
+  size_t old_head = r->head;
+  size_t old_tail = r->tail;
 
-  // Save live data via double-map (always contiguous from data+tail).
-  u8 *save = NULL;
-  if (used > 0) {
-    save = (u8 *)malloc(used);
-    if (!save) return false;
-    memcpy(save, r->data + r->tail, used);
-  }
-
-  // Extend backing fd.
+  // Extend backing fd. Existing bytes at [0, old_cap) are preserved.
   if (ftruncate(r->fd, (off_t)new_cap) != 0) {
-    free(save);
     return false;
   }
 
@@ -204,46 +205,54 @@ fn bool ring_grow(ElasticRing *r) {
       fprintf(stderr, "elastic_ring: fatal remap failure during growth\n");
       exit(1);
     }
-    if (save) { memcpy(r->data, save, used); free(save); }
-    r->tail = 0;
-    r->head = used;
     return false;
-  }
-
-  // Restore live data at position 0.
-  if (save) {
-    memcpy(r->data, save, used);
-    free(save);
   }
 
   r->cap  = new_cap;
   r->mask = new_cap - 1;
-  r->tail = 0;
-  r->head = used;
+
+  // Unwrap if data was wrapped around the old boundary.
+  bool wrapped = (r->count > 0 && old_tail >= old_head);
+  if (wrapped) {
+    // Move the [0, old_head) prefix to [old_cap, old_cap + old_head).
+    // These fd regions don't overlap, so memcpy is safe.
+    memcpy(r->data + old_cap, r->data, old_head);
+    r->head = old_cap + old_head;
+    // tail stays the same.
+  }
+
   return true;
 }
 
 // Halve the buffer if significantly underutilized (count <= cap/4).
 // Best-effort: failure leaves the buffer unchanged.
+//
+// Before truncating the fd, compact live data into [0, count) so it fits
+// entirely within the new smaller capacity. This is a single memmove within
+// the double-mapped region (contiguous read from data+tail via ouroboros).
 fn void ring_shrink(ElasticRing *r) {
-  size_t new_cap = r->cap / 2;
+  size_t old_cap = r->cap;
+  size_t new_cap = old_cap / 2;
   if (r->count > new_cap || new_cap < r->pg) return;
 
   size_t used = r->count;
-  u8 *save = NULL;
-  if (used > 0) {
-    save = (u8 *)malloc(used);
-    if (!save) return;
-    memcpy(save, r->data + r->tail, used);
-  }
 
-  munmap(r->data, 2 * r->cap);
+  // Compact live data to fd offset 0 so it survives the truncate.
+  // memmove handles overlap (src and dst may share pages via double-map).
+  if (used > 0 && r->tail != 0) {
+    memmove(r->data, r->data + r->tail, used);
+  }
+  // Now live data is at fd[0, used). Safe to truncate [new_cap, old_cap).
+
+  munmap(r->data, 2 * old_cap);
 
   if (ftruncate(r->fd, (off_t)new_cap) != 0) {
-    // Restore original.
-    ftruncate(r->fd, (off_t)r->cap);
-    r->data = (u8 *)ering_double_map(r->fd, r->cap);
-    if (save) { memcpy(r->data, save, used); free(save); }
+    // Restore original mapping. Data is already compacted at offset 0.
+    r->data = (u8 *)ering_double_map(r->fd, old_cap);
+    if (!r->data) {
+      fprintf(stderr, "elastic_ring: fatal remap failure during shrink\n");
+      exit(1);
+    }
     r->tail = 0;
     r->head = used;
     return;
@@ -251,21 +260,15 @@ fn void ring_shrink(ElasticRing *r) {
 
   r->data = (u8 *)ering_double_map(r->fd, new_cap);
   if (!r->data) {
-    ftruncate(r->fd, (off_t)r->cap);
-    r->data = (u8 *)ering_double_map(r->fd, r->cap);
+    ftruncate(r->fd, (off_t)old_cap);
+    r->data = (u8 *)ering_double_map(r->fd, old_cap);
     if (!r->data) {
       fprintf(stderr, "elastic_ring: fatal remap failure during shrink\n");
       exit(1);
     }
-    if (save) { memcpy(r->data, save, used); free(save); }
     r->tail = 0;
     r->head = used;
     return;
-  }
-
-  if (save) {
-    memcpy(r->data, save, used);
-    free(save);
   }
 
   r->cap  = new_cap;
@@ -405,7 +408,6 @@ fn int ring_test(void) {
   }
   // Now used = n/2, head is past 3/4, tail is at 1/4.
   // Push enough to overflow → triggers growth while data wraps.
-  size_t remaining_before = ring_used(&r) / sizeof(u64);
   size_t to_push = n;  // more than avail → forces growth
   for (size_t i = 0; i < to_push; i++) assert(ring_push_u64(&r, i + 200000));
   // Verify the earlier data.
