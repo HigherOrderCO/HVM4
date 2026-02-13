@@ -35,6 +35,7 @@ typedef struct {
   int   threads;
   int   verbose;
   int   test_ring;
+  int   test_siv;
   u32     ffi_loads_len;
   FfiLoad ffi_loads[FFI_MAX];
   char *file;
@@ -51,6 +52,7 @@ fn CliOpts parse_opts(int argc, char **argv) {
     .threads = 0,
     .verbose = 0,
     .test_ring = 0,
+    .test_siv = 0,
     .ffi_loads_len = 0,
     .file = NULL
   };
@@ -83,6 +85,8 @@ fn CliOpts parse_opts(int argc, char **argv) {
       opts.verbose = 1;
     } else if (strcmp(argv[i], "--test-ring") == 0) {
       opts.test_ring = 1;
+    } else if (strcmp(argv[i], "--test-siv") == 0) {
+      opts.test_siv = 1;
     } else if (strcmp(argv[i], "-d") == 0) {
       opts.debug = 1;
     } else if (strcmp(argv[i], "-D") == 0) {
@@ -144,6 +148,9 @@ int main(int argc, char **argv) {
 
   if (opts.test_ring) {
     return ring_test();
+  }
+  if (opts.test_siv) {
+    return siv_test();
   }
 
   if (opts.file == NULL) {

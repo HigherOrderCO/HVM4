@@ -505,6 +505,7 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "data/wsq.c"
 #include "data/wspq.c"
 #include "data/elastic_ring.c"
+#include "data/siv.c"
 
 // CNF
 // ===
