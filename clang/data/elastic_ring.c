@@ -5,21 +5,29 @@
 // - Same physical memory is mapped twice contiguously in virtual address space,
 //   so reads/writes that cross the buffer boundary are seamless (no split logic).
 // - Elastic: grows via ftruncate + remap, shrinks via ftruncate + remap.
-//   Data is preserved through the backing fd; growth copies only live data.
+//   The backing fd preserves data across remaps — growth is zero-copy when the
+//   live data doesn't wrap, or a single memcpy of the wrapped prefix otherwise.
 //
 // Design
 // - Linux: memfd_create for anonymous backing fd.
 // - macOS/POSIX: shm_open + immediate shm_unlink for anonymous backing fd.
 // - Double-map: reserve 2*cap virtual space, MAP_FIXED both halves to same fd.
 // - Modular head/tail indices in [0, cap). Separate count for full/empty.
-// - Growth: save live data (contiguous via double-map), extend fd, remap, restore.
-// - Shrink: same approach in reverse, halving capacity.
+// - Growth: ftruncate to 2*cap, remap, unwrap prefix if wrapped. Zero-copy
+//   when data doesn't wrap (common case for monotonic push/pop patterns).
+// - Shrink: compact live data to offset 0, ftruncate to cap/2, remap.
 //
 // Notes
 // - Single-threaded (owner only). Concurrency is handled at a higher layer.
+//   For multi-threaded use (e.g. Chase-Lev backing): grow/shrink must not race
+//   with any readers. Thieves holding pointers from ring_pop_ptr become invalid
+//   after grow/shrink tears down the mapping. An atomic (data, mask) pair or
+//   quiescence protocol is needed — see wsq.c WsqArray pattern.
 // - Capacity is always a power-of-two multiple of page size.
 // - ring_push_ptr / ring_pop_ptr return pointers valid for contiguous access
 //   up to (cap - count) and count bytes respectively, even across the boundary.
+// - The byte-level API assumes callers handle alignment. The u64 convenience
+//   functions are always aligned since sizeof(u64) divides the page size.
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -233,7 +241,9 @@ fn bool ring_grow(ElasticRing *r) {
 fn void ring_shrink(ElasticRing *r) {
   size_t old_cap = r->cap;
   size_t new_cap = old_cap / 2;
+  // Only shrink if usage is at most 25% of capacity and new cap is viable.
   if (r->count > new_cap || new_cap < r->pg) return;
+  if (r->count > old_cap / 4) return;
 
   size_t used = r->count;
 
@@ -422,10 +432,64 @@ fn int ring_test(void) {
   }
   assert(ring_used(&r) == 0);
 
-  // 8. Shrink.
-  assert(ring_push_u64(&r, 12345));
-  ring_shrink(&r);
-  assert(ring_pop_u64(&r, &v) && v == 12345);
+  // 8. Shrink with wrapped data: advance head/tail to 3/4, push a few
+  //    elements so data wraps, then shrink. The memmove should compact
+  //    the wrapped data to offset 0 before truncating.
+  {
+    size_t sn = r.cap / sizeof(u64);
+    // Advance to 3/4 position.
+    for (size_t i = 0; i < sn * 3 / 4; i++) assert(ring_push_u64(&r, 0xAA));
+    for (size_t i = 0; i < sn * 3 / 4; i++) assert(ring_pop_u64(&r, &v));
+    // Push a few — head wraps past cap.
+    u32 few = 4;
+    for (u32 i = 0; i < few; i++) assert(ring_push_u64(&r, 55555 + i));
+    // Now count is small, cap is large — shrink should fire.
+    size_t cap_before = r.cap;
+    ring_shrink(&r);
+    assert(r.cap < cap_before);
+    // Verify data survived the shrink.
+    for (u32 i = 0; i < few; i++) {
+      assert(ring_pop_u64(&r, &v));
+      assert(v == 55555 + i);
+    }
+    assert(ring_used(&r) == 0);
+  }
+
+  // 9. Shrink respects cap/4 threshold: don't shrink if usage > cap/4.
+  {
+    size_t sn = r.cap / sizeof(u64);
+    // Fill to 30% capacity — above the 25% threshold.
+    size_t fill = sn * 30 / 100;
+    if (fill == 0) fill = 1;
+    for (size_t i = 0; i < fill; i++) assert(ring_push_u64(&r, i));
+    size_t cap_before = r.cap;
+    ring_shrink(&r);
+    assert(r.cap == cap_before); // should NOT have shrunk
+    for (size_t i = 0; i < fill; i++) assert(ring_pop_u64(&r, &v));
+  }
+
+  // 10. Grow when empty — should be a cheap no-data-copy expansion.
+  {
+    size_t cap_before = r.cap;
+    assert(ring_grow(&r));
+    assert(r.cap == cap_before * 2);
+    assert(ring_used(&r) == 0);
+    // Push/pop still works after empty grow.
+    assert(ring_push_u64(&r, 99999));
+    assert(ring_pop_u64(&r, &v) && v == 99999);
+  }
+
+  // 11. Double-map verification: write at offset X, read at offset X+cap.
+  //     This directly tests the ouroboros property of the backing mapping.
+  {
+    assert(ring_used(&r) == 0);
+    size_t off = 128; // arbitrary offset within the first half
+    if (off + sizeof(u64) <= r.cap) {
+      *(u64 *)(r.data + off) = 0xDEADBEEFCAFEull;
+      u64 mirror = *(u64 *)(r.data + off + r.cap);
+      assert(mirror == 0xDEADBEEFCAFEull);
+    }
+  }
 
   ring_free(&r);
   fprintf(stderr, "[elastic_ring] all tests passed\n");

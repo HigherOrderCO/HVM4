@@ -16,8 +16,19 @@
 // Notes
 // - Single-threaded (owner only). For work-stealing, the owner pushes IDs into
 //   a concurrent ring; thieves read SIV data via the ID after stealing.
-// - ID space is monotonic: id_to_slot[] grows with total pushes (not live count).
-//   Separate capacity tracking for data[] (count-bound) and id_to_slot[] (id-bound).
+//   Thread-safety contract for SIV+Ring integration:
+//     * Owner: siv_push (then publish ID to ring), siv_erase (after thief is done).
+//     * Thief: siv_valid + siv_get (after stealing ID from ring).
+//     * Requires: release barrier after siv_push (before ring push), acquire
+//       barrier in thief (after ring steal, before siv_get).
+//     * Race: if owner calls siv_erase while thief is in siv_get for the same ID,
+//       the thief may read a stale/swapped value. The thief must copy the value
+//       before the owner can erase, or the cancel protocol must ensure the owner
+//       only erases IDs that no thief is currently reading.
+// - ID space is monotonic u32: wraps to 0 after 4 billion pushes total (not live).
+//   For HVM4 work queues this is unreachable in practice. If needed, a reset or
+//   generation counter can be added to the protocol.
+// - Separate capacity tracking for data[] (count-bound) and id_to_slot[] (id-bound).
 // - Erase of an already-erased ID is a safe no-op.
 
 #include <stdlib.h>
@@ -238,6 +249,42 @@ fn int siv_test(void) {
   assert(id_after != SIV_INVALID);
   assert(siv_count(&s) == 1);
   assert(siv_get(&s, id_after) == 42);
+  siv_erase(&s, id_after);
+
+  // 11. siv_valid rejects garbage IDs
+  assert(!siv_valid(&s, SIV_INVALID));     // sentinel value
+  assert(!siv_valid(&s, 0xFFFFFFFE));      // near-max u32
+  assert(!siv_valid(&s, 999999));          // beyond next_id
+  assert(!siv_valid(&s, 0));               // was valid, now erased
+
+  // 12. Independent capacity growth: data cap vs id cap.
+  //     Push many, erase all, push many again. id_cap grows with total pushes
+  //     while data cap stays small (because count is always low).
+  for (u32 round = 0; round < 3; round++) {
+    for (u32 i = 0; i < 100; i++) {
+      u32 id = siv_push(&s, 8000 + round * 100 + i);
+      assert(id != SIV_INVALID);
+    }
+    // Erase all — data cap doesn't need to grow, but id_cap keeps rising
+    while (siv_count(&s) > 0) {
+      siv_erase(&s, siv_slot_id(&s, 0));
+    }
+  }
+  // After 3 rounds of 100 push+erase, next_id is 300+ but count is 0.
+  // id_cap must have grown, data cap may not have.
+  assert(siv_count(&s) == 0);
+  assert(s.id_cap >= 300);
+  // Push one more to verify everything still works
+  u32 id_final = siv_push(&s, 77777);
+  assert(id_final != SIV_INVALID);
+  assert(siv_get(&s, id_final) == 77777);
+
+  // 13. Erase last element (slot == last, no swap needed)
+  u32 id_only = siv_push(&s, 88888);
+  // Now count=2. Erase id_only (it's at the last slot).
+  siv_erase(&s, id_only);
+  assert(siv_count(&s) == 1);
+  assert(siv_get(&s, id_final) == 77777); // earlier push still valid
 
   siv_free(&s);
   fprintf(stderr, "[siv] all tests passed\n");
