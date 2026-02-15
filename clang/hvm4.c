@@ -285,12 +285,14 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 // Heap
 // ====
 
+#include "heap/free.c"
 #include "heap/alloc.c"
 #include "heap/read.c"
 #include "heap/take.c"
 #include "heap/set.c"
 #include "heap/set_rel.c"
 #include "heap/init_slices.c"
+#include "heap/epoch.c"
 
 // Term Constructors
 // =================
@@ -367,6 +369,7 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "prim/fn/log_go_0.c"
 #include "prim/fn/log_go_1.c"
 #include "prim/fn/log_go_2.c"
+#include "prim/fn/compact.c"
 #include "prim/init.c"
 #include "print/term.c"
 
