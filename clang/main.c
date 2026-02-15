@@ -4,13 +4,16 @@
 // This file provides the command-line interface for the HVM4 runtime,
 // mirroring the structure of main.hs for the Haskell implementation.
 //
-// Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>]
+// Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>] [--epoch[=N]]
 //   -s:  Show statistics (interactions, time, performance)
 //   -S:  Silent output (omit term printing)
 //   -D:  Step-by-step reduction (print intermediate terms)
 //   -C:  Collapse and flatten (enumerate all superposition branches)
 //   -CN: Collapse and flatten, limit to N results
 //   -T:  Use N threads (e.g. -T4)
+//   --epoch:    Enable epoch nursery allocator (stable = 1/4 of HEAP)
+//   --epoch=N:  Enable epoch mode with stable = 1/N of HEAP
+//   --epoch-bench: Run epoch allocator microbenchmarks
 
 #include "hvm4.c"
 
@@ -32,6 +35,8 @@ typedef struct {
   int   debug;
   int   step_by_step;
   int   threads;
+  int   epoch;           // 0 = off, >0 = stable fraction (e.g. 4 = 1/4 HEAP)
+  int   epoch_bench;
   u32     ffi_loads_len;
   FfiLoad ffi_loads[FFI_MAX];
   char *file;
@@ -46,6 +51,8 @@ fn CliOpts parse_opts(int argc, char **argv) {
     .debug = 0,
     .step_by_step = 0,
     .threads = 0,
+    .epoch = 0,
+    .epoch_bench = 0,
     .ffi_loads_len = 0,
     .file = NULL
   };
@@ -74,6 +81,16 @@ fn CliOpts parse_opts(int argc, char **argv) {
         fprintf(stderr, "Error: -T value (%d) exceeds MAX_THREADS (%d)\n", opts.threads, MAX_THREADS);
         exit(1);
       }
+    } else if (strcmp(argv[i], "--epoch") == 0) {
+      opts.epoch = 4;  // default: stable = 1/4 of HEAP
+    } else if (strncmp(argv[i], "--epoch=", 8) == 0) {
+      opts.epoch = atoi(argv[i] + 8);
+      if (opts.epoch < 2) {
+        fprintf(stderr, "Error: --epoch=N requires N >= 2\n");
+        exit(1);
+      }
+    } else if (strcmp(argv[i], "--epoch-bench") == 0) {
+      opts.epoch_bench = 1;
     } else if (strcmp(argv[i], "-d") == 0) {
       opts.debug = 1;
     } else if (strcmp(argv[i], "-D") == 0) {
@@ -133,6 +150,16 @@ int main(int argc, char **argv) {
   // Parse command line
   CliOpts opts = parse_opts(argc, argv);
 
+  if (opts.epoch_bench) {
+    HEAP = calloc(HEAP_CAP, sizeof(Term));
+    if (!HEAP) {
+      sys_error("Memory allocation failed");
+    }
+    thread_set_count(1);
+    wnf_set_tid(0);
+    return epoch_bench();
+  }
+
   if (opts.file == NULL) {
     fprintf(stderr, "Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>] [--ffi <path>] [--ffi-dir <path>]\n");
     return 1;
@@ -160,7 +187,11 @@ int main(int argc, char **argv) {
   if (!BOOK || !HEAP || !TABLE) {
     sys_error("Memory allocation failed");
   }
-  heap_init_slices();
+  if (opts.epoch > 0) {
+    epoch_init((u32)opts.epoch);
+  } else {
+    heap_init_slices();
+  }
 
   // Register known primitives before parsing (needed for arity checks).
   prim_init();
@@ -245,8 +276,10 @@ int main(int argc, char **argv) {
     }
     printf("- Time: %.3f seconds\n", dt);
     printf("- Perf: %.2f M interactions/s\n", ips / 1e6);
+    epoch_print_stats();
   } else if (opts.silent) {
     printf("- Itrs: %llu interactions\n", total_itrs);
+    epoch_print_stats();
   }
 
   // Cleanup
