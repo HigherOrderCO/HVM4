@@ -1,0 +1,37 @@
+#include "../stdlib/all.hvm4"
+
+// Performs GET on example.com and returns #P{status, decoded_body}.
+// Requires outbound network access.
+
+@resp_to_status_body = λev.
+  λ{
+    #Resp:     λstatus. λheaders. λbody.@pure(#P{status, body});
+    #Fail:     λreason. λmsg.#ERR{msg};
+    #Canceled: #ERR{"http request canceled"};
+    &{}
+  }(ev)
+
+@decode_status_text = λsb1.
+  !&sb = sb1;
+  ! st  = @fst(sb);
+  ! bs  = @snd(sb);
+  ! f0 = λ txt ;
+  @do(
+    [
+      f0, @bytes_to_string(bs)
+    ],
+    #P{st, txt}
+  )
+
+@main =
+  ! f0 = λ ev0 ;
+  ! f1 = λ sb1 ;
+  ! f2 = λ out2 ;
+  @do(
+    [
+      f0, @http_get("https://example.com"),
+      f1, @resp_to_status_body(ev0),
+      f2, @decode_status_text(sb1)
+    ],
+    out2
+  )

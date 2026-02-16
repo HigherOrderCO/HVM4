@@ -1,0 +1,32 @@
+#include "../stdlib/timer.hvm4"
+
+// Logs "tick" every second, 5 times.
+
+@ticks = λn. λ&ms.
+  λ{
+    0:
+      @pure(#Done{});
+    λk.
+      ! f0 = λ s0 ;
+      ! f1 = λ l1 ;
+      ! f2 = λ r2 ;
+      @do(
+        [
+          f0, @sleep_ms(ms),
+          f1, @log("tick"),
+          f2, @ticks(k - 1, ms)
+        ],
+        r2
+      )
+  }(n)
+
+@main =
+  ! f0 = λ l0 ;
+  ! f1 = λ r1 ;
+  @do(
+    [
+      f0, @log("starting timer example"),
+      f1, @ticks(5, 1000)
+    ],
+    r1
+  )

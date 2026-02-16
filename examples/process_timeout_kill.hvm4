@@ -1,0 +1,36 @@
+#include "../stdlib/all.hvm4"
+
+// Starts a long process, waits timeout_ms, then kills it.
+
+@process_kill_wait = λproc.
+  ! f0 = λ st ;
+  ! f1 = λ kw ;
+  @do(
+    [
+      f0, @process_kill(proc),
+      f1, λ{
+        #Rdy:  λp2. λev.@pure(#P{p2, ev});
+        #Pend: λp2.@process_wait(p2);
+        &{}
+      }(st)
+    ],
+    kw
+  )
+
+@run_with_timeout = λcmd. λtimeout_ms.
+  ! f0 = λ p0 ;
+  ! f1 = λ t0 ;
+  ! f2 = λ tw ;
+  ! f3 = λ kw ;
+  @do(
+    [
+      f0, @process_spawn(cmd),
+      f1, @timer_start(timeout_ms),
+      f2, @timer_wait(t0),
+      f3, @process_kill_wait(p0)
+    ],
+    #P{tw, kw}
+  )
+
+@main =
+  @run_with_timeout("sleep 10", 1000)

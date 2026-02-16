@@ -1,0 +1,2 @@
+Hello from HVM4 examples.
+This file is read as bytes and decoded with stdlib/bytes.hvm4.

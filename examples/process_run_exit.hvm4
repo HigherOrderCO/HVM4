@@ -1,0 +1,17 @@
+#include "../stdlib/process.hvm4"
+
+// Runs 3 commands and returns their process events.
+// Expected events: #Exit{0}, #Exit{7}, #Exit{1}.
+
+@main =
+  ! f0 = λ e0 ;
+  ! f1 = λ e1 ;
+  ! f2 = λ e2 ;
+  @do(
+    [
+      f0, @process_run("exit 0"),
+      f1, @process_run("exit 7"),
+      f2, @process_run("false")
+    ],
+    #P{e0, #P{e1, e2}}
+  )

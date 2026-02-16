@@ -1,0 +1,52 @@
+#include "../stdlib/all.hvm4"
+
+// Reads an entire file via stream, closes it, and decodes UTF-8.
+
+@stream_read_all_step = λw. λ&acc.
+  !&w2 = w;
+  !&h  = @fst(w2);
+  ! e  = @snd(w2);
+  λ{
+    #BYT: λn.@stream_read_all(h, #BYT{n} <> acc);
+    #Eof: @pure(#P{h, @list_rev(acc)});
+    &{}
+  }(e)
+
+@stream_read_all = λstrm. λ&acc.
+  ! f0 = λ w0 ;
+  ! f1 = λ r1 ;
+  @do(
+    [
+      f0, @stream_wait(strm),
+      f1, @stream_read_all_step(w0, acc)
+    ],
+    r1
+  )
+
+@stream_close_decode = λr1.
+  !&r = r1;
+  ! f0 = λ c2 ;
+  ! f1 = λ txt ;
+  @do(
+    [
+      f0, @stream_close(@fst(r)),
+      f1, @bytes_to_string(@snd(r))
+    ],
+    txt
+  )
+
+@stream_file_read_all = λpath.
+  ! f0 = λ s0 ;
+  ! f1 = λ r1 ;
+  ! f2 = λ txt ;
+  @do(
+    [
+      f0, @stream_file_open(path),
+      f1, @stream_read_all(s0, []),
+      f2, @stream_close_decode(r1)
+    ],
+    txt
+  )
+
+@main =
+  @stream_file_read_all("examples/sample.txt")
