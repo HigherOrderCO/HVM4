@@ -311,7 +311,7 @@ fn void print_term_go(FILE *f, Term term, u32 depth, PrintState *st) {
   switch (term_tag(term)) {
     case NAM: {
       // Literal stuck name (^x).
-      print_sym_name(f, term_ext(term));
+      print_name(f, term_ext(term));
       break;
     }
     case DRY: {
@@ -456,7 +456,7 @@ fn void print_term_go(FILE *f, Term term, u32 depth, PrintState *st) {
     case SUP: {
       u32 loc = term_val(term);
       fputc('&', f);
-      print_sym_name(f, term_ext(term));
+      print_name(f, term_ext(term));
       fputc('{', f);
       print_term_at(f, HEAP[loc + 0], depth, st);
       fputc(',', f);
@@ -471,7 +471,7 @@ fn void print_term_go(FILE *f, Term term, u32 depth, PrintState *st) {
         fputc('!', f);
         print_alpha_name(f, depth + 1, 'A');
         fputc('&', f);
-        print_sym_name(f, term_ext(term));
+        print_name(f, term_ext(term));
         fputc('=', f);
         print_term_at(f, HEAP[loc + 0], depth, st);
         fputc(';', f);
@@ -646,7 +646,7 @@ fn void print_term_finish(FILE *f, PrintState *st) {
     fputc('!', f);
     print_dup_name(f, nam);
     fputc('&', f);
-    print_sym_name(f, lab);
+    print_name(f, lab);
     fputc('=', f);
     Term val = HEAP[loc];
     if (term_sub_get(val)) {
