@@ -16,7 +16,7 @@ fn Term parse_term_sup(PState *s, u32 depth) {
     lab_term = parse_term(s, depth);
     parse_consume(s, ")");
   } else {
-    lab = parse_name(s);
+    lab = parse_name_num(s);
   }
   parse_skip(s);
   // Fork: &Lλx,y,z{A;B} or &(L)λx,y,z{A;B}

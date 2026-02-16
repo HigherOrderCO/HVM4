@@ -122,7 +122,7 @@ fn Term parse_term_dup(PState *s, u32 depth) {
   if (parse_peek(s) == '=') {
     lab = PARSE_FRESH_LAB++;
   } else {
-    lab = parse_name(s);
+    lab = parse_name_num(s);
   }
   u64 loc = heap_alloc(2);
   parse_consume(s, "=");

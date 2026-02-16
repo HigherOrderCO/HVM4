@@ -12,7 +12,7 @@ fn Term parse_term_nam(PState *s, u32 depth) {
     return term_new_dry(f, x);
   } else {
     // ^name -> NAM(name)
-    u32 nam = parse_name(s);
+    u32 nam = parse_name_num(s);
     return term_new(0, NAM, nam, 0);
   }
 }

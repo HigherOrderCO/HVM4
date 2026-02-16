@@ -165,7 +165,7 @@ fn Term parse_term_lam(PState *s, u32 depth) {
       if (c == ',' || c == '.') {
         lab = PARSE_FRESH_LAB++;
       } else {
-        lab = parse_name(s);
+        lab = parse_name_num(s);
       }
     }
     parse_skip(s);
