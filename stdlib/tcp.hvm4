@@ -1,0 +1,117 @@
+#include "_.hvm4"
+
+// TCP helpers
+
+@tcp_opts_default =
+  #TcpOpts{5000,5000,5000,#T{},#F{}}
+
+@tcp_req = λhost. λport. λopts.
+  #TcpReq{host,port,opts}
+
+@tcp_connect = λreq.
+  %tcp_connect(req)
+
+@tcp_connect_poll = λtcp.
+  %tcp_connect_poll(tcp)
+
+@tcp_connect_wait = λtcp.
+  @wait(%tcp_connect_wait(tcp), @decode_wait_he)
+
+@tcp_send_poll = λtcp. λdata.
+  %tcp_send_poll(tcp, data)
+
+@tcp_send_wait = λtcp. λdata.
+  @wait(%tcp_send_wait(tcp, data), @decode_wait_he)
+
+@tcp_recv_poll = λtcp. λmaxb.
+  %tcp_recv_poll(tcp, maxb)
+
+@tcp_recv_wait = λtcp. λmaxb.
+  @wait(%tcp_recv_wait(tcp, maxb), @decode_wait_he)
+
+@tcp_close = λtcp.
+  @wait(%tcp_close(tcp), @decode_wait_he)
+
+@tcp_expect_conn = λw1.
+  !&w = w1;
+  ! h  = @fst(w);
+  λ{
+    #Conn: @pure(h);
+    #Fail: λreason. λmsg.#ERR{msg};
+    &{}
+  }(@snd(w))
+
+@tcp_connect_open = λreq.
+  ! f0 = λ t0 ;
+  ! f1 = λ w1 ;
+  ! f2 = λ h2 ;
+  @do(
+    [
+      f0, @tcp_connect(req),
+      f1, @tcp_connect_wait(t0),
+      f2, @tcp_expect_conn(w1)
+    ],
+    h2
+  )
+
+@tcp_step_send = λw1. λdata.
+  !&p = w1;
+  ! h1   = @fst(p);
+  ! cevt = @snd(p);
+  ! f0 = λ w2 ;
+  @do(
+    [
+      f0, @tcp_send_wait(h1, data)
+    ],
+    #P{w2, cevt}
+  )
+
+@tcp_step_recv = λst. λmaxb.
+  !&s = st;
+  ! w2   = @fst(s);
+  ! cevt = @snd(s);
+  !&q = w2;
+  ! h2   = @fst(q);
+  ! sevt = @snd(q);
+  ! f0 = λ w3 ;
+  @do(
+    [
+      f0, @tcp_recv_wait(h2, maxb)
+    ],
+    #P{w3, #P{cevt,sevt}}
+  )
+
+@tcp_step_close = λst.
+  !&s = st;
+  ! w3    = @fst(s);
+  ! pair  = @snd(s);
+  !&q = w3;
+  ! h3    = @fst(q);
+  ! revt  = @snd(q);
+  !&r = pair;
+  ! cevt  = @fst(r);
+  ! sevt  = @snd(r);
+  ! f0 = λ w4 ;
+  @do(
+    [
+      f0, @tcp_close(h3)
+    ],
+    #P{cevt, #P{sevt, revt}}
+  )
+
+@tcp_roundtrip = λreq. λdata. λmaxb.
+  ! f0 = λ t0 ;
+  ! f1 = λ w1 ;
+  ! f2 = λ st2 ;
+  ! f3 = λ st3 ;
+  ! f4 = λ out ;
+  @do(
+    [
+      f0, @tcp_connect(req),
+      f1, @tcp_connect_wait(t0),
+      f2, @tcp_step_send(w1, data),
+      f3, @tcp_step_recv(st2, maxb),
+      f4, @tcp_step_close(st3)
+    ],
+    out
+  )

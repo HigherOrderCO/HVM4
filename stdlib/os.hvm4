@@ -1,0 +1,27 @@
+#include "_.hvm4"
+
+// OS / environment helpers
+
+@env_get = λname.
+  %env(name)
+
+@cwd_get =
+  %cwd(0)
+
+@chdir = λpath.
+  %chdir(path)
+
+@argv =
+  @pure(%argv(0))
+
+@uid =
+  @pure(%uid(0))
+
+@rand =
+  @pure(%rand(0))
+
+@uuid =
+  %uuid(0)
+
+@abort = λmsg.
+  %panic(msg)

@@ -1,0 +1,150 @@
+// HVM4 stdlib core
+// - Result combinators
+// - Generic do-notation interpreter
+// - Wait/poll normalization helpers
+// - Generic list helpers
+
+// -----------------------------------------------------------------------------
+// Result Core
+// -----------------------------------------------------------------------------
+
+@pure = λx.#OK{x}
+@ok   = @pure
+
+@fail = λmsg.#ERR{msg}
+
+@bind = λr. λk.
+  λ{
+    #OK:  λx.k(x);
+    #ERR: λe.#ERR{e};
+    &{}
+  }(r)
+
+@then = λr. λnext.
+  @bind(r, λu.next)
+
+@map = λr. λf.
+  @bind(r, λx.@pure(f(x)))
+
+@map_err = λr. λf.
+  λ{
+    #OK:  λx.#OK{x};
+    #ERR: λe.#ERR{f(e)};
+    &{}
+  }(r)
+
+@or_else = λr. λkerr.
+  λ{
+    #OK:  λx.#OK{x};
+    #ERR: λe.kerr(e);
+    &{}
+  }(r)
+
+@log = λmsg.
+  @pure(%log(msg))
+
+@fst = λp.
+  λ{
+    #P: λa. λb.a;
+    &{}
+  }(p)
+
+@snd = λp.
+  λ{
+    #P: λa. λb.b;
+    &{}
+  }(p)
+
+@dup2 = λx. λk.
+  !d&D = x;
+  k(d₀, d₁)
+
+// -----------------------------------------------------------------------------
+// Do Notation Core
+// -----------------------------------------------------------------------------
+
+// @do_with(bind, pure, steps, cont)
+// steps format: [wrap0, action0, wrap1, action1, ...]
+// wrapN is an unscoped wrapper built with: ! f = λ x ; ...
+@do_with = λ&bind. λ&pure. λsteps. λ&cont.
+  λ{
+    []: pure(cont);
+    <>: λwrap. λtail.
+      λ{
+        <>: λact. λrest.
+          bind(act, λv.
+            λ{
+              #P: λrest2. λcont2.
+                @do_with(bind, pure, rest2, cont2);
+              &{}
+            }(wrap(#P{rest,cont})(v))
+          );
+        []:
+          #ERR{"do: malformed steps; expected [wrap,action,...]"}
+      }(tail)
+  }(steps)
+
+@do = λsteps. λcont.
+  @do_with(@bind, @pure, steps, cont)
+
+// -----------------------------------------------------------------------------
+// Wait/Poll Normalization
+// -----------------------------------------------------------------------------
+
+@wait = λr. λdecode.
+  @bind(r, λst.decode(st))
+
+@decode_wait_h = λst.
+  λ{
+    #Rdy:  λh.@pure(h);
+    #Pend: λh.#ERR{"expected #Rdy; got #Pend"};
+    &{}
+  }(st)
+
+@decode_wait_he = λst.
+  λ{
+    #Rdy:  λh. λe.@pure(#P{h,e});
+    #Pend: λh.#ERR{"expected #Rdy; got #Pend"};
+    &{}
+  }(st)
+
+@decode_poll_h = λst.
+  λ{
+    #Pend: λh.@pure(#Pend{h});
+    #Rdy:  λh.@pure(#Rdy{h});
+    &{}
+  }(st)
+
+@decode_poll_he = λst.
+  λ{
+    #Pend: λh.@pure(#Pend{h});
+    #Rdy:  λh. λe.@pure(#Rdy{#P{h,e}});
+    &{}
+  }(st)
+
+@await_poll = λ&poll. λ&decode. λh0.
+  ! f0 = λ st ;
+  @do(
+    [
+      f0, @wait(poll(h0), decode)
+    ],
+    λ{
+      #Pend: λh1.@await_poll(poll, decode, h1);
+      #Rdy:  λout.@pure(out);
+      &{}
+    }(st)
+  )
+
+// -----------------------------------------------------------------------------
+// Generic Lists
+// -----------------------------------------------------------------------------
+
+@list_rev = λxs.
+  @list_rev_go(xs, [])
+
+@list_rev_go = λxs. λ&acc.
+  λ{
+    []: acc;
+    <>: λh. λt.@list_rev_go(t, h <> acc);
+    &{}
+  }(xs)

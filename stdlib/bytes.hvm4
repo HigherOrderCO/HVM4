@@ -1,0 +1,156 @@
+#include "_.hvm4"
+
+// Byte helpers
+// - UTF-8 decode from List<#BYT{n}> to String (List<#CHR{codepoint}>)
+
+@bytes_if = λcond. λyes. λno.
+  λ{
+    0: no;
+    λx.yes
+  }(cond)
+
+@bytes_is_cont = λ&b.
+  ((b >= 128) && (b <= 191))
+
+@bytes_valid_b1_3 = λ&b0. λ&b1.
+  @bytes_if(
+    (b0 == 224),
+    ((b1 >= 160) && (b1 <= 191)),
+    @bytes_if(
+      (b0 == 237),
+      ((b1 >= 128) && (b1 <= 159)),
+      @bytes_is_cont(b1)
+    )
+  )
+
+@bytes_valid_b1_4 = λ&b0. λ&b1.
+  @bytes_if(
+    (b0 == 240),
+    ((b1 >= 144) && (b1 <= 191)),
+    @bytes_if(
+      (b0 == 244),
+      ((b1 >= 128) && (b1 <= 143)),
+      @bytes_is_cont(b1)
+    )
+  )
+
+@bytes_to_string = λbytes.
+  @bytes_to_string_go(bytes, [])
+
+@bytes_to_string_go = λbytes. λ&acc.
+  λ{
+    []:
+      @pure(@list_rev(acc));
+    <>: λhead. λ&tail.
+      λ{
+        #BYT: λ&b0.
+          @bytes_if(
+            (b0 <= 127),
+            @bytes_to_string_go(tail, #CHR{b0} <> acc),
+            @bytes_if(
+              ((b0 >= 194) && (b0 <= 223)),
+              @bytes_to_string_2(b0, tail, acc),
+              @bytes_if(
+                ((b0 >= 224) && (b0 <= 239)),
+                @bytes_to_string_3(b0, tail, acc),
+                @bytes_if(
+                  ((b0 >= 240) && (b0 <= 244)),
+                  @bytes_to_string_4(b0, tail, acc),
+                  @fail("bytes_to_string: invalid UTF-8 leading byte")
+                )
+              )
+            )
+          );
+        λx.@fail("bytes_to_string: expected List<#BYT{n}>")
+      }(head);
+    &{}
+  }(bytes)
+
+@bytes_to_string_2 = λ&b0. λtail. λ&acc.
+  λ{
+    []:
+      @fail("bytes_to_string: truncated UTF-8 sequence");
+    <>: λh1. λrest.
+      λ{
+        #BYT: λ&b1.
+          @bytes_if(
+            @bytes_is_cont(b1),
+            ! cp = (((b0 - 192) << 6) + (b1 - 128));
+            @bytes_to_string_go(rest, #CHR{cp} <> acc),
+            @fail("bytes_to_string: invalid UTF-8 continuation byte")
+          );
+        λx.@fail("bytes_to_string: expected List<#BYT{n}>")
+      }(h1);
+    &{}
+  }(tail)
+
+@bytes_to_string_3 = λ&b0. λtail. λ&acc.
+  λ{
+    []:
+      @fail("bytes_to_string: truncated UTF-8 sequence");
+    <>: λh1. λtail2.
+      λ{
+        #BYT: λ&b1.
+          λ{
+            []:
+              @fail("bytes_to_string: truncated UTF-8 sequence");
+            <>: λh2. λrest.
+              λ{
+                #BYT: λ&b2.
+                  @bytes_if(
+                    (@bytes_valid_b1_3(b0, b1) && @bytes_is_cont(b2)),
+                    ! cp = ((((b0 - 224) << 12) + ((b1 - 128) << 6)) + (b2 - 128));
+                    @bytes_to_string_go(rest, #CHR{cp} <> acc),
+                    @fail("bytes_to_string: invalid UTF-8 continuation byte")
+                  );
+                λx.@fail("bytes_to_string: expected List<#BYT{n}>")
+              }(h2);
+            &{}
+          }(tail2);
+        λx.@fail("bytes_to_string: expected List<#BYT{n}>")
+      }(h1);
+    &{}
+  }(tail)
+
+@bytes_to_string_4 = λ&b0. λtail. λ&acc.
+  λ{
+    []:
+      @fail("bytes_to_string: truncated UTF-8 sequence");
+    <>: λh1. λtail2.
+      λ{
+        #BYT: λ&b1.
+          λ{
+            []:
+              @fail("bytes_to_string: truncated UTF-8 sequence");
+            <>: λh2. λtail3.
+              λ{
+                #BYT: λ&b2.
+                  λ{
+                    []:
+                      @fail("bytes_to_string: truncated UTF-8 sequence");
+                    <>: λh3. λrest.
+                      λ{
+                        #BYT: λ&b3.
+                          @bytes_if(
+                            ((@bytes_valid_b1_4(b0, b1) && @bytes_is_cont(b2)) && @bytes_is_cont(b3)),
+                            ! cp = (((((b0 - 240) << 18) + ((b1 - 128) << 12)) + ((b2 - 128) << 6)) + (b3 - 128));
+                            @bytes_to_string_go(rest, #CHR{cp} <> acc),
+                            @fail("bytes_to_string: invalid UTF-8 continuation byte")
+                          );
+                        λx.@fail("bytes_to_string: expected List<#BYT{n}>")
+                      }(h3);
+                    &{}
+                  }(tail3);
+                λx.@fail("bytes_to_string: expected List<#BYT{n}>")
+              }(h2);
+            &{}
+          }(tail2);
+        λx.@fail("bytes_to_string: expected List<#BYT{n}>")
+      }(h1);
+    &{}
+  }(tail)
+
+@bytes_log = λbytes.
+  @bind(@bytes_to_string(bytes), λtxt.
+    @log(txt)
+  )

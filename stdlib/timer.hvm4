@@ -1,0 +1,26 @@
+#include "_.hvm4"
+
+// Timer helpers
+
+@timer_start = λms.
+  %timer_start(ms)
+
+@timer_poll = λt.
+  %timer_poll(t)
+
+@timer_wait = λt.
+  @wait(%timer_wait(t), @decode_wait_h)
+
+@sleep_ms = λms.
+  ! f0 = λ t0 ;
+  ! f1 = λ t1 ;
+  @do(
+    [
+      f0, @timer_start(ms),
+      f1, @timer_wait(t0)
+    ],
+    []
+  )
+
+@sleep_s = λsec.
+  @sleep_ms(sec * 1000)

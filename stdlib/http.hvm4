@@ -1,0 +1,50 @@
+#include "_.hvm4"
+
+// HTTP helpers
+
+@http_opts_default =
+  #Opts{5000,2000,#F{},0,#T{},65536}
+
+@http_req = λmethod. λurl. λheaders. λbody. λopts.
+  #Req{method,url,headers,body,opts}
+
+@http_get_req = λurl.
+  #Req{#Get{},url,[],#NoBody{},@http_opts_default}
+
+@http_post_text_req = λurl. λtext.
+  #Req{#Post{},url,[],#BodyText{text},@http_opts_default}
+
+@http_post_bytes_req = λurl. λbbs.
+  #Req{#Post{},url,[],#BodyBytes{bbs},@http_opts_default}
+
+@http_request = λreq.
+  %http_request(req)
+
+@http_poll = λhttp.
+  %http_poll(http)
+
+@http_wait = λhttp.
+  @wait(%http_wait(http), @decode_wait_he)
+
+@http_cancel = λhttp.
+  %http_cancel(http)
+
+@http_request_wait = λreq.
+  ! f0 = λ h0 ;
+  ! f1 = λ w1 ;
+  @do(
+    [
+      f0, @http_request(req),
+      f1, @http_wait(h0)
+    ],
+    @snd(w1)
+  )
+
+@http_get = λurl.
+  @http_request_wait(@http_get_req(url))
+
+@http_post_text = λurl. λtext.
+  @http_request_wait(@http_post_text_req(url, text))
+
+@http_post_bytes = λurl. λbbs.
+  @http_request_wait(@http_post_bytes_req(url, bbs))

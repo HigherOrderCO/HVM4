@@ -1,0 +1,35 @@
+#include "_.hvm4"
+
+// Process helpers
+
+@process_spawn = λcmd.
+  %process_spawn(cmd)
+
+@process_poll = λproc.
+  %process_poll(proc)
+
+@process_wait = λproc.
+  @wait(%process_wait(proc), @decode_wait_he)
+
+@process_wait_evt = λproc.
+  ! f0 = λ w0 ;
+  @do(
+    [
+      f0, @process_wait(proc)
+    ],
+    @snd(w0)
+  )
+
+@process_kill = λproc.
+  %process_kill(proc)
+
+@process_run = λcmd.
+  ! f0 = λ p0 ;
+  ! f1 = λ e1 ;
+  @do(
+    [
+      f0, @process_spawn(cmd),
+      f1, @process_wait_evt(p0)
+    ],
+    e1
+  )

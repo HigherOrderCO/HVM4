@@ -1,0 +1,63 @@
+#include "_.hvm4"
+
+// Stream helpers
+
+@stream_stdin_open = λseed.
+  %stream_stdin_open(seed)
+
+@stream_file_open = λpath.
+  %stream_file_open(path)
+
+@stream_poll = λstrm.
+  %stream_poll(strm)
+
+@stream_wait = λstrm.
+  @wait(%stream_wait(strm), @decode_wait_he)
+
+@stream_close = λstrm.
+  %stream_close(strm)
+
+@stream_read_all = λstrm.
+  @stream_read_all_go(strm, [])
+
+@stream_read_all_go = λstrm. λ&acc.
+  ! f0 = λ w ;
+  @do(
+    [
+      f0, @stream_wait(strm)
+    ],
+    !&wr = w;
+    !&h  = @fst(wr);
+    ! e  = @snd(wr);
+    !&a  = acc;
+    λ{
+      #BYT: λn.@stream_read_all_go(h, #BYT{n} <> a);
+      #Eof: @pure(#P{h, @list_rev(a)});
+      &{}
+    }(e)
+  )
+
+@stream_close_and_take = λr1.
+  !&r = r1;
+  ! h = @fst(r);
+  ! b = @snd(r);
+  ! f0 = λ c0 ;
+  @do(
+    [
+      f0, @stream_close(h)
+    ],
+    b
+  )
+
+@stream_file_read_all = λpath.
+  ! f0 = λ s0 ;
+  ! f1 = λ r1 ;
+  ! f2 = λ b2 ;
+  @do(
+    [
+      f0, @stream_file_open(path),
+      f1, @stream_read_all(s0),
+      f2, @stream_close_and_take(r1)
+    ],
+    b2
+  )
