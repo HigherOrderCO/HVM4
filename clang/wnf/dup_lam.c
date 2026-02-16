@@ -11,6 +11,7 @@ fn Term wnf_dup_lam(u32 lab, u32 loc, u8 side, Term lam) {
   Term bod            = heap_read(lam_loc);
 
   if (lam_ext & LAM_ERA_MASK) {
+    heap_free(lam_loc, 1);
     u64  a      = heap_alloc(3);
     heap_set(a + 2, bod);
     Copy B      = term_clone_at(a + 2, lab);

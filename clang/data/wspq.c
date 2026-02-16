@@ -55,6 +55,7 @@ typedef struct __attribute__((aligned(256))) {
 typedef struct {
   WspqBank bank[MAX_THREADS];
   u32 n;
+  u32 brackets;  // actual number of brackets in use (≤ WSPQ_BRACKETS)
 } Wspq;
 
 // Return index of least-significant set bit (undefined for m == 0).
@@ -81,16 +82,19 @@ static inline u8 wspq_key_bucket(u32 key) {
   return (u8)bucket;
 }
 
-// Initialize all per-worker bucket queues.
-static inline bool wspq_init(Wspq *ws, u32 nthreads) {
+// Initialize all per-worker bucket queues with specified bracket count and capacity.
+static inline bool wspq_init_sized(Wspq *ws, u32 nthreads, u32 brackets, u32 cap_pow2) {
   ws->n = nthreads;
+  if (brackets > WSPQ_BRACKETS) brackets = WSPQ_BRACKETS;
+  if (brackets < 1) brackets = 1;
+  ws->brackets = brackets;
 
   for (u32 t = 0; t < nthreads; ++t) {
     atomic_store_explicit(&ws->bank[t].nonempty.v, 0ull, memory_order_relaxed);
-    for (u32 b = 0; b < WSPQ_BRACKETS; ++b) {
-      if (!wsq_init(&ws->bank[t].q[b], WSPQ_CAP_POW2)) {
+    for (u32 b = 0; b < brackets; ++b) {
+      if (!wsq_init(&ws->bank[t].q[b], cap_pow2)) {
         for (u32 t2 = 0; t2 <= t; ++t2) {
-          u32 bmax = WSPQ_BRACKETS;
+          u32 bmax = brackets;
           if (t2 == t) {
             bmax = b;
           }
@@ -105,10 +109,15 @@ static inline bool wspq_init(Wspq *ws, u32 nthreads) {
   return true;
 }
 
+// Initialize with default brackets and capacity (backward compatible).
+static inline bool wspq_init(Wspq *ws, u32 nthreads) {
+  return wspq_init_sized(ws, nthreads, WSPQ_BRACKETS, WSPQ_CAP_POW2);
+}
+
 // Free all per-worker bucket queues.
 static inline void wspq_free(Wspq *ws) {
   for (u32 t = 0; t < ws->n; ++t) {
-    for (u32 b = 0; b < WSPQ_BRACKETS; ++b) {
+    for (u32 b = 0; b < ws->brackets; ++b) {
       wsq_free(&ws->bank[t].q[b]);
     }
   }
@@ -120,7 +129,7 @@ static inline bool wspq_bucket_full_all(Wspq *ws, u8 b) {
     WsDeque *q = &ws->bank[t].q[b];
     size_t bot = atomic_load_explicit(&q->bot.v, memory_order_relaxed);
     size_t top = atomic_load_explicit(&q->top.v, memory_order_relaxed);
-    if (bot - top < q->cap) {
+    if (bot - top < wsq_capacity(q)) {
       return false;
     }
   }
@@ -132,7 +141,9 @@ static inline void wspq_push(Wspq *ws, u32 tid, u8 key, u64 task) {
     return;
   }
   u8 bucket = wspq_key_bucket(key);
+  if (bucket >= ws->brackets) bucket = (u8)(ws->brackets - 1);
   WsDeque *q = &ws->bank[tid].q[bucket];
+  // wsq_push now grows on full, so this loop body rarely executes.
   u32 spins = 1;
   while (!wsq_push(q, task)) {
     if ((spins % WSPQ_DEADLOCK_CHECK_PERIOD) == 0) {
@@ -179,10 +190,10 @@ static inline u32 wspq_steal_some(
     return 0u;
   }
 
-  u32 b_limit = WSPQ_BRACKETS;
+  u32 b_limit = ws->brackets;
   if (restrict_deeper) {
     u64 my_mask = atomic_load_explicit(&ws->bank[me].nonempty.v, memory_order_relaxed);
-    u32 my_min = WSPQ_BRACKETS;
+    u32 my_min = ws->brackets;
     if (my_mask != 0ull) {
       my_min = wspq_lsb64(my_mask);
     }
@@ -190,7 +201,7 @@ static inline u32 wspq_steal_some(
   }
 
   u64 allowed_mask = ~0ull;
-  if (b_limit < WSPQ_BRACKETS) {
+  if (b_limit < ws->brackets) {
     allowed_mask = (1ull << b_limit) - 1ull;
   }
 

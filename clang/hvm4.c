@@ -169,7 +169,9 @@ typedef struct {
 // Capacities
 // ==========
 
+#ifndef HEAP_CAP
 #define HEAP_CAP (1ULL << 32)
+#endif
 #define BOOK_CAP (1ULL << 24)
 #define WNF_CAP  (1ULL << 32)
 #define MAX_THREADS 64
@@ -286,6 +288,7 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 // Heap
 // ====
 
+#include "heap/free.c"
 #include "heap/alloc.c"
 #include "heap/read.c"
 #include "heap/take.c"
@@ -368,6 +371,7 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "prim/fn/log_go_0.c"
 #include "prim/fn/log_go_1.c"
 #include "prim/fn/log_go_2.c"
+#include "prim/fn/compact.c"
 #include "prim/init.c"
 #include "print/term.c"
 
@@ -502,11 +506,20 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "data/uset.c"
 #include "data/wsq.c"
 #include "data/wspq.c"
+#include "data/elastic_ring.c"
+#include "data/siv.c"
 
 // CNF
 // ===
 
 #include "cnf/_.c"
+
+// Analyze
+// =======
+
+#include "analyze/hints.c"
+
+static HvmHints HVM_HINTS = {0};
 
 // Eval
 // ====

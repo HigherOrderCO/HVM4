@@ -11,7 +11,9 @@ fn Term wnf_app_mat_num(Term mat, Term num) {
   u32 num_val = term_val(num);
   if (mat_ext == num_val) {
     ITRS_INC("APP-MAT-NUM-MAT");
-    return heap_read(mat_loc + 0);
+    Term res = heap_read(mat_loc + 0);
+    heap_free(mat_loc, 2);
+    return res;
   } else {
     ITRS_INC("APP-MAT-NUM-MIS");
     Term g = heap_read(mat_loc + 1);

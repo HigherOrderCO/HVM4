@@ -40,11 +40,11 @@ fn void cnf_pool_clear(void) {
   atomic_store_explicit(&CNF_POOL, NULL, memory_order_release);
 }
 
-fn u8 cnf_pool_init(CnfPool *pool, u32 n) {
+fn u8 cnf_pool_init_sized(CnfPool *pool, u32 n, u32 cap_pow2) {
   pool->n = n;
   atomic_store_explicit(&pool->pending.v, n > 1 ? n : 0, memory_order_relaxed);
   for (u32 i = 0; i < n; ++i) {
-    if (!wsq_init(&pool->dq[i], CNF_POOL_WS_CAP_POW2)) {
+    if (!wsq_init(&pool->dq[i], cap_pow2)) {
       for (u32 j = 0; j < i; ++j) {
         wsq_free(&pool->dq[j]);
       }
@@ -54,6 +54,10 @@ fn u8 cnf_pool_init(CnfPool *pool, u32 n) {
     atomic_store_explicit(&pool->active[i].v, 1, memory_order_relaxed);
   }
   return 1;
+}
+
+fn u8 cnf_pool_init(CnfPool *pool, u32 n) {
+  return cnf_pool_init_sized(pool, n, CNF_POOL_WS_CAP_POW2);
 }
 
 fn void cnf_pool_free(CnfPool *pool) {
