@@ -36,5 +36,5 @@ fn u32 parse_char_lit(PState *s) {
 fn Term parse_term_chr(PState *s) {
   u32 c = parse_char_lit(s);
   Term n = term_new_num(c);
-  return term_new_ctr(NAM_CHR, 1, &n);
+  return term_new_ctr(SYM_CHR, 1, &n);
 }

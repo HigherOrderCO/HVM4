@@ -37,12 +37,12 @@ fn Term parse_term_lam(PState *s, u32 depth) {
           if (ext == 0 && parse_peek_at(s, 1) != '+') {
             parse_advance(s);
             tag = MAT;
-            ext = NAM_ZER;
+            ext = SYM_ZER;
           } else if (ext == 1 && parse_peek_at(s, 1) == '+') {
             parse_advance(s);
             parse_advance(s);
             tag = MAT;
-            ext = NAM_SUC;
+            ext = SYM_SUC;
           }
         }
       }
@@ -55,13 +55,13 @@ fn Term parse_term_lam(PState *s, u32 depth) {
         parse_advance(s);
         parse_advance(s);
         tag = MAT;
-        ext = NAM_NIL;
+        ext = SYM_NIL;
       }
       else if (parse_peek(s) == '<' && parse_peek_at(s, 1) == '>') {
         parse_advance(s);
         parse_advance(s);
         tag = MAT;
-        ext = NAM_CON;
+        ext = SYM_CON;
       }
       if (tag) {
         parse_skip(s);
@@ -170,7 +170,7 @@ fn Term parse_term_lam(PState *s, u32 depth) {
     }
     parse_skip(s);
     u32 d = dyn ? 3 : 2;
-    PBind* bind = parse_bind_push(nam, depth + 1, dyn ? 0xFFFFFF : lab, 0, cloned);
+    PBind* bind = parse_bind_push(nam, depth + 1, dyn ? PARSE_DYN_LAB : lab, 0, cloned);
     Term body;
     if (parse_match(s, ",")) {
       body = parse_term_lam(s, depth + d);

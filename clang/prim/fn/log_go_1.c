@@ -19,9 +19,9 @@ fn Term prim_fn_log_go_1(Term *args) {
       // ↑(%log(acc(#Con{#Chr{x}, t})))
       u32  inc_loc     = term_val(head_wnf);
       Term inner       = heap_read(inc_loc);
-      Term chr         = term_new_ctr(NAM_CHR, 1, &inner);
+      Term chr         = term_new_ctr(SYM_CHR, 1, &inner);
       Term con_args[2] = {chr, tail};
-      Term con         = term_new_ctr(NAM_CON, 2, con_args);
+      Term con         = term_new_ctr(SYM_CON, 2, con_args);
       Term app         = term_new_app(acc, con);
       Term log         = term_new_pri(table_find("log", 3), 1, &app);
       heap_set(inc_loc, log);
@@ -37,12 +37,12 @@ fn Term prim_fn_log_go_1(Term *args) {
       Term y            = heap_read(sup_loc + 1);
       Copy A            = term_clone(lab, acc);
       Copy T            = term_clone(lab, tail);
-      Term chr0         = term_new_ctr(NAM_CHR, 1, &x);
-      Term chr1         = term_new_ctr(NAM_CHR, 1, &y);
+      Term chr0         = term_new_ctr(SYM_CHR, 1, &x);
+      Term chr1         = term_new_ctr(SYM_CHR, 1, &y);
       Term con0_args[2] = {chr0, T.k0};
       Term con1_args[2] = {chr1, T.k1};
-      Term con0         = term_new_ctr(NAM_CON, 2, con0_args);
-      Term con1         = term_new_ctr(NAM_CON, 2, con1_args);
+      Term con0         = term_new_ctr(SYM_CON, 2, con0_args);
+      Term con1         = term_new_ctr(SYM_CON, 2, con1_args);
       Term app0         = term_new_app(A.k0, con0);
       Term log0         = term_new_pri(table_find("log", 3), 1, &app0);
       Term app1         = term_new_app(A.k1, con1);
@@ -50,7 +50,7 @@ fn Term prim_fn_log_go_1(Term *args) {
       return term_new_sup(lab, log0, log1);
     }
     case C00 ... C16: {
-      if (term_tag(head_wnf) == C01 && term_ext(head_wnf) == NAM_CHR) {
+      if (term_tag(head_wnf) == C01 && term_ext(head_wnf) == SYM_CHR) {
         // %log_go_1(acc, #Chr{c}, t)
         // --------------------------- log-go-1-chr
         // %log_go_2(acc, c, t)

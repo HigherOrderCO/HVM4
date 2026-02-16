@@ -94,7 +94,7 @@ fn Term parse_term_dup(PState *s, u32 depth) {
     parse_skip(s);
     parse_match(s, ";");
     parse_skip(s);
-    PBind* bind = parse_bind_push(nam, depth, 0xFFFFFF, 0, cloned);
+    PBind* bind = parse_bind_push(nam, depth, PARSE_DYN_LAB, 0, cloned);
     Term body = parse_term(s, depth + 2);
     parse_bind_pop();
     u32 uses0 = count_uses(body, depth + 1, BJV, 0);

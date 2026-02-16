@@ -153,14 +153,15 @@ int main(int argc, char **argv) {
   wnf_set_tid(0);
 
   // Allocate memory
-  BOOK  = calloc(BOOK_CAP, sizeof(u32));
-  HEAP  = calloc(HEAP_CAP, sizeof(Term));
-  TABLE = calloc(BOOK_CAP, sizeof(char*));
+  BOOK       = calloc(BOOK_CAP, sizeof(u32));
+  HEAP       = calloc(HEAP_CAP, sizeof(Term));
+  TABLE.data = calloc(BOOK_CAP, sizeof(char*));
 
-  if (!BOOK || !HEAP || !TABLE) {
+  if (!BOOK || !HEAP || !TABLE.data) {
     sys_error("Memory allocation failed");
   }
   heap_init_slices();
+  symbols_init();
 
   // Register known primitives before parsing (needed for arity checks).
   prim_init();
@@ -252,7 +253,7 @@ int main(int argc, char **argv) {
   // Cleanup
   free(HEAP);
   free(BOOK);
-  free(TABLE);
+  free(TABLE.data);
   wnf_stack_free();
 
   return 0;

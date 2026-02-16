@@ -6,7 +6,7 @@ fn void log_fail(const char *msg) {
 }
 
 fn void log_print(Term acc) {
-  Term cur = term_new_app(acc, term_new_ctr(NAM_NIL, 0, 0));
+  Term cur = term_new_app(acc, term_new_ctr(SYM_NIL, 0, 0));
 
   while (1) {
     cur = wnf(cur);
@@ -22,16 +22,16 @@ fn void log_print(Term acc) {
         log_fail("%log expected a string list");
       }
       case C00 ... C16: {
-        if (term_tag(cur) == C00 && term_ext(cur) == NAM_NIL) {
+        if (term_tag(cur) == C00 && term_ext(cur) == SYM_NIL) {
           fputc('\n', stdout);
           return;
         }
-        if (term_tag(cur) == C02 && term_ext(cur) == NAM_CON) {
+        if (term_tag(cur) == C02 && term_ext(cur) == SYM_CON) {
           u32  con_loc = term_val(cur);
           Term head    = heap_read(con_loc + 0);
           Term tail    = heap_read(con_loc + 1);
           Term head_wnf = wnf(head);
-          if (!(term_tag(head_wnf) == C01 && term_ext(head_wnf) == NAM_CHR)) {
+          if (!(term_tag(head_wnf) == C01 && term_ext(head_wnf) == SYM_CHR)) {
             log_fail("%log expected #Chr head");
           }
           u32  chr_loc  = term_val(head_wnf);
@@ -91,14 +91,14 @@ fn Term prim_fn_log_go_0(Term *args) {
       return term_new_sup(lab, log0, log1);
     }
     case C00 ... C16: {
-      if (term_tag(list_wnf) == C00 && term_ext(list_wnf) == NAM_NIL) {
+      if (term_tag(list_wnf) == C00 && term_ext(list_wnf) == SYM_NIL) {
         // %log_go_0(acc, #Nil)
         // --------------------- log-go-0-nil
         // #Nil
         log_print(acc);
-        return term_new_ctr(NAM_NIL, 0, 0);
+        return term_new_ctr(SYM_NIL, 0, 0);
       }
-      if (term_tag(list_wnf) == C02 && term_ext(list_wnf) == NAM_CON) {
+      if (term_tag(list_wnf) == C02 && term_ext(list_wnf) == SYM_CON) {
         // %log_go_0(acc, #Con{h,t})
         // -------------------------- log-go-0-con
         // %log_go_1(acc, h, t)

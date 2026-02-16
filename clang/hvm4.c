@@ -271,6 +271,7 @@ static PBind  PARSE_BINDS[16384];
 static u32    PARSE_BINDS_LEN = 0;
 static u32    PARSE_FRESH_LAB = 0x800000; // start at 2^23 to avoid collision with user labels
 static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 = right branch (DP1)
+#define PARSE_DYN_LAB 0xFFFFFFFFu
 
 // Term
 // ====

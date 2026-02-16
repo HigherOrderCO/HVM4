@@ -15,7 +15,7 @@ fn Term parse_term_app_prec(Term f, PState *s, u32 depth, int min_prec) {
   if (parse_match(s, "<>")) {
     Term t = parse_term(s, depth);
     Term a[2] = {f, t};
-    return parse_term_app_prec(term_new_ctr(NAM_CON, 2, a), s, depth, min_prec);
+    return parse_term_app_prec(term_new_ctr(SYM_CON, 2, a), s, depth, min_prec);
   }
   // Structural equality: === (must check before == for numeric)
   if (parse_match(s, "===")) {

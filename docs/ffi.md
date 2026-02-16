@@ -73,8 +73,8 @@ clang -shared -fPIC -I /path/to/hvm4 \
 
 **Strings and Constructors**
 - HVM strings are lists using `#CON`, `#CHR`, and `#NIL` (uppercase).
-- `term_new_ctr` takes a nick-encoded constructor name, not a table ID.
-- Use `name_from_str("CON", 3)` and friends to get the correct constructor IDs.
+- `term_new_ctr` takes a symbol-table constructor ID.
+- Use `name_from_str("CON", 3)` and friends to intern/get the correct constructor IDs.
 
 **Threading and Safety**
 - Primitives may run concurrently in `-T<N>` mode.

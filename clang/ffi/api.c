@@ -23,7 +23,6 @@ fn void heap_set(u32 loc, Term t);
 fn u64 heap_alloc(u64 words);
 
 fn u32 table_find(const char *name, u32 len);
-fn u32 nick_from_str(const char *name, u32 len);
 
 fn void sys_runtime_error(const char *msg);
 
@@ -51,7 +50,7 @@ static const HvmApi HVM_API = {
   .heap_alloc      = heap_alloc,
 
   .table_find      = table_find,
-  .name_from_str   = nick_from_str,
+  .name_from_str   = table_find,
 
   .runtime_error   = sys_runtime_error
 };

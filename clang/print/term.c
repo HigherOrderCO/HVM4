@@ -147,20 +147,40 @@ fn u32 alo_subst_get(u32 ls_loc, u32 idx) {
   return ls != 0 ? (u32)(HEAP[ls] >> 32) : 0;
 }
 
+// Prints an interned name (used by refs/primitives), with fallback for unknown ids.
+fn void print_def_name(FILE *f, u32 nam) {
+  char *name = table_get(nam);
+  if (name != NULL) {
+    fputs(name, f);
+  } else {
+    print_name(f, nam);
+  }
+}
+
+// Prints an interned name (used by ctors/labels/stuck names), with fallback for unknown ids.
+fn void print_sym_name(FILE *f, u32 nam) {
+  char *name = table_get(nam);
+  if (name != NULL) {
+    fputs(name, f);
+  } else {
+    print_name(f, nam);
+  }
+}
+
 
 // Prints match constructor labels with special sugar for nat/list forms.
 fn void print_mat_name(FILE *f, u32 nam) {
-  if (nam == NAM_ZER) {
+  if (nam == SYM_ZER) {
     fputs("0n", f);
-  } else if (nam == NAM_SUC) {
+  } else if (nam == SYM_SUC) {
     fputs("1n+", f);
-  } else if (nam == NAM_NIL) {
+  } else if (nam == SYM_NIL) {
     fputs("[]", f);
-  } else if (nam == NAM_CON) {
+  } else if (nam == SYM_CON) {
     fputs("<>", f);
   } else {
     fputc('#', f);
-    print_name(f, nam);
+    print_sym_name(f, nam);
   }
 }
 
@@ -195,21 +215,21 @@ fn void print_app(FILE *f, Term term, u32 depth, PrintState *st) {
 fn void print_ctr(FILE *f, Term t, u32 d, PrintState *st) {
   u32 nam = term_ext(t), loc = term_val(t), ari = term_tag(t) - C00;
   // Nat: count SUCs, print as Nn or Nn+x
-  if (nam == NAM_ZER || nam == NAM_SUC) {
+  if (nam == SYM_ZER || nam == SYM_SUC) {
     u32 n = 0;
-    while (term_tag(t) == C01 && term_ext(t) == NAM_SUC) {
+    while (term_tag(t) == C01 && term_ext(t) == SYM_SUC) {
       n++;
       t = HEAP[term_val(t)];
     }
     fprintf(f, "%un", n);
-    if (!(term_tag(t) == C00 && term_ext(t) == NAM_ZER)) {
+    if (!(term_tag(t) == C00 && term_ext(t) == SYM_ZER)) {
       fputc('+', f);
       print_term_at(f, t, d, st);
     }
     return;
   }
   // Char: 'x' or '\n'
-  if (nam == NAM_CHR && ari == 1 && term_tag(HEAP[loc]) == NUM) {
+  if (nam == SYM_CHR && ari == 1 && term_tag(HEAP[loc]) == NUM) {
     u32 c = term_val(HEAP[loc]);
     if (print_utf8_can_escape(c, PRINT_ESC_CHAR)) {
       fputc('\'', f);
@@ -219,12 +239,12 @@ fn void print_ctr(FILE *f, Term t, u32 d, PrintState *st) {
     }
   }
   // List/String
-  if (nam == NAM_NIL || nam == NAM_CON) {
+  if (nam == SYM_NIL || nam == SYM_CON) {
     // Check if string (non-empty, all escapable chars)
-    int is_str = (nam == NAM_CON);
-    for (Term x = t; term_tag(x) == C02 && term_ext(x) == NAM_CON; x = HEAP[term_val(x) + 1]) {
+    int is_str = (nam == SYM_CON);
+    for (Term x = t; term_tag(x) == C02 && term_ext(x) == SYM_CON; x = HEAP[term_val(x) + 1]) {
       Term h = HEAP[term_val(x)];
-      if (!(term_tag(h) == C01 && term_ext(h) == NAM_CHR)) {
+      if (!(term_tag(h) == C01 && term_ext(h) == SYM_CHR)) {
         is_str = 0;
         break;
       }
@@ -239,10 +259,10 @@ fn void print_ctr(FILE *f, Term t, u32 d, PrintState *st) {
       }
     }
     Term end = t;
-    while (term_tag(end) == C02 && term_ext(end) == NAM_CON) {
+    while (term_tag(end) == C02 && term_ext(end) == SYM_CON) {
       end = HEAP[term_val(end) + 1];
     }
-    if (is_str && term_tag(end) == C00 && term_ext(end) == NAM_NIL) {
+    if (is_str && term_tag(end) == C00 && term_ext(end) == SYM_NIL) {
       fputc('"', f);
       for (Term x = t; term_tag(x) == C02; x = HEAP[term_val(x) + 1]) {
         u32 c = term_val(HEAP[term_val(HEAP[term_val(x)])]);
@@ -252,7 +272,7 @@ fn void print_ctr(FILE *f, Term t, u32 d, PrintState *st) {
       return;
     }
     // Proper list: [a,b,c]
-    if (term_tag(end) == C00 && term_ext(end) == NAM_NIL) {
+    if (term_tag(end) == C00 && term_ext(end) == SYM_NIL) {
       fputc('[', f);
       for (Term x = t; term_tag(x) == C02; x = HEAP[term_val(x) + 1]) {
         if (x != t) {
@@ -264,7 +284,7 @@ fn void print_ctr(FILE *f, Term t, u32 d, PrintState *st) {
       return;
     }
     // Improper list: h<>t
-    if (nam == NAM_CON) {
+    if (nam == SYM_CON) {
       print_term_at(f, HEAP[loc], d, st);
       fputs("<>", f);
       print_term_at(f, HEAP[loc + 1], d, st);
@@ -273,7 +293,7 @@ fn void print_ctr(FILE *f, Term t, u32 d, PrintState *st) {
   }
   // Default CTR
   fputc('#', f);
-  print_name(f, nam);
+  print_sym_name(f, nam);
   fputc('{', f);
   for (u32 i = 0; i < ari; i++) {
     if (i) {
@@ -291,7 +311,7 @@ fn void print_term_go(FILE *f, Term term, u32 depth, PrintState *st) {
   switch (term_tag(term)) {
     case NAM: {
       // Literal stuck name (^x).
-      print_name(f, term_ext(term));
+      print_sym_name(f, term_ext(term));
       break;
     }
     case DRY: {
@@ -329,22 +349,12 @@ fn void print_term_go(FILE *f, Term term, u32 depth, PrintState *st) {
     }
     case REF: {
       fputc('@', f);
-      char *name = table_get(term_ext(term));
-      if (name != NULL) {
-        fputs(name, f);
-      } else {
-        print_name(f, term_ext(term));
-      }
+      print_def_name(f, term_ext(term));
       break;
     }
     case PRI: {
       fputc('%', f);
-      char *name = table_get(term_ext(term));
-      if (name != NULL) {
-        fputs(name, f);
-      } else {
-        print_name(f, term_ext(term));
-      }
+      print_def_name(f, term_ext(term));
       u32 ari = term_arity(term);
       if (ari > 0) {
         u32 loc = term_val(term);
@@ -446,7 +456,7 @@ fn void print_term_go(FILE *f, Term term, u32 depth, PrintState *st) {
     case SUP: {
       u32 loc = term_val(term);
       fputc('&', f);
-      print_name(f, term_ext(term));
+      print_sym_name(f, term_ext(term));
       fputc('{', f);
       print_term_at(f, HEAP[loc + 0], depth, st);
       fputc(',', f);
@@ -461,7 +471,7 @@ fn void print_term_go(FILE *f, Term term, u32 depth, PrintState *st) {
         fputc('!', f);
         print_alpha_name(f, depth + 1, 'A');
         fputc('&', f);
-        print_name(f, term_ext(term));
+        print_sym_name(f, term_ext(term));
         fputc('=', f);
         print_term_at(f, HEAP[loc + 0], depth, st);
         fputc(';', f);
@@ -636,7 +646,7 @@ fn void print_term_finish(FILE *f, PrintState *st) {
     fputc('!', f);
     print_dup_name(f, nam);
     fputc('&', f);
-    print_name(f, lab);
+    print_sym_name(f, lab);
     fputc('=', f);
     Term val = HEAP[loc];
     if (term_sub_get(val)) {

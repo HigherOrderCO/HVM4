@@ -1,9 +1,11 @@
-// Table Globals
-// ==============
-// Bidirectional mapping between unique IDs and function names.
-// - TABLE[id] points to the name string for that id
-// - TABLE_LEN is the next available unique ID
-// - For name→id lookup, we do a linear scan (simple, good enough for now)
+// Name table globals
+// ==================
+// Single global intern table shared by refs/defs/primitives/ctors/labels/names.
+// IDs are 24-bit and stored in EXT fields.
 
-static char **TABLE;
-static u32    TABLE_LEN = 0;
+typedef struct {
+  char **data;
+  u32    len;
+} NameTable;
+
+static NameTable TABLE = {0};

@@ -9,7 +9,7 @@ fn Term parse_term_nat(PState *s, u32 depth) {
   }
   if (parse_peek(s) != 'n') { s->pos = sav; return 0; }
   parse_advance(s);
-  Term t = parse_match(s, "+") ? parse_term(s, depth) : term_new_ctr(NAM_ZER, 0, 0);
-  for (u32 i = 0; i < num; i++) t = term_new_ctr(NAM_SUC, 1, &t);
+  Term t = parse_match(s, "+") ? parse_term(s, depth) : term_new_ctr(SYM_ZER, 0, 0);
+  for (u32 i = 0; i < num; i++) t = term_new_ctr(SYM_SUC, 1, &t);
   return t;
 }
