@@ -1,2 +1,0 @@
-// Compatibility entrypoint for stdlib modules
-#include "stdlib/all.hvm4"
