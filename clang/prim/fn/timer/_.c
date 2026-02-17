@@ -141,9 +141,9 @@ fn u8 timer_claim(u32 id, u32 seq, u64 *due_ns) {
 #include "wait.c"
 
 fn void prim_timer_init(void) {
-  TIMER_NAM_TIME = nick_from_str("Time", 4);
-  TIMER_NAM_PEND = nick_from_str("Pend", 4);
-  TIMER_NAM_RDY  = nick_from_str("Rdy", 3);
+  TIMER_NAM_TIME = table_find("Time", 4);
+  TIMER_NAM_PEND = table_find("Pend", 4);
+  TIMER_NAM_RDY  = table_find("Rdy", 3);
 
   prim_timer_start_init();
   prim_timer_poll_init();

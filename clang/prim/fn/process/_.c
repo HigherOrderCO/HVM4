@@ -186,11 +186,11 @@ fn void process_status_from_wait(int status, u8 *signaled, u32 *code) {
 #include "kill.c"
 
 fn void prim_process_init(void) {
-  PROCESS_NAM_PROC = nick_from_str("Proc", 4);
-  PROCESS_NAM_PEND = nick_from_str("Pend", 4);
-  PROCESS_NAM_RDY  = nick_from_str("Rdy", 3);
-  PROCESS_NAM_EXIT = nick_from_str("Exit", 4);
-  PROCESS_NAM_SIG  = nick_from_str("Sig", 3);
+  PROCESS_NAM_PROC = table_find("Proc", 4);
+  PROCESS_NAM_PEND = table_find("Pend", 4);
+  PROCESS_NAM_RDY  = table_find("Rdy", 3);
+  PROCESS_NAM_EXIT = table_find("Exit", 4);
+  PROCESS_NAM_SIG  = table_find("Sig", 3);
 
   prim_process_spawn_init();
   prim_process_poll_init();

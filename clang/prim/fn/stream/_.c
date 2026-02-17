@@ -221,10 +221,10 @@ fn int stream_stdin_read(int fd, int timeout_ms, u8 *out_byt, u8 *out_eof) {
 #include "close.c"
 
 fn void prim_stream_init(void) {
-  STREAM_NAM_STRM = nick_from_str("Strm", 4);
-  STREAM_NAM_PEND = nick_from_str("Pend", 4);
-  STREAM_NAM_RDY  = nick_from_str("Rdy", 3);
-  STREAM_NAM_EOF  = nick_from_str("Eof", 3);
+  STREAM_NAM_STRM = table_find("Strm", 4);
+  STREAM_NAM_PEND = table_find("Pend", 4);
+  STREAM_NAM_RDY  = table_find("Rdy", 3);
+  STREAM_NAM_EOF  = table_find("Eof", 3);
 
   prim_stream_stdin_open_init();
   prim_stream_file_open_init();

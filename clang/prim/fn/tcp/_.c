@@ -671,31 +671,31 @@ fn Term tcp_state_not_connected(u32 id, u32 seq) {
 #include "close.c"
 
 fn void prim_tcp_init(void) {
-  TCP_NAM_TCP      = nick_from_str("Tcp", 3);
-  TCP_NAM_TCP_REQ  = nick_from_str("TcpReq", 6);
-  TCP_NAM_TCP_OPTS = nick_from_str("TcpOpts", 7);
+  TCP_NAM_TCP      = table_find("Tcp", 3);
+  TCP_NAM_TCP_REQ  = table_find("TcpReq", 6);
+  TCP_NAM_TCP_OPTS = table_find("TcpOpts", 7);
 
-  TCP_NAM_PEND   = nick_from_str("Pend", 4);
-  TCP_NAM_RDY    = nick_from_str("Rdy", 3);
-  TCP_NAM_CONN   = nick_from_str("Conn", 4);
-  TCP_NAM_RECV   = nick_from_str("Recv", 4);
-  TCP_NAM_SENT   = nick_from_str("Sent", 4);
-  TCP_NAM_EOF    = nick_from_str("Eof", 3);
-  TCP_NAM_CLOSED = nick_from_str("Closed", 6);
-  TCP_NAM_FAIL   = nick_from_str("Fail", 4);
+  TCP_NAM_PEND   = table_find("Pend", 4);
+  TCP_NAM_RDY    = table_find("Rdy", 3);
+  TCP_NAM_CONN   = table_find("Conn", 4);
+  TCP_NAM_RECV   = table_find("Recv", 4);
+  TCP_NAM_SENT   = table_find("Sent", 4);
+  TCP_NAM_EOF    = table_find("Eof", 3);
+  TCP_NAM_CLOSED = table_find("Closed", 6);
+  TCP_NAM_FAIL   = table_find("Fail", 4);
 
-  TCP_NAM_TIMEOUT       = nick_from_str("Timeout", 7);
-  TCP_NAM_DNS           = nick_from_str("Dns", 3);
-  TCP_NAM_REFUSED       = nick_from_str("Refused", 7);
-  TCP_NAM_UNREACHABLE   = nick_from_str("Unreachable", 11);
-  TCP_NAM_RESET         = nick_from_str("Reset", 5);
-  TCP_NAM_BROKEN_PIPE   = nick_from_str("BrokenPipe", 10);
-  TCP_NAM_PROTOCOL      = nick_from_str("Protocol", 8);
-  TCP_NAM_NOT_CONNECTED = nick_from_str("NotConnected", 12);
-  TCP_NAM_SYS           = nick_from_str("Sys", 3);
+  TCP_NAM_TIMEOUT       = table_find("Timeout", 7);
+  TCP_NAM_DNS           = table_find("Dns", 3);
+  TCP_NAM_REFUSED       = table_find("Refused", 7);
+  TCP_NAM_UNREACHABLE   = table_find("Unreachable", 11);
+  TCP_NAM_RESET         = table_find("Reset", 5);
+  TCP_NAM_BROKEN_PIPE   = table_find("BrokenPipe", 10);
+  TCP_NAM_PROTOCOL      = table_find("Protocol", 8);
+  TCP_NAM_NOT_CONNECTED = table_find("NotConnected", 12);
+  TCP_NAM_SYS           = table_find("Sys", 3);
 
-  TCP_NAM_T = nick_from_str("T", 1);
-  TCP_NAM_F = nick_from_str("F", 1);
+  TCP_NAM_T = table_find("T", 1);
+  TCP_NAM_F = table_find("F", 1);
 
   prim_tcp_connect_init();
   prim_tcp_connect_poll_init();

@@ -1471,39 +1471,39 @@ fn u8 http_claim(
 #include "cancel.c"
 
 fn void prim_http_init(void) {
-  HTTP_NAM_HTTP      = nick_from_str("Http", 4);
-  HTTP_NAM_PEND      = nick_from_str("Pend", 4);
-  HTTP_NAM_RDY       = nick_from_str("Rdy", 3);
-  HTTP_NAM_RESP      = nick_from_str("Resp", 4);
-  HTTP_NAM_HDR       = nick_from_str("Hdr", 3);
-  HTTP_NAM_FAIL      = nick_from_str("Fail", 4);
-  HTTP_NAM_CANCELED  = nick_from_str("Canceled", 8);
+  HTTP_NAM_HTTP      = table_find("Http", 4);
+  HTTP_NAM_PEND      = table_find("Pend", 4);
+  HTTP_NAM_RDY       = table_find("Rdy", 3);
+  HTTP_NAM_RESP      = table_find("Resp", 4);
+  HTTP_NAM_HDR       = table_find("Hdr", 3);
+  HTTP_NAM_FAIL      = table_find("Fail", 4);
+  HTTP_NAM_CANCELED  = table_find("Canceled", 8);
 
-  HTTP_NAM_TIMEOUT        = nick_from_str("Timeout", 7);
-  HTTP_NAM_DNS            = nick_from_str("Dns", 3);
-  HTTP_NAM_CONNECT        = nick_from_str("Connect", 7);
-  HTTP_NAM_TLS            = nick_from_str("Tls", 3);
-  HTTP_NAM_PROTOCOL       = nick_from_str("Protocol", 8);
-  HTTP_NAM_CURL_EXIT      = nick_from_str("CurlExit", 8);
-  HTTP_NAM_CURL_SIGNAL    = nick_from_str("CurlSignal", 10);
-  HTTP_NAM_PARSE          = nick_from_str("Parse", 5);
-  HTTP_NAM_BODY_TOO_LARGE = nick_from_str("BodyTooLarge", 12);
-  HTTP_NAM_IO             = nick_from_str("Io", 2);
+  HTTP_NAM_TIMEOUT        = table_find("Timeout", 7);
+  HTTP_NAM_DNS            = table_find("Dns", 3);
+  HTTP_NAM_CONNECT        = table_find("Connect", 7);
+  HTTP_NAM_TLS            = table_find("Tls", 3);
+  HTTP_NAM_PROTOCOL       = table_find("Protocol", 8);
+  HTTP_NAM_CURL_EXIT      = table_find("CurlExit", 8);
+  HTTP_NAM_CURL_SIGNAL    = table_find("CurlSignal", 10);
+  HTTP_NAM_PARSE          = table_find("Parse", 5);
+  HTTP_NAM_BODY_TOO_LARGE = table_find("BodyTooLarge", 12);
+  HTTP_NAM_IO             = table_find("Io", 2);
 
-  HTTP_NAM_REQ        = nick_from_str("Req", 3);
-  HTTP_NAM_GET        = nick_from_str("Get", 3);
-  HTTP_NAM_POST       = nick_from_str("Post", 4);
-  HTTP_NAM_PUT        = nick_from_str("Put", 3);
-  HTTP_NAM_PATCH      = nick_from_str("Patch", 5);
-  HTTP_NAM_DELETE     = nick_from_str("Delete", 6);
-  HTTP_NAM_HEAD       = nick_from_str("Head", 4);
-  HTTP_NAM_OPTIONS    = nick_from_str("Options", 7);
-  HTTP_NAM_NOBODY     = nick_from_str("NoBody", 6);
-  HTTP_NAM_BODY_TEXT  = nick_from_str("BodyText", 8);
-  HTTP_NAM_BODY_BYTES = nick_from_str("BodyBytes", 9);
-  HTTP_NAM_OPTS       = nick_from_str("Opts", 4);
-  HTTP_NAM_T          = nick_from_str("T", 1);
-  HTTP_NAM_F          = nick_from_str("F", 1);
+  HTTP_NAM_REQ        = table_find("Req", 3);
+  HTTP_NAM_GET        = table_find("Get", 3);
+  HTTP_NAM_POST       = table_find("Post", 4);
+  HTTP_NAM_PUT        = table_find("Put", 3);
+  HTTP_NAM_PATCH      = table_find("Patch", 5);
+  HTTP_NAM_DELETE     = table_find("Delete", 6);
+  HTTP_NAM_HEAD       = table_find("Head", 4);
+  HTTP_NAM_OPTIONS    = table_find("Options", 7);
+  HTTP_NAM_NOBODY     = table_find("NoBody", 6);
+  HTTP_NAM_BODY_TEXT  = table_find("BodyText", 8);
+  HTTP_NAM_BODY_BYTES = table_find("BodyBytes", 9);
+  HTTP_NAM_OPTS       = table_find("Opts", 4);
+  HTTP_NAM_T          = table_find("T", 1);
+  HTTP_NAM_F          = table_find("F", 1);
 
   prim_http_request_init();
   prim_http_poll_init();
