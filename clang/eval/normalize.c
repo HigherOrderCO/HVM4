@@ -27,7 +27,21 @@ typedef struct {
 
 static inline void eval_normalize_go(EvalNormalizeCtx *ctx, EvalNormalizeWorker *worker, u32 loc);
 
+static inline bool eval_normalize_queue_ensure(EvalNormalizeWorker *worker) {
+  WsDeque *q = &worker->dq;
+  if (q->buf != NULL) {
+    return true;
+  }
+  return wsq_init(q, EVAL_NORMALIZE_WS_CAP_POW2);
+}
+
 static inline void eval_normalize_enqueue(EvalNormalizeCtx *ctx, EvalNormalizeWorker *worker, u32 loc) {
+  if (__builtin_expect(worker->dq.buf == NULL, 0)) {
+    if (!eval_normalize_queue_ensure(worker)) {
+      fprintf(stderr, "eval_normalize: queue allocation failed\n");
+      exit(1);
+    }
+  }
   if (!wsq_push(&worker->dq, (u64)loc)) {
     eval_normalize_go(ctx, worker, loc);
   }
@@ -141,10 +155,12 @@ fn Term eval_normalize(Term term) {
   ctx.n = n;
   atomic_store_explicit(&ctx.pending.v, n, memory_order_relaxed);
   for (u32 i = 0; i < n; i++) {
-    if (!wsq_init(&ctx.W[i].dq, EVAL_NORMALIZE_WS_CAP_POW2)) {
-      fprintf(stderr, "eval_normalize: queue allocation failed\n");
-      exit(1);
-    }
+    WsDeque *q = &ctx.W[i].dq;
+    q->buf  = NULL;
+    q->cap  = 0;
+    q->mask = 0;
+    atomic_store_explicit(&q->top.v, 0, memory_order_relaxed);
+    atomic_store_explicit(&q->bot.v, 0, memory_order_relaxed);
   }
   uset_init(&ctx.seen);
 
