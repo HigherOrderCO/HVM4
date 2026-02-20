@@ -1,0 +1,13 @@
+@eql = λ{
+  #ZER: λ{
+    #ZER: 1
+    #SUC: λb. 0
+  }
+  #SUC: λa. λ{
+    #ZER: 0
+    #SUC: λb. @eql(a, b)
+  }
+}
+
+@main = @eql(7n, 7n)
+//1

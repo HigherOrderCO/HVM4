@@ -11,6 +11,7 @@
 //   -C:  Collapse and flatten (enumerate all superposition branches)
 //   -CN: Collapse and flatten, limit to N results
 //   -T:  Use N threads (e.g. -T4)
+//   --jit: Build and load per-definition native fast paths
 
 #include "hvm4.c"
 
@@ -32,6 +33,7 @@ typedef struct {
   int   debug;
   int   step_by_step;
   int   threads;
+  int   jit;
   u32     ffi_loads_len;
   FfiLoad ffi_loads[FFI_MAX];
   char *file;
@@ -46,6 +48,7 @@ fn CliOpts parse_opts(int argc, char **argv) {
     .debug = 0,
     .step_by_step = 0,
     .threads = 0,
+    .jit = 0,
     .ffi_loads_len = 0,
     .file = NULL
   };
@@ -78,6 +81,8 @@ fn CliOpts parse_opts(int argc, char **argv) {
       opts.debug = 1;
     } else if (strcmp(argv[i], "-D") == 0) {
       opts.step_by_step = 1;
+    } else if (strcmp(argv[i], "--jit") == 0) {
+      opts.jit = 1;
     } else if (strcmp(argv[i], "--ffi") == 0 || strncmp(argv[i], "--ffi=", 6) == 0) {
       const char *path = NULL;
       if (argv[i][5] == '=') {
@@ -134,7 +139,7 @@ int main(int argc, char **argv) {
   CliOpts opts = parse_opts(argc, argv);
 
   if (opts.file == NULL) {
-    fprintf(stderr, "Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>] [--ffi <path>] [--ffi-dir <path>]\n");
+    fprintf(stderr, "Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>] [--jit] [--ffi <path>] [--ffi-dir <path>]\n");
     return 1;
   }
 
@@ -219,6 +224,11 @@ int main(int argc, char **argv) {
   if (BOOK[main_id] == 0) {
     fprintf(stderr, "Error: @main not defined\n");
     return 1;
+  }
+
+  // Optional per-definition JIT compilation and dynamic loading.
+  if (opts.jit) {
+    jit_build(argv[0]);
   }
 
   // Evaluate

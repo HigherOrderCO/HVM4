@@ -1,0 +1,4 @@
+@pick = λ{#A: 10; λx. 20}
+@main = @pick(#B{})
+//20
+//FLAGS: --jit
