@@ -6,7 +6,7 @@
 
 fn void sys_error(const char *msg);
 fn char *table_get(u32 id);
-fn void print_term_ex(FILE *f, Term term);
+fn void print_term_quoted_ex(FILE *f, Term term, u32 depth);
 
 // One compiled fast-path head (LAM, MAT, or SWI) with its next static locations.
 typedef struct {
@@ -104,31 +104,50 @@ fn int jit_emit_find_loc(u64 *locs, u32 len, u64 loc) {
   return -1;
 }
 
-// Appends one unique static location to the constants list.
-fn void jit_emit_push_loc(u64 **locs, u32 *len, u32 *cap, u64 loc) {
-  if (jit_emit_find_loc(*locs, *len, loc) >= 0) {
+// Appends one unique static location and its root-relative depth.
+fn void jit_emit_push_loc(u64 **locs, u32 **deps, u32 *len, u32 *cap, u64 loc, u32 dep) {
+  int idx = jit_emit_find_loc(*locs, *len, loc);
+  if (idx >= 0) {
+    if (dep < (*deps)[idx]) {
+      (*deps)[idx] = dep;
+    }
     return;
   }
   if (*len >= *cap) {
     u32  new_cap  = *cap == 0 ? 16 : (*cap * 2);
     u64 *new_locs = realloc(*locs, new_cap * sizeof(u64));
-    if (new_locs == NULL) {
+    u32 *new_deps = realloc(*deps, new_cap * sizeof(u32));
+    if (new_locs == NULL || new_deps == NULL) {
       sys_error("JIT location allocation failed");
     }
     *locs = new_locs;
+    *deps = new_deps;
     *cap  = new_cap;
   }
-  (*locs)[(*len)++] = loc;
+  (*locs)[*len] = loc;
+  (*deps)[*len] = dep;
+  *len = *len + 1;
 }
 
-// Collects all static locations referenced by emitted states.
-fn void jit_emit_collect_locs(u64 **locs, u32 *len, u32 *cap, u64 root, JitNode *nodes, u32 nlen) {
-  jit_emit_push_loc(locs, len, cap, root);
+// Collects fallback locations in root-first order and records root-relative depth.
+fn void jit_emit_collect_locs(u64 **locs, u32 **deps, u32 *len, u32 *cap, u64 root, JitNode *nodes, u32 nlen) {
+  jit_emit_push_loc(locs, deps, len, cap, root, 0);
+
   for (u32 i = 0; i < nlen; i++) {
-    jit_emit_push_loc(locs, len, cap, nodes[i].loc);
-    jit_emit_push_loc(locs, len, cap, nodes[i].nxt0);
+    int dep_idx = jit_emit_find_loc(*locs, *len, nodes[i].loc);
+    if (dep_idx < 0) {
+      continue;
+    }
+    u32 dep = (*deps)[dep_idx];
+
+    u32 nxt0_dep = dep;
+    if (nodes[i].tag == LAM) {
+      nxt0_dep = dep + 1;
+    }
+    jit_emit_push_loc(locs, deps, len, cap, nodes[i].nxt0, nxt0_dep);
+
     if (nodes[i].tag == MAT || nodes[i].tag == SWI) {
-      jit_emit_push_loc(locs, len, cap, nodes[i].nxt1);
+      jit_emit_push_loc(locs, deps, len, cap, nodes[i].nxt1, dep);
     }
   }
 }
@@ -159,8 +178,8 @@ fn void jit_emit_loc_ref(char *out, u32 out_cap, u64 *locs, u32 llen, u32 loc_wi
   snprintf(out, out_cap, "%lluULL", (unsigned long long)loc);
 }
 
-// Prints a term to a compact single-line string for code comments.
-fn void jit_emit_term_line(char *out, u32 out_cap, Term term) {
+// Prints a quoted term to a compact single-line string for code comments.
+fn void jit_emit_term_line(char *out, u32 out_cap, Term term, u32 depth) {
   if (out_cap == 0) {
     return;
   }
@@ -171,7 +190,7 @@ fn void jit_emit_term_line(char *out, u32 out_cap, Term term) {
     return;
   }
 
-  print_term_ex(tmp, term);
+  print_term_quoted_ex(tmp, term, depth);
   fflush(tmp);
   rewind(tmp);
 
@@ -208,17 +227,6 @@ fn void jit_emit_term_line(char *out, u32 out_cap, Term term) {
 
   out[len] = '\0';
 
-  // Drop trailing DUP bind dump emitted by print_term_finish (starts at ";!").
-  char *tail = strstr(out, ";!");
-  if (tail != NULL) {
-    *tail = '\0';
-    len = (u32)strlen(out);
-    while (len > 0 && out[len - 1] == ' ') {
-      len--;
-    }
-    out[len] = '\0';
-  }
-
   if (len == 0) {
     snprintf(out, out_cap, "<term>");
     return;
@@ -226,8 +234,8 @@ fn void jit_emit_term_line(char *out, u32 out_cap, Term term) {
 }
 
 // Builds a short comment string for one static location constant.
-fn void jit_emit_loc_note(char *out, u32 out_cap, u64 loc) {
-  jit_emit_term_line(out, out_cap, heap_read(loc));
+fn void jit_emit_loc_note(char *out, u32 out_cap, u64 loc, u32 dep) {
+  jit_emit_term_line(out, out_cap, heap_read(loc), dep);
 }
 
 // Emits a transition at the given indentation, or falls back to ALO when needed.
@@ -247,14 +255,14 @@ fn void jit_emit_jump(FILE *f, JitNode *nodes, u32 nlen, u64 *locs, u32 llen, u3
 }
 
 // Emits all location constants used by the generated function.
-fn void jit_emit_consts(FILE *f, u64 *locs, u32 llen, u32 loc_width) {
+fn void jit_emit_consts(FILE *f, u64 *locs, u32 *deps, u32 llen, u32 loc_width) {
   fprintf(f, "  // Static locations used for fallback ALO allocation.\n");
   fprintf(f, "  enum {\n");
   for (u32 i = 0; i < llen; i++) {
     char loc_name[64];
     char loc_note[256];
     jit_emit_loc_name(loc_name, sizeof(loc_name), i, loc_width);
-    jit_emit_loc_note(loc_note, sizeof(loc_note), locs[i]);
+    jit_emit_loc_note(loc_note, sizeof(loc_note), locs[i], deps[i]);
     fprintf(f, "    %s = %lluULL, // %s\n", loc_name, (unsigned long long)locs[i], loc_note);
   }
   fprintf(f, "  };\n\n");
@@ -340,9 +348,10 @@ fn void jit_emit(const char *c_path, u32 id) {
   jit_emit_collect(&nodes, &nlen, &ncap, root);
 
   u64 *locs = NULL;
+  u32 *deps = NULL;
   u32  llen = 0;
   u32  lcap = 0;
-  jit_emit_collect_locs(&locs, &llen, &lcap, root, nodes, nlen);
+  jit_emit_collect_locs(&locs, &deps, &llen, &lcap, root, nodes, nlen);
 
   u32 loc_width = jit_emit_loc_width(llen);
 
@@ -357,7 +366,7 @@ fn void jit_emit(const char *c_path, u32 id) {
   fprintf(f, "  Term *heap = jit_heap();\n");
   fprintf(f, "  Term env[%u];\n", env_cap);
   fprintf(f, "  u16  env_len = 0;\n\n");
-  jit_emit_consts(f, locs, llen, loc_width);
+  jit_emit_consts(f, locs, deps, llen, loc_width);
 
   char root_loc_name[64];
   jit_emit_loc_ref(root_loc_name, sizeof(root_loc_name), locs, llen, loc_width, root);
@@ -365,6 +374,7 @@ fn void jit_emit(const char *c_path, u32 id) {
   if (nlen == 0) {
     fprintf(f, "  return jit_alo(%s, env_len, env);\n", root_loc_name);
     fprintf(f, "}\n");
+    free(deps);
     free(locs);
     free(nodes);
     fclose(f);
@@ -375,6 +385,7 @@ fn void jit_emit(const char *c_path, u32 id) {
   if (root_idx < 0) {
     fprintf(f, "  return jit_alo(%s, env_len, env);\n", root_loc_name);
     fprintf(f, "}\n");
+    free(deps);
     free(locs);
     free(nodes);
     fclose(f);
@@ -413,6 +424,7 @@ fn void jit_emit(const char *c_path, u32 id) {
   fprintf(f, "  }\n");
   fprintf(f, "}\n");
 
+  free(deps);
   free(locs);
   free(nodes);
   fclose(f);

@@ -680,14 +680,19 @@ fn void print_term(Term term) {
   print_term_ex(stdout, term);
 }
 
-// Prints a static/quoted term (BJV/BJ0/BJ1) with depth-based lambda names.
-fn void print_term_quoted(Term term) {
+// Prints a static/quoted term to a custom stream at a given initial depth.
+fn void print_term_quoted_ex(FILE *f, Term term, u32 depth) {
   PrintState st;
   print_state_init(&st);
   st.quoted = 1;
   st.subst  = 0;
   st.subst_len = 0;
-  print_term_at(stdout, term, 0, &st);
-  print_term_finish(stdout, &st);
+  print_term_at(f, term, depth, &st);
+  print_term_finish(f, &st);
   print_state_free(&st);
+}
+
+// Prints a static/quoted term (BJV/BJ0/BJ1) with depth-based lambda names.
+fn void print_term_quoted(Term term) {
+  print_term_quoted_ex(stdout, term, 0);
 }
