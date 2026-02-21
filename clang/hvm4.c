@@ -422,6 +422,7 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "parse/term/_.c"
 #include "parse/include.c"
 #include "parse/def.c"
+#include "parse/program.c"
 
 // WNF
 // ===
@@ -492,6 +493,13 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "wnf/pri.c"
 #include "wnf/_.c"
 
+// Runtime
+// =======
+
+#include "runtime/init.c"
+#include "runtime/free.c"
+#include "runtime/entry.c"
+
 // Data
 // ====
 
@@ -507,6 +515,5 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 // Eval
 // ====
 
-#include "eval/runtime.c"
 #include "eval/normalize.c"
 #include "eval/collapse.c"

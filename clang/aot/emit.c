@@ -462,31 +462,35 @@ fn void aot_emit_register(FILE *f) {
   fprintf(f, "}\n\n");
 }
 
-// Emits the standalone entrypoint using shared runtime helpers.
+// Emits the standalone entrypoint using shared driver helpers.
 fn void aot_emit_entry_main(FILE *f) {
   fprintf(f, "int main(void) {\n");
-  fprintf(f, "  eval_runtime_init(1, 0, 0, 0);\n");
+  fprintf(f, "  runtime_init(1, 0, 0, 0);\n");
   fprintf(f, "  char *src = strdup(AOT_SOURCE_TEXT);\n");
   fprintf(f, "  if (src == NULL) {\n");
   fprintf(f, "    sys_error(\"AOT source allocation failed\");\n");
   fprintf(f, "  }\n");
-  fprintf(f, "  eval_parse_source(AOT_SOURCE_PATH, src);\n");
+  fprintf(f, "  parse_program(AOT_SOURCE_PATH, src);\n");
   fprintf(f, "  free(src);\n");
   fprintf(f, "\n");
-  fprintf(f, "  if (!eval_check_alo_space()) {\n");
+  fprintf(f, "  if (HEAP_NEXT_AT(0) > (ALO_TM_MASK + 1)) {\n");
+  fprintf(f, "    fprintf(stderr, \"Error: static book exceeds 24-bit location space (%%llu words used)\\n\", HEAP_NEXT_AT(0));\n");
+  fprintf(f, "    runtime_free();\n");
   fprintf(f, "    return 1;\n");
   fprintf(f, "  }\n");
   fprintf(f, "\n");
   fprintf(f, "  aot_register_generated();\n");
   fprintf(f, "  u32 main_id = 0;\n");
-  fprintf(f, "  if (!eval_get_main_id(&main_id)) {\n");
+  fprintf(f, "  if (!runtime_entry(\"main\", &main_id)) {\n");
   fprintf(f, "    fprintf(stderr, \"Error: @main not defined\\n\");\n");
+  fprintf(f, "    runtime_free();\n");
   fprintf(f, "    return 1;\n");
   fprintf(f, "  }\n");
   fprintf(f, "\n");
   fprintf(f, "  Term result = eval_normalize(term_new_ref(main_id));\n");
   fprintf(f, "  print_term(result);\n");
   fprintf(f, "  printf(\"\\n\");\n");
+  fprintf(f, "  runtime_free();\n");
   fprintf(f, "  return 0;\n");
   fprintf(f, "}\n");
 }

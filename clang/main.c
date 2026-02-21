@@ -191,7 +191,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "Warning: -D forces single-threaded mode\n");
     threads = 1;
   }
-  eval_runtime_init(threads, opts.debug, opts.silent, opts.step_by_step);
+  runtime_init(threads, opts.debug, opts.silent, opts.step_by_step);
 
   // Load FFI libraries before parsing (needed for arity checks and overrides).
   for (u32 i = 0; i < opts.ffi_loads_len; i++) {
@@ -212,21 +212,22 @@ int main(int argc, char **argv) {
   // Parse file source
   char *abs_path = realpath(opts.file, NULL);
   const char *src_path = abs_path ? abs_path : opts.file;
-  eval_parse_source(src_path, src);
-  if (!eval_check_alo_space()) {
+  parse_program(src_path, src);
+  if (HEAP_NEXT_AT(0) > (ALO_TM_MASK + 1)) {
+    fprintf(stderr, "Error: static book exceeds 24-bit location space (%llu words used)\n", HEAP_NEXT_AT(0));
     free(src);
     free(abs_path);
-    eval_runtime_free();
+    runtime_free();
     return 1;
   }
 
   // Check @main exists
   u32 main_id = 0;
-  if (!eval_get_main_id(&main_id)) {
+  if (!runtime_entry("main", &main_id)) {
     fprintf(stderr, "Error: @main not defined\n");
     free(src);
     free(abs_path);
-    eval_runtime_free();
+    runtime_free();
     return 1;
   }
 
@@ -235,21 +236,21 @@ int main(int argc, char **argv) {
     aot_build_to_c(argv[0], src_path, src);
     free(src);
     free(abs_path);
-    eval_runtime_free();
+    runtime_free();
     return 0;
   }
   if (opts.compile_out != NULL) {
     aot_build_compile_out(opts.compile_out, argv[0], src_path, src);
     free(src);
     free(abs_path);
-    eval_runtime_free();
+    runtime_free();
     return 0;
   }
   if (opts.jit) {
     int rc = aot_build_jit_once(argv[0], src_path, src);
     free(src);
     free(abs_path);
-    eval_runtime_free();
+    runtime_free();
     return rc;
   }
 
@@ -296,7 +297,7 @@ int main(int argc, char **argv) {
 
   // Cleanup
   free(abs_path);
-  eval_runtime_free();
+  runtime_free();
 
   return 0;
 }
