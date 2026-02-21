@@ -11,7 +11,9 @@
 //   -C:  Collapse and flatten (enumerate all superposition branches)
 //   -CN: Collapse and flatten, limit to N results
 //   -T:  Use N threads (e.g. -T4)
-//   --jit: Build and load per-definition native fast paths
+//   --to-c: Emit standalone AOT C program to stdout
+//   --compile <file>: Emit + compile standalone AOT executable
+//   --jit: Emit + compile + run standalone AOT executable once
 
 #include "hvm4.c"
 
@@ -34,10 +36,24 @@ typedef struct {
   int   step_by_step;
   int   threads;
   int   jit;
+  int   to_c;
+  const char *compile_out;
   u32     ffi_loads_len;
   FfiLoad ffi_loads[FFI_MAX];
   char *file;
 } CliOpts;
+
+// Parses one option value from either --flag=value or --flag value.
+fn const char *parse_opt_value(int argc, char **argv, int *i, const char *flag, int prefix_len) {
+  if (argv[*i][prefix_len - 1] == '=') {
+    return argv[*i] + prefix_len;
+  }
+  if (*i + 1 >= argc) {
+    fprintf(stderr, "Error: missing value after %s\n", flag);
+    exit(1);
+  }
+  return argv[++(*i)];
+}
 
 fn CliOpts parse_opts(int argc, char **argv) {
   CliOpts opts = {
@@ -49,6 +65,8 @@ fn CliOpts parse_opts(int argc, char **argv) {
     .step_by_step = 0,
     .threads = 0,
     .jit = 0,
+    .to_c = 0,
+    .compile_out = NULL,
     .ffi_loads_len = 0,
     .file = NULL
   };
@@ -81,6 +99,19 @@ fn CliOpts parse_opts(int argc, char **argv) {
       opts.debug = 1;
     } else if (strcmp(argv[i], "-D") == 0) {
       opts.step_by_step = 1;
+    } else if (strcmp(argv[i], "--to-c") == 0) {
+      opts.to_c = 1;
+    } else if (strncmp(argv[i], "--to-c=", 7) == 0) {
+      fprintf(stderr, "Error: --to-c does not take a path; it writes C to stdout\n");
+      exit(1);
+    } else if (strcmp(argv[i], "--compile") == 0 || strncmp(argv[i], "--compile=", 10) == 0) {
+      opts.compile_out = parse_opt_value(argc, argv, &i, "--compile", 10);
+    } else if (strcmp(argv[i], "-o") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "Error: missing output path after -o\n");
+        exit(1);
+      }
+      opts.compile_out = argv[++i];
     } else if (strcmp(argv[i], "--jit") == 0) {
       opts.jit = 1;
     } else if (strcmp(argv[i], "--ffi") == 0 || strncmp(argv[i], "--ffi=", 6) == 0) {
@@ -139,12 +170,18 @@ int main(int argc, char **argv) {
   CliOpts opts = parse_opts(argc, argv);
 
   if (opts.file == NULL) {
-    fprintf(stderr, "Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>] [--jit] [--ffi <path>] [--ffi-dir <path>]\n");
+    fprintf(stderr, "Usage: ./main <file.hvm4> [-s] [-S] [-D] [-C[N]] [-T<N>] [--to-c] [--compile <file>] [--jit] [--ffi <path>] [--ffi-dir <path>]\n");
     return 1;
   }
 
   if (opts.step_by_step && opts.do_collapse) {
     fprintf(stderr, "Error: -D is not supported with -C\n");
+    return 1;
+  }
+
+  int build_modes = (opts.jit ? 1 : 0) + (opts.to_c ? 1 : 0) + (opts.compile_out != NULL ? 1 : 0);
+  if (build_modes > 1) {
+    fprintf(stderr, "Error: choose only one build mode: --jit, --compile, or --to-c\n");
     return 1;
   }
 
@@ -154,22 +191,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "Warning: -D forces single-threaded mode\n");
     threads = 1;
   }
-  thread_set_count(threads);
-  wnf_set_tid(0);
-
-  // Allocate memory
-  BOOK       = calloc(BOOK_CAP, sizeof(u64));
-  HEAP       = calloc(HEAP_CAP, sizeof(Term));
-  TABLE.data = calloc(BOOK_CAP, sizeof(char*));
-
-  if (!BOOK || !HEAP || !TABLE.data) {
-    sys_error("Memory allocation failed");
-  }
-  heap_init_slices();
-  symbols_init();
-
-  // Register known primitives before parsing (needed for arity checks).
-  prim_init();
+  eval_runtime_init(threads, opts.debug, opts.silent, opts.step_by_step);
 
   // Load FFI libraries before parsing (needed for arity checks and overrides).
   for (u32 i = 0; i < opts.ffi_loads_len; i++) {
@@ -180,11 +202,6 @@ int main(int argc, char **argv) {
     }
   }
 
-  // Set debug mode
-  DEBUG = opts.debug;
-  SILENT = opts.silent;
-  STEPS_ENABLE = opts.step_by_step;
-
   // Read and parse user file
   char *src = sys_file_read(opts.file);
   if (!src) {
@@ -192,44 +209,51 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Add file to seen list
+  // Parse file source
   char *abs_path = realpath(opts.file, NULL);
-  if (abs_path) {
-    PARSE_SEEN_FILES[PARSE_SEEN_FILES_LEN++] = abs_path;
-  }
-
-  PState s = {
-    .file = abs_path ? abs_path : opts.file,
-    .src  = src,
-    .pos  = 0,
-    .len  = strlen(src),
-    .line = 1,
-    .col  = 1
-  };
-  parse_def(&s);
-  free(src);
-
-  // ALO packed pairs store static/book locations in 24 bits.
-  // Parsing allocates all static terms first in thread 0.
-  if (HEAP_NEXT_AT(0) > (ALO_TM_MASK + 1)) {
-    fprintf(stderr, "Error: static book exceeds 24-bit location space (%llu words used)\n",
-            HEAP_NEXT_AT(0));
+  const char *src_path = abs_path ? abs_path : opts.file;
+  eval_parse_source(src_path, src);
+  if (!eval_check_alo_space()) {
+    free(src);
+    free(abs_path);
+    eval_runtime_free();
     return 1;
   }
-
-  // Get @main id
-  u32 main_id = table_find("main", 4);
 
   // Check @main exists
-  if (BOOK[main_id] == 0) {
+  u32 main_id = 0;
+  if (!eval_get_main_id(&main_id)) {
     fprintf(stderr, "Error: @main not defined\n");
+    free(src);
+    free(abs_path);
+    eval_runtime_free();
     return 1;
   }
 
-  // Optional per-definition JIT compilation and dynamic loading.
-  if (opts.jit) {
-    jit_build(argv[0]);
+  // Build-only modes (AOT emission/compilation) return early.
+  if (opts.to_c) {
+    aot_build_to_c(argv[0], src_path, src);
+    free(src);
+    free(abs_path);
+    eval_runtime_free();
+    return 0;
   }
+  if (opts.compile_out != NULL) {
+    aot_build_compile_out(opts.compile_out, argv[0], src_path, src);
+    free(src);
+    free(abs_path);
+    eval_runtime_free();
+    return 0;
+  }
+  if (opts.jit) {
+    int rc = aot_build_jit_once(argv[0], src_path, src);
+    free(src);
+    free(abs_path);
+    eval_runtime_free();
+    return rc;
+  }
+
+  free(src);
 
   // Evaluate
   struct timespec start, end;
@@ -271,10 +295,8 @@ int main(int argc, char **argv) {
   }
 
   // Cleanup
-  free(HEAP);
-  free(BOOK);
-  free(TABLE.data);
-  wnf_stack_free();
+  free(abs_path);
+  eval_runtime_free();
 
   return 0;
 }

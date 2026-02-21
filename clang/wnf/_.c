@@ -68,7 +68,7 @@ __attribute__((cold, noinline)) static Term wnf_rebuild(Term cur, Term *stack, u
 }
 
 fn Term wnf_pri(Term pri);
-fn int jit_try_call(u32 id, Term *stack, u32 *s_pos, u32 base, Term *out);
+fn int aot_try_call(u32 id, Term *stack, u32 *s_pos, u32 base, Term *out);
 
 __attribute__((hot)) fn Term wnf(Term term) {
   wnf_stack_init();
@@ -135,9 +135,9 @@ __attribute__((hot)) fn Term wnf(Term term) {
 
       case REF: {
         u16 nam = term_ext(next);
-        Term jit_out;
-        if (jit_try_call(nam, stack, &s_pos, base, &jit_out)) {
-          next = jit_out;
+        Term aot_out;
+        if (aot_try_call(nam, stack, &s_pos, base, &aot_out)) {
+          next = aot_out;
           goto enter;
         }
         if (BOOK[nam] != 0) {

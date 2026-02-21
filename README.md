@@ -22,7 +22,9 @@ Flags:
 - `-s` shows performance stats
 - `-D` prints each intermediate reduction step with interaction labels
 - `-C10` collapses and flattens superpositions (limit to 10 lines)
-- `--jit` compiles top-level definitions to native C fast paths in `./.hvm/`
+- `--to-c` emits a standalone AOT C program to stdout
+- `--compile <file>` emits + compiles a standalone executable
+- `--jit` emits + compiles + runs a standalone executable once (keeps `.c`, deletes temp executable)
 - `--ffi <path>` loads one FFI shared library before parsing
 - `--ffi-dir <path>` loads all FFI shared libraries in a directory before parsing
 

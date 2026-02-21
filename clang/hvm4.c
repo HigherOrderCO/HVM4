@@ -367,23 +367,14 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "ffi/load.c"
 #include "ffi/load_dir.c"
 
-// JIT
+// AOT
 // ===
 
-#include "jit/_.c"
-#include "jit/get.c"
-#include "jit/set.c"
-#include "jit/handle_push.c"
-#include "jit/heap.c"
-#include "jit/itr.c"
-#include "jit/push_ctr_apps.c"
-#include "jit/alo.c"
-#include "jit/sanitize.c"
-#include "jit/emit.c"
-#include "jit/compile.c"
-#include "jit/load.c"
-#include "jit/build.c"
-#include "jit/try_call.c"
+#include "aot/_.c"
+#include "aot/sanitize.c"
+#include "aot/emit.c"
+#include "aot/build.c"
+#include "aot/try_call.c"
 
 // Parse
 // =====
@@ -516,5 +507,6 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 // Eval
 // ====
 
+#include "eval/runtime.c"
 #include "eval/normalize.c"
 #include "eval/collapse.c"

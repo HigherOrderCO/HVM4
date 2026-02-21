@@ -1,9 +1,9 @@
-// JIT Module: Symbol Sanitizer
+// AOT Module: Symbol Sanitizer
 // ----------------------------
-// Converts HVM names into filesystem-safe identifiers for generated filenames.
+// Converts names into filesystem-safe identifiers for generated artifacts.
 
 // Converts a symbol name into a filesystem-safe alnum/_ identifier.
-fn char *jit_sanitize(const char *name) {
+fn char *aot_sanitize(const char *name) {
   size_t len = strlen(name);
   size_t cap = (len * 4) + 1;
   char *out  = malloc(cap);
