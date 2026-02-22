@@ -10,8 +10,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-fn void  aot_emit(const char *c_path, const char *runtime_path, const char *src_path, const char *src_text);
-fn void  aot_emit_stdout(const char *runtime_path, const char *src_path, const char *src_text);
+fn void  aot_emit(const char *c_path, const char *runtime_path, const char *src_path, const char *src_text, const AotBuildCfg *cfg);
+fn void  aot_emit_stdout(const char *runtime_path, const char *src_path, const char *src_text, const AotBuildCfg *cfg);
 fn char *aot_sanitize(const char *name);
 fn void  sys_error(const char *msg);
 
@@ -156,10 +156,10 @@ fn void aot_build_compile(const char *c_path, const char *out_path) {
 }
 
 // Writes one AOT C file with an absolute runtime include path.
-fn void aot_write_c_file(const char *c_path, const char *argv0, const char *src_path, const char *src_text) {
+fn void aot_write_c_file(const char *c_path, const char *argv0, const char *src_path, const char *src_text, const AotBuildCfg *cfg) {
   char runtime_path[PATH_MAX];
   aot_build_runtime_path(runtime_path, sizeof(runtime_path), argv0);
-  aot_emit(c_path, runtime_path, src_path, src_text);
+  aot_emit(c_path, runtime_path, src_path, src_text, cfg);
 }
 
 // Builds a deterministic cache C path from an output name.
@@ -177,25 +177,25 @@ fn void aot_build_cache_c_path(char *out, u32 out_len, const char *stem, const c
 }
 
 // Emits only C code to stdout.
-fn void aot_build_to_c(const char *argv0, const char *src_path, const char *src_text) {
+fn void aot_build_to_c(const char *argv0, const char *src_path, const char *src_text, const AotBuildCfg *cfg) {
   char runtime_path[PATH_MAX];
   aot_build_runtime_path(runtime_path, sizeof(runtime_path), argv0);
-  aot_emit_stdout(runtime_path, src_path, src_text);
+  aot_emit_stdout(runtime_path, src_path, src_text, cfg);
 }
 
 // Emits + compiles one standalone executable and keeps it.
-fn void aot_build_compile_out(const char *out_path, const char *argv0, const char *src_path, const char *src_text) {
+fn void aot_build_compile_out(const char *out_path, const char *argv0, const char *src_path, const char *src_text, const AotBuildCfg *cfg) {
   aot_build_cache_dir();
 
   char c_path[PATH_MAX];
   aot_build_cache_c_path(c_path, sizeof(c_path), aot_build_basename(out_path), "aot");
 
-  aot_write_c_file(c_path, argv0, src_path, src_text);
+  aot_write_c_file(c_path, argv0, src_path, src_text, cfg);
   aot_build_compile(c_path, out_path);
 }
 
 // Emits + compiles + runs once, then removes the temporary executable.
-fn int aot_build_jit_once(const char *argv0, const char *src_path, const char *src_text) {
+fn int aot_build_jit_once(const char *argv0, const char *src_path, const char *src_text, const AotBuildCfg *cfg) {
   aot_build_cache_dir();
 
   char c_path[PATH_MAX];
@@ -213,7 +213,7 @@ fn int aot_build_jit_once(const char *argv0, const char *src_path, const char *s
     sys_error("AOT executable path too long");
   }
 
-  aot_write_c_file(c_path, argv0, src_path, src_text);
+  aot_write_c_file(c_path, argv0, src_path, src_text, cfg);
   aot_build_compile(c_path, x_path);
 
   char *const run[] = {

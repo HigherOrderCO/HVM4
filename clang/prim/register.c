@@ -6,10 +6,15 @@ typedef struct {
 } PrimDef;
 
 static PrimDef PRIM_DEFS[BOOK_CAP];
+static int     PRIM_WARN_OVERRIDES = 1;
+
+fn void prim_set_warn_overrides(int enabled) {
+  PRIM_WARN_OVERRIDES = enabled;
+}
 
 fn u32 prim_register(const char *name, u32 len, u32 arity, PrimFn fun) {
   u32 id = table_find(name, len);
-  if (PRIM_DEFS[id].fun != NULL) {
+  if (PRIM_WARN_OVERRIDES && PRIM_DEFS[id].fun != NULL) {
     fprintf(stderr, "WARNING: overriding primitive '%%%.*s'\n", len, name);
   }
   PRIM_DEFS[id].fun = fun;

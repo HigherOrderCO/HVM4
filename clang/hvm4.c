@@ -367,6 +367,11 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "ffi/load.c"
 #include "ffi/load_dir.c"
 
+// Runtime Types
+// =============
+
+#include "runtime/types.c"
+
 // AOT
 // ===
 
@@ -499,6 +504,10 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "runtime/init.c"
 #include "runtime/free.c"
 #include "runtime/entry.c"
+#include "runtime/load_ffi.c"
+#include "runtime/prepare.c"
+#include "runtime/prepare_text.c"
+#include "runtime/eval_main.c"
 
 // Data
 // ====

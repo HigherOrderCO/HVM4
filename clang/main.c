@@ -20,13 +20,6 @@
 // CLI
 // ===
 
-#define FFI_MAX 128
-
-typedef struct {
-  int        is_dir;
-  const char *path;
-} FfiLoad;
-
 typedef struct {
   int   stats;
   int   silent;
@@ -38,8 +31,8 @@ typedef struct {
   int   jit;
   int   to_c;
   const char *compile_out;
-  u32     ffi_loads_len;
-  FfiLoad ffi_loads[FFI_MAX];
+  u32            ffi_loads_len;
+  RuntimeFfiLoad ffi_loads[RUNTIME_FFI_MAX];
   char *file;
 } CliOpts;
 
@@ -125,11 +118,11 @@ fn CliOpts parse_opts(int argc, char **argv) {
         }
         path = argv[++i];
       }
-      if (opts.ffi_loads_len >= FFI_MAX) {
-        fprintf(stderr, "Error: too many --ffi arguments (max %d)\n", FFI_MAX);
+      if (opts.ffi_loads_len >= RUNTIME_FFI_MAX) {
+        fprintf(stderr, "Error: too many --ffi arguments (max %d)\n", RUNTIME_FFI_MAX);
         exit(1);
       }
-      opts.ffi_loads[opts.ffi_loads_len++] = (FfiLoad){.is_dir = 0, .path = path};
+      opts.ffi_loads[opts.ffi_loads_len++] = (RuntimeFfiLoad){.is_dir = 0, .path = path};
     } else if (strcmp(argv[i], "--ffi-dir") == 0 || strncmp(argv[i], "--ffi-dir=", 10) == 0) {
       const char *path = NULL;
       if (argv[i][9] == '=') {
@@ -141,11 +134,11 @@ fn CliOpts parse_opts(int argc, char **argv) {
         }
         path = argv[++i];
       }
-      if (opts.ffi_loads_len >= FFI_MAX) {
-        fprintf(stderr, "Error: too many FFI loads (max %d)\n", FFI_MAX);
+      if (opts.ffi_loads_len >= RUNTIME_FFI_MAX) {
+        fprintf(stderr, "Error: too many FFI loads (max %d)\n", RUNTIME_FFI_MAX);
         exit(1);
       }
-      opts.ffi_loads[opts.ffi_loads_len++] = (FfiLoad){.is_dir = 1, .path = path};
+      opts.ffi_loads[opts.ffi_loads_len++] = (RuntimeFfiLoad){.is_dir = 1, .path = path};
     } else if (argv[i][0] != '-') {
       if (opts.file == NULL) {
         opts.file = argv[i];
@@ -194,13 +187,8 @@ int main(int argc, char **argv) {
   runtime_init(threads, opts.debug, opts.silent, opts.step_by_step);
 
   // Load FFI libraries before parsing (needed for arity checks and overrides).
-  for (u32 i = 0; i < opts.ffi_loads_len; i++) {
-    if (opts.ffi_loads[i].is_dir) {
-      ffi_load_dir(opts.ffi_loads[i].path);
-    } else {
-      ffi_load(opts.ffi_loads[i].path);
-    }
-  }
+  int suppress_build_warnings = opts.jit || opts.to_c || opts.compile_out != NULL;
+  runtime_load_ffi(opts.ffi_loads, opts.ffi_loads_len, suppress_build_warnings);
 
   // Read and parse user file
   char *src = sys_file_read(opts.file);
@@ -209,22 +197,11 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Parse file source
+  // Parse and validate source, then resolve @main.
   char *abs_path = realpath(opts.file, NULL);
   const char *src_path = abs_path ? abs_path : opts.file;
-  parse_program(src_path, src);
-  if (HEAP_NEXT_AT(0) > (ALO_TM_MASK + 1)) {
-    fprintf(stderr, "Error: static book exceeds 24-bit location space (%llu words used)\n", HEAP_NEXT_AT(0));
-    free(src);
-    free(abs_path);
-    runtime_free();
-    return 1;
-  }
-
-  // Check @main exists
   u32 main_id = 0;
-  if (!runtime_entry("main", &main_id)) {
-    fprintf(stderr, "Error: @main not defined\n");
+  if (!runtime_prepare(&main_id, src_path, src)) {
     free(src);
     free(abs_path);
     runtime_free();
@@ -232,68 +209,53 @@ int main(int argc, char **argv) {
   }
 
   // Build-only modes (AOT emission/compilation) return early.
+  AotBuildCfg aot_cfg = {
+    .threads = threads,
+    .debug   = opts.debug,
+    .eval = {
+      .do_collapse   = opts.do_collapse,
+      .collapse_limit = opts.collapse_limit,
+      .stats         = opts.stats,
+      .silent        = opts.silent,
+      .step_by_step  = opts.step_by_step,
+    },
+    .ffi_len = opts.ffi_loads_len,
+  };
+  for (u32 i = 0; i < opts.ffi_loads_len && i < RUNTIME_FFI_MAX; i++) {
+    aot_cfg.ffi[i].is_dir = opts.ffi_loads[i].is_dir;
+    aot_cfg.ffi[i].path   = opts.ffi_loads[i].path;
+  }
+
+  int build_done = 0;
+  int build_rc   = 0;
   if (opts.to_c) {
-    aot_build_to_c(argv[0], src_path, src);
-    free(src);
-    free(abs_path);
-    runtime_free();
-    return 0;
+    aot_build_to_c(argv[0], src_path, src, &aot_cfg);
+    build_done = 1;
+  } else if (opts.compile_out != NULL) {
+    aot_build_compile_out(opts.compile_out, argv[0], src_path, src, &aot_cfg);
+    build_done = 1;
+  } else if (opts.jit) {
+    build_rc = aot_build_jit_once(argv[0], src_path, src, &aot_cfg);
+    build_done = 1;
   }
-  if (opts.compile_out != NULL) {
-    aot_build_compile_out(opts.compile_out, argv[0], src_path, src);
+  if (build_done) {
     free(src);
     free(abs_path);
     runtime_free();
-    return 0;
-  }
-  if (opts.jit) {
-    int rc = aot_build_jit_once(argv[0], src_path, src);
-    free(src);
-    free(abs_path);
-    runtime_free();
-    return rc;
+    return build_rc;
   }
 
   free(src);
 
-  // Evaluate
-  struct timespec start, end;
-  clock_gettime(CLOCK_MONOTONIC, &start);
-
-  Term main_ref = term_new_ref(main_id);
-
-  if (opts.do_collapse) {
-    // Lazy collapse + flatten: handles infinite structures
-    eval_collapse(main_ref, opts.collapse_limit, opts.stats, opts.silent);
-  } else {
-    // Standard evaluation to strong normal form
-    Term result = eval_normalize(main_ref);
-    if (!opts.silent && !opts.step_by_step) {
-      print_term(result);
-      printf("\n");
-    }
-  }
-
-  clock_gettime(CLOCK_MONOTONIC, &end);
-
-  // Print stats if requested
-  u64 total_itrs = wnf_itrs_total();
-  if (opts.stats) {
-    double dt  = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    double ips = total_itrs / dt;
-    u64 total_heap = heap_alloc_total();
-    printf("- Itrs: %llu interactions\n", total_itrs);
-    if (thread_get_count() > 1) {
-      for (u32 t = 0; t < thread_get_count(); t++) {
-        printf("- Itrs[%u]: %llu interactions\n", t, wnf_itrs_thread(t));
-      }
-    }
-    printf("- Heap: %llu nodes\n", total_heap);
-    printf("- Time: %.3f seconds\n", dt);
-    printf("- Perf: %.2f M interactions/s\n", ips / 1e6);
-  } else if (opts.silent) {
-    printf("- Itrs: %llu interactions\n", total_itrs);
-  }
+  // Evaluate and print stats using shared runtime behavior.
+  RuntimeEvalCfg eval_cfg = {
+    .do_collapse   = opts.do_collapse,
+    .collapse_limit = opts.collapse_limit,
+    .stats         = opts.stats,
+    .silent        = opts.silent,
+    .step_by_step  = opts.step_by_step,
+  };
+  runtime_eval_main(main_id, &eval_cfg);
 
   // Cleanup
   free(abs_path);

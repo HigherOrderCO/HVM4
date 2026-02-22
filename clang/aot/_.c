@@ -26,6 +26,15 @@
 
 typedef Term (*HvmAotFn)(Term *stack, u32 *s_pos, u32 base);
 
+// Build-time runtime config embedded into generated AOT executables.
+typedef struct {
+  u32            threads;
+  int            debug;
+  RuntimeEvalCfg eval;
+  u32            ffi_len;
+  RuntimeFfiLoad ffi[RUNTIME_FFI_MAX];
+} AotBuildCfg;
+
 // Per-definition compiled entrypoint table (BOOK id -> native function).
 static HvmAotFn AOT_FNS[BOOK_CAP] = {0};
 
@@ -36,10 +45,13 @@ fn Term aot_fallback_alo(u64 tm_loc, u16 len, const Term *args) {
   }
 
   u64 ls_loc = 0;
+  // ALO substitutions are addressed by de Bruijn level.
+  // Head must be the innermost binder to match wnf_alo_var indexing.
   for (u16 i = 0; i < len; i++) {
     u64 bind = heap_alloc(2);
     heap_set(bind + 0, term_sub_set(args[i], 1));
-    heap_set(bind + 1, term_new_num(ls_loc));
+    // Keep full heap location width; term_new_num(u32) truncates on T>1 slices.
+    heap_set(bind + 1, term_new(0, NUM, 0, ls_loc));
     ls_loc = bind;
   }
 
