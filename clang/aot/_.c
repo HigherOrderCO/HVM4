@@ -302,7 +302,8 @@ fn AotHotRes aot_hot_apply_ref(u16 ref_id, u16 argc, const Term *args, u32 depth
     return aot_hot_fail(call);
   }
 
-  AotHotEnv env = { .len = 0 };
+  AotHotEnv env;
+  env.len = 0;
   u64 at = BOOK[ref_id];
   u16 i = 0;
 
@@ -401,7 +402,8 @@ fn Term aot_exec_loc(u64 loc, const Term *env0, u16 env0_len, Term *stack, u32 *
     return aot_fallback_alo(loc, env0_len, env0);
   }
 
-  AotHotEnv env = { .len = env0_len };
+  AotHotEnv env;
+  env.len = env0_len;
   for (u16 i = 0; i < env0_len; i++) {
     env.data[i] = (AotHotEnvEnt){
       .var = env0[i],
