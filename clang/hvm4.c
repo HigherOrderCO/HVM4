@@ -207,12 +207,15 @@ static _Thread_local u32 WNF_TID = 0;
 #define WNF_STACK (WNF_BANK->stack)
 #define WNF_S_POS (WNF_BANK->s_pos)
 #define ITRS (*WNF_ITRS_PTR)
+static int ITRS_ENABLED = 1;
 #define ITRS_INC(name) \
   do { \
-    if (__builtin_expect(STEPS_ITRS_LIM != 0, 0)) { \
-      STEPS_LAST_ITR = (name); \
+    if (ITRS_ENABLED != 0) { \
+      if (__builtin_expect(STEPS_ITRS_LIM != 0, 0)) { \
+        STEPS_LAST_ITR = (name); \
+      } \
+      ITRS++; \
     } \
-    ITRS++; \
   } while (0)
 static u32 FRESH = 1;
 
@@ -433,6 +436,7 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 // ===
 
 #include "wnf/set_tid.c"
+#include "wnf/set_itrs_enabled.c"
 #include "wnf/stack_init.c"
 #include "wnf/stack_free.c"
 #include "wnf/itrs_total.c"

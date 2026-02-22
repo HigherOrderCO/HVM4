@@ -7,6 +7,7 @@
 
 fn Term eval_normalize(Term term);
 fn void eval_collapse(Term root, int limit, int stats, int silent);
+fn void wnf_set_itrs_enabled(int enabled);
 
 // Runtime Eval Main
 // -----------------
@@ -24,6 +25,9 @@ fn void runtime_eval_main(u32 main_id, const RuntimeEvalCfg *cfg) {
   if (cfg != NULL) {
     run = *cfg;
   }
+
+  int enable_itrs = run.stats || run.silent || run.step_by_step;
+  wnf_set_itrs_enabled(enable_itrs);
 
   struct timespec start;
   struct timespec end;

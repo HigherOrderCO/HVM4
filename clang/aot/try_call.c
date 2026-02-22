@@ -4,6 +4,10 @@
 
 // Calls one compiled symbol if present and stores its output.
 fn int aot_try_call(u32 id, Term *stack, u32 *s_pos, u32 base, Term *out) {
+  if (STEPS_ITRS_LIM != 0) {
+    return 0;
+  }
+
   if (id >= BOOK_CAP) {
     return 0;
   }

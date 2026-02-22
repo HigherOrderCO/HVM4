@@ -1,0 +1,20 @@
+// pow2_u32.hvm4
+// =============
+// Binary recursion benchmark that computes 2^n.
+// Base: f(0) = 1. Step: f(n+1) = f(n) + f(n).
+
+// Pow2
+// ----
+
+// Recursively computes 2^n using a u32 switch.
+@pow2_u32 = λ{
+  0: 1;
+  _: λ&n.
+    @pow2_u32(n - 1) + @pow2_u32(n - 1)
+}
+
+// Main
+// ----
+
+// Tuned to run around one second in this runtime.
+@main = @pow2_u32(23)

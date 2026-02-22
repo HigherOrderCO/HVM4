@@ -38,6 +38,20 @@ typedef struct {
 // Per-definition compiled entrypoint table (BOOK id -> native function).
 static HvmAotFn AOT_FNS[BOOK_CAP] = {0};
 
+// Counts one interaction on compiled paths.
+fn void aot_itrs_inc(void) {
+  if (ITRS_ENABLED) {
+    ITRS++;
+  }
+}
+
+// Adds a known number of interactions on compiled paths.
+fn void aot_itrs_add(u64 amount) {
+  if (ITRS_ENABLED) {
+    ITRS += amount;
+  }
+}
+
 // Rebuilds an ALO node from captured APP-LAM arguments.
 fn Term aot_fallback_alo(u64 tm_loc, u16 len, const Term *args) {
   if (len == 0) {
@@ -286,7 +300,7 @@ fn AotHotRes aot_hot_eval_dup(u64 loc, Term dup, AotHotEnv *env, u32 depth) {
   }
 
   env->data[env->len++] = val.term;
-  ITRS_INC("DUP-NOD");
+  aot_itrs_inc();
   AotHotRes out = aot_hot_eval_loc(dup_loc + 1, env, depth);
   env->len--;
   return out;
@@ -373,7 +387,7 @@ fn AotHotRes aot_hot_apply_ref(u16 ref_id, u16 argc, const Term *args, u32 depth
         }
         env.data[env.len++] = args[i];
         i++;
-        ITRS_INC("APP-LAM");
+        aot_itrs_inc();
         at = term_val(cur);
         continue;
       }
@@ -384,11 +398,11 @@ fn AotHotRes aot_hot_apply_ref(u16 ref_id, u16 argc, const Term *args, u32 depth
         }
         u64 mat_loc = term_val(cur);
         if (term_val(arg) == term_ext(cur)) {
-          ITRS_INC("APP-MAT-NUM-MAT");
+          aot_itrs_inc();
           i++;
           at = mat_loc + 0;
         } else {
-          ITRS_INC("APP-MAT-NUM-MIS");
+          aot_itrs_inc();
           at = mat_loc + 1;
         }
         continue;
@@ -482,7 +496,7 @@ fn Term aot_exec_loc(u64 loc, const Term *env0, u16 env0_len, Term *stack, u32 *
         u64 app_loc = term_val(frame);
         Term arg    = heap_read(app_loc + 1);
         env.data[env.len++] = arg;
-        ITRS_INC("APP-LAM");
+        aot_itrs_inc();
         at = term_val(cur);
         continue;
       }
@@ -495,10 +509,10 @@ fn Term aot_exec_loc(u64 loc, const Term *env0, u16 env0_len, Term *stack, u32 *
         u64 mat_loc = term_val(cur);
         if (term_val(arg) == term_ext(cur)) {
           (*s_pos)--;
-          ITRS_INC("APP-MAT-NUM-MAT");
+          aot_itrs_inc();
           at = mat_loc + 0;
         } else {
-          ITRS_INC("APP-MAT-NUM-MIS");
+          aot_itrs_inc();
           at = mat_loc + 1;
         }
         continue;
