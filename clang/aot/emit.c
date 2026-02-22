@@ -164,6 +164,27 @@ fn void aot_emit_loc_ref(char *out, u32 out_cap, const AotPlan *plan, u32 width,
   snprintf(out, out_cap, "%lluULL", (unsigned long long)loc);
 }
 
+// Returns 1 when a location can be returned directly without ALO fallback.
+fn int aot_emit_is_direct_leaf(u64 loc) {
+  Term t   = heap_read(loc);
+  u8   tag = term_tag(t);
+
+  switch (tag) {
+    case NAM:
+    case REF:
+    case PRI:
+    case ERA:
+    case NUM:
+    case ANY:
+    case C00: {
+      return 1;
+    }
+    default: {
+      return 0;
+    }
+  }
+}
+
 // Serializes one static term into a compact single-line comment.
 fn void aot_emit_term_line(char *out, u32 out_cap, Term term, u32 dep) {
   if (out_cap == 0) {
@@ -288,7 +309,11 @@ fn void aot_emit_jump(FILE *f, const AotPlan *plan, u32 width, u64 loc, const ch
   aot_emit_loc_ref(loc_ref, sizeof(loc_ref), plan, width, loc);
 
   if (aot_emit_find_state(plan, loc) < 0) {
-    fprintf(f, "%sreturn aot_fallback_alo(%s, env_len, env);\n", pad, loc_ref);
+    if (aot_emit_is_direct_leaf(loc)) {
+      fprintf(f, "%sreturn heap_read(%s);\n", pad, loc_ref);
+      return;
+    }
+    fprintf(f, "%sreturn aot_exec_loc(%s, env, env_len, stack, s_pos, base);\n", pad, loc_ref);
     return;
   }
 
@@ -420,7 +445,7 @@ fn void aot_emit_def(FILE *f, u32 id) {
   aot_emit_loc_ref(root_ref, sizeof(root_ref), &plan, width, root);
 
   if (plan.st_len == 0) {
-    fprintf(f, "  return aot_fallback_alo(%s, env_len, env);\n", root_ref);
+    fprintf(f, "  return aot_exec_loc(%s, env, env_len, stack, s_pos, base);\n", root_ref);
     fprintf(f, "}\n\n");
     free(plan.sts);
     free(plan.locs);
@@ -434,7 +459,7 @@ fn void aot_emit_def(FILE *f, u32 id) {
     aot_emit_case(f, &plan, width, plan.sts[i]);
   }
   fprintf(f, "      default: {\n");
-  fprintf(f, "        return aot_fallback_alo(at, env_len, env);\n");
+  fprintf(f, "        return aot_exec_loc(at, env, env_len, stack, s_pos, base);\n");
   fprintf(f, "      }\n");
   fprintf(f, "    }\n");
   fprintf(f, "  }\n");

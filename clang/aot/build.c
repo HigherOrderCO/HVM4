@@ -141,7 +141,7 @@ fn int aot_build_spawn(char *const argv[]) {
 fn void aot_build_compile(const char *c_path, const char *out_path) {
   char *const cmd[] = {
     "clang",
-    "-O2",
+    "-O3",
     "-o",
     (char *)out_path,
     (char *)c_path,
