@@ -1,6 +1,10 @@
 // Parallel normalization (SNF) traversal using work-stealing.
+#if HVM_WINDOWS
+#include <windows.h>
+#else
 #include <pthread.h>
 #include <sched.h>
+#endif
 #include <stdatomic.h>
 #include <stdbool.h>
 
@@ -57,8 +61,11 @@ static inline void eval_normalize_go(EvalNormalizeCtx *ctx, EvalNormalizeWorker 
   }
 }
 
-
+#if HVM_WINDOWS
+static DWORD WINAPI eval_normalize_worker(LPVOID arg) {
+#else
 static void *eval_normalize_worker(void *arg) {
+#endif
   EvalNormalizeArg *A = (EvalNormalizeArg *)arg;
   EvalNormalizeCtx *ctx = A->ctx;
   u32 me = A->tid;
@@ -115,10 +122,18 @@ static void *eval_normalize_worker(void *arg) {
       active = false;
     }
 
+#if HVM_WINDOWS
+    SwitchToThread();
+#else
     sched_yield();
+#endif
   }
 
+#if HVM_WINDOWS
+  return 0;
+#else
   return NULL;
+#endif
 }
 
 fn Term eval_normalize(Term term) {
@@ -150,19 +165,36 @@ fn Term eval_normalize(Term term) {
 
   eval_normalize_enqueue(&ctx, &ctx.W[0], root_loc);
 
+#if HVM_WINDOWS
+  HANDLE tids[MAX_THREADS];
+#else
   pthread_t tids[MAX_THREADS];
+#endif
   EvalNormalizeArg args[MAX_THREADS];
   for (u32 i = 1; i < n; i++) {
     args[i].ctx = &ctx;
     args[i].tid = i;
+#if HVM_WINDOWS
+    tids[i] = CreateThread(NULL, 0, eval_normalize_worker, &args[i], 0, NULL);
+    if (tids[i] == NULL) {
+      fprintf(stderr, "eval_normalize: CreateThread failed\n");
+      exit(1);
+    }
+#else
     pthread_create(&tids[i], NULL, eval_normalize_worker, &args[i]);
+#endif
   }
 
   EvalNormalizeArg arg0 = { .ctx = &ctx, .tid = 0 };
   eval_normalize_worker(&arg0);
 
   for (u32 i = 1; i < n; i++) {
+#if HVM_WINDOWS
+    WaitForSingleObject(tids[i], INFINITE);
+    CloseHandle(tids[i]);
+#else
     pthread_join(tids[i], NULL);
+#endif
   }
 
   for (u32 i = 0; i < n; i++) {
