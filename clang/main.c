@@ -45,11 +45,18 @@ fn const char *cli_prog_name(const char *argv0) {
   }
 
   const char *slash = strrchr(argv0, '/');
-  if (slash == NULL) {
+  const char *backslash = strrchr(argv0, '\\');
+  const char *sep = slash;
+
+  if (backslash != NULL && (sep == NULL || backslash > sep)) {
+    sep = backslash;
+  }
+
+  if (sep == NULL) {
     return argv0;
   }
 
-  return slash + 1;
+  return sep + 1;
 }
 
 // Returns 1 if `text` is a non-empty decimal unsigned integer.
@@ -343,7 +350,20 @@ int main(int argc, char **argv) {
   }
 
   // Parse and validate source, then resolve @main.
+#if HVM_WINDOWS
+  char *abs_path = NULL;
+  char *abs_path_buf = malloc(PATH_MAX);
+  if (abs_path_buf != NULL) {
+    DWORD abs_len = GetFullPathNameA(opts.file, PATH_MAX, abs_path_buf, NULL);
+    if (abs_len > 0 && abs_len < PATH_MAX) {
+      abs_path = abs_path_buf;
+    } else {
+      free(abs_path_buf);
+    }
+  }
+#else
   char *abs_path = realpath(opts.file, NULL);
+#endif
   const char *src_path = abs_path ? abs_path : opts.file;
   u32 main_id = 0;
   if (!runtime_prepare(&main_id, src_path, src)) {
