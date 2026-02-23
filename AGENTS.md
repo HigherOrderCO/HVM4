@@ -18,6 +18,8 @@ Key terms:
 
 ## Build and Test
 
+### Unix/Linux/macOS
+
 ```bash
 # Build
 cd clang && clang -O2 -o main main.c
@@ -27,6 +29,27 @@ cd clang && clang -O2 -o main main.c
 
 # Run all tests
 ./test/_all_.sh
+```
+
+### Windows
+
+```powershell
+# Build with Clang (recommended)
+cd clang
+clang -O2 -o main.exe main.c
+
+# Or build with MSVC
+cd clang
+cl /O2 /Fe:main.exe main.c
+
+# Run a file
+.\clang\main.exe test\file.hvm -s -C10
+
+# Run all tests
+.\scripts\test.ps1
+
+# Run interpreted tests only (skip AOT compilation tests)
+.\scripts\test.ps1 -InterpretedOnly
 ```
 
 ## Docs Map
