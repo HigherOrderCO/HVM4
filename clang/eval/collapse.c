@@ -88,8 +88,7 @@ static inline void eval_collapse_process_loc(EvalCollapseCtx *C, u32 me, u8 key,
   }
 }
 
-static void *eval_collapse_worker(void *arg) {
-  EvalCollapseArg *A = (EvalCollapseArg *)arg;
+static void eval_collapse_worker_run(EvalCollapseArg *A) {
   EvalCollapseCtx *C = A->ctx;
   u32 me = A->tid;
 
@@ -99,7 +98,6 @@ static void *eval_collapse_worker(void *arg) {
   u32 steal_period = EVAL_COLLAPSE_STEAL_PERIOD;
   u32 steal_batch = EVAL_COLLAPSE_STEAL_BATCH;
   u32 steal_cursor = me + 1;
-  u64 limit = C->limit;
   bool active = true;
   u64 local_printed = 0;
 
@@ -152,13 +150,28 @@ static void *eval_collapse_worker(void *arg) {
     }
 
     if (!active) {
+#if HVM_WINDOWS
+      SwitchToThread();
+#else
       sched_yield();
+#endif
     }
   }
 
   atomic_fetch_add_explicit(&C->printed.v, local_printed, memory_order_relaxed);
+}
+
+#if HVM_WINDOWS
+static DWORD WINAPI eval_collapse_worker_win(LPVOID arg) {
+  eval_collapse_worker_run((EvalCollapseArg *)arg);
+  return 0;
+}
+#else
+static void *eval_collapse_worker(void *arg) {
+  eval_collapse_worker_run((EvalCollapseArg *)arg);
   return NULL;
 }
+#endif
 
 fn void eval_collapse(Term term, int limit, int show_itrs, int silent) {
   u32 n = thread_get_count();
@@ -198,6 +211,33 @@ fn void eval_collapse(Term term, int limit, int show_itrs, int silent) {
 
   wspq_push(&C.ws, 0u, 0u, (u64)root_loc);
 
+#if HVM_WINDOWS
+  HANDLE threads[MAX_THREADS];
+  EvalCollapseArg args[MAX_THREADS];
+  if (n > 1) {
+    for (u32 i = 1; i < n; ++i) {
+      args[i].ctx = &C;
+      args[i].tid = i;
+      threads[i] = CreateThread(NULL, EVAL_COLLAPSE_STACK_SIZE, eval_collapse_worker_win, &args[i], 0, NULL);
+      if (threads[i] == NULL) {
+        fprintf(stderr, "eval_collapse: CreateThread failed\n");
+        exit(1);
+      }
+    }
+  }
+
+  EvalCollapseArg arg0;
+  arg0.ctx = &C;
+  arg0.tid = 0;
+  eval_collapse_worker_run(&arg0);
+
+  if (n > 1) {
+    for (u32 i = 1; i < n; ++i) {
+      WaitForSingleObject(threads[i], INFINITE);
+      CloseHandle(threads[i]);
+    }
+  }
+#else
   pthread_t tids[MAX_THREADS];
   EvalCollapseArg args[MAX_THREADS];
   if (n > 1) {
@@ -212,14 +252,17 @@ fn void eval_collapse(Term term, int limit, int show_itrs, int silent) {
     pthread_attr_destroy(&attr);
   }
 
-  EvalCollapseArg arg0 = { .ctx = &C, .tid = 0 };
-  eval_collapse_worker(&arg0);
+  EvalCollapseArg arg0;
+  arg0.ctx = &C;
+  arg0.tid = 0;
+  eval_collapse_worker_run(&arg0);
 
   if (n > 1) {
     for (u32 i = 1; i < n; ++i) {
       pthread_join(tids[i], NULL);
     }
   }
+#endif
 
   wspq_free(&C.ws);
   cnf_pool_clear();
