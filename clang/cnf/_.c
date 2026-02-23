@@ -106,7 +106,11 @@ static inline void cnf_pool_join(CnfPool *pool, CachePaddedAtomic *pending) {
       cnf_task_run(pool, task);
       continue;
     }
+#if HVM_WINDOWS
+    SwitchToThread();
+#else
     sched_yield();
+#endif
   }
 }
 
