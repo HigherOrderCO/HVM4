@@ -19,6 +19,15 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
+#if HVM_WINDOWS
+#include <malloc.h>
+#endif
+
+#if defined(__clang__) || defined(__GNUC__)
+#define WSQ_PREFETCH(ptr, rw, locality) __builtin_prefetch((ptr), (rw), (locality))
+#else
+#define WSQ_PREFETCH(ptr, rw, locality) ((void)0)
+#endif
 
 // Work-stealing deque state (single owner, multi-stealer).
 typedef struct __attribute__((aligned(CACHE_L1))) {
@@ -31,6 +40,9 @@ typedef struct __attribute__((aligned(CACHE_L1))) {
 
 // Allocate aligned memory for the ring buffer.
 static inline void *wsq_aligned_alloc(size_t alignment, size_t nbytes) {
+#if HVM_WINDOWS
+  return _aligned_malloc(nbytes, alignment);
+#else
   void *ptr = NULL;
   size_t size = ((nbytes + alignment - 1) / alignment) * alignment;
   int err = posix_memalign(&ptr, alignment, size);
@@ -38,6 +50,7 @@ static inline void *wsq_aligned_alloc(size_t alignment, size_t nbytes) {
     return NULL;
   }
   return ptr;
+#endif
 }
 
 // Initialize a deque with 2^capacity_pow2 slots.
@@ -57,7 +70,11 @@ static inline int wsq_init(WsDeque *q, u32 capacity_pow2) {
 // Release the deque buffer.
 static inline void wsq_free(WsDeque *q) {
   if (q && q->buf) {
+#if HVM_WINDOWS
+    _aligned_free(q->buf);
+#else
     free(q->buf);
+#endif
     q->buf = NULL;
   }
 }
@@ -69,7 +86,7 @@ static inline int wsq_push(WsDeque *q, u64 x) {
   if (b - t >= q->cap) {
     return 0;
   }
-  __builtin_prefetch(&q->buf[b & q->mask], 1, 1);
+  WSQ_PREFETCH(&q->buf[b & q->mask], 1, 1);
   q->buf[b & q->mask] = x;
   atomic_store_explicit(&q->bot.v, b + 1, memory_order_release);
   return 1;
@@ -82,7 +99,7 @@ static inline int wsq_pop(WsDeque *q, u64 *out) {
     return 0;
   }
   u64 b1 = b - 1;
-  __builtin_prefetch(&q->buf[b1 & q->mask], 0, 1);
+  WSQ_PREFETCH(&q->buf[b1 & q->mask], 0, 1);
   atomic_store_explicit(&q->bot.v, b1, memory_order_release);
   atomic_thread_fence(memory_order_seq_cst);
 
@@ -119,7 +136,7 @@ static inline int wsq_steal(WsDeque *q, u64 *out) {
   if (t >= b) {
     return 0;
   }
-  __builtin_prefetch(&q->buf[t & q->mask], 0, 1);
+  WSQ_PREFETCH(&q->buf[t & q->mask], 0, 1);
   u64 x = q->buf[t & q->mask];
   u64 expected = t;
   bool ok = atomic_compare_exchange_strong_explicit(
