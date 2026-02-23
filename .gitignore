@@ -2,6 +2,7 @@
 *.o
 *.hi
 clang/main
+clang/main.exe
 haskell/main
 hvm_old/
 .DS_Store
