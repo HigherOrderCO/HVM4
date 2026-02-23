@@ -4,10 +4,28 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
-#include <sched.h>
 #include <stdatomic.h>
-#include <pthread.h>
 #include <assert.h>
+
+// Platform Detection
+// ==================
+
+#if defined(_WIN32) || defined(_WIN64)
+  #define HVM_WINDOWS 1
+  #include <windows.h>
+  #include <direct.h>
+  #define PATH_SEP '\\'
+  #define PATH_SEP_STR "\\"
+#else
+  #define HVM_UNIX 1
+  #include <sched.h>
+  #include <pthread.h>
+  #include <unistd.h>
+  #include <sys/stat.h>
+  #include <dlfcn.h>
+  #define PATH_SEP '/'
+  #define PATH_SEP_STR "/"
+#endif
 
 // Busy-wait hint
 #if defined(__aarch64__)
@@ -155,7 +173,11 @@ typedef struct {
 // Capacities
 // ==========
 
-#define HEAP_CAP (1ULL << 38)
+#if defined(HVM_WINDOWS)
+  #define HEAP_CAP (1ULL << 30)
+#else
+  #define HEAP_CAP (1ULL << 38)
+#endif
 #define BOOK_CAP (1ULL << 24)
 #define WNF_CAP  (1ULL << 32)
 #define MAX_THREADS 64
