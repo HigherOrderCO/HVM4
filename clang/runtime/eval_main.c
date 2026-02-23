@@ -9,6 +9,27 @@ fn Term eval_normalize(Term term);
 fn void eval_collapse(Term root, int limit, int stats, int silent);
 fn void wnf_set_itrs_enabled(int enabled);
 
+#if HVM_WINDOWS
+static LARGE_INTEGER eval_main_perf_freq;
+static int eval_main_perf_freq_init = 0;
+
+static inline double eval_main_now_sec(void) {
+  if (!eval_main_perf_freq_init) {
+    QueryPerformanceFrequency(&eval_main_perf_freq);
+    eval_main_perf_freq_init = 1;
+  }
+  LARGE_INTEGER now;
+  QueryPerformanceCounter(&now);
+  return (double)now.QuadPart / (double)eval_main_perf_freq.QuadPart;
+}
+#else
+static inline double eval_main_now_sec(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+#endif
+
 // Runtime Eval Main
 // -----------------
 
@@ -29,9 +50,7 @@ fn void runtime_eval_main(u32 main_id, const RuntimeEvalCfg *cfg) {
   int enable_itrs = run.stats || run.silent || run.step_by_step;
   wnf_set_itrs_enabled(enable_itrs);
 
-  struct timespec start;
-  struct timespec end;
-  clock_gettime(CLOCK_MONOTONIC, &start);
+  double start = eval_main_now_sec();
 
   Term main_ref = term_new_ref(main_id);
   if (run.do_collapse) {
@@ -44,11 +63,11 @@ fn void runtime_eval_main(u32 main_id, const RuntimeEvalCfg *cfg) {
     }
   }
 
-  clock_gettime(CLOCK_MONOTONIC, &end);
+  double end = eval_main_now_sec();
 
   u64 total_itrs = wnf_itrs_total();
   if (run.stats) {
-    double dt = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    double dt = end - start;
     double ips = total_itrs / dt;
     u64 total_heap = heap_alloc_total();
 
