@@ -292,6 +292,19 @@ fn int aot_build_spawn(char *const argv[]) {
 
 // Compiles one generated C program into an executable.
 fn int aot_build_compile(const char *c_path, const char *out_path) {
+#if HVM_WINDOWS
+  char *const cmd[] = {
+    "clang",
+    "-O2",
+    "-D_CRT_SECURE_NO_WARNINGS",
+    "-D_CRT_NONSTDC_NO_WARNINGS",
+    "-Wno-deprecated-declarations",
+    "-o",
+    (char *)out_path,
+    (char *)c_path,
+    NULL,
+  };
+#else
   char *const cmd[] = {
     "clang",
     "-O2",
@@ -300,6 +313,7 @@ fn int aot_build_compile(const char *c_path, const char *out_path) {
     (char *)c_path,
     NULL,
   };
+#endif
 
   return aot_build_spawn(cmd);
 }
