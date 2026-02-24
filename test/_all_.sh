@@ -81,6 +81,15 @@ case "$(uname -s)" in
     ;;
 esac
 
+ffi_ext=".so"
+ffi_ldflags=(-shared -fPIC)
+case "$(uname -s)" in
+  Darwin*)
+    ffi_ext=".dylib"
+    ffi_ldflags=(-dynamiclib -fPIC)
+    ;;
+esac
+
 # Timeout
 # -------
 
