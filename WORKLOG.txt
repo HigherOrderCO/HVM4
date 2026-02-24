@@ -1,0 +1,312 @@
+WORKLOG.txt
+===========
+Comprehensive Session Memory and Engineering Log
+
+Documentation
+-------------
+This file is a full memory dump of the work done across this session context.
+It includes:
+- what was requested,
+- what was changed,
+- what was tried and failed (and why),
+- what worked (and why),
+- measured results,
+- constraints/instructions learned from the user,
+- current status, risks, and next actions.
+
+Timestamp
+---------
+- Written at: 2026-02-24 23:20:33 UTC
+- Local time: 2026-02-24 20:20:33 -03
+
+Scope and Repos
+---------------
+- Primary repo in this phase: `/Users/v/t/dev/hvm4`
+- Prior context also involved `/bench` translation work (from user conversation), but the concrete code and diffs captured here are for `hvm4`.
+
+High-Level User Goals (Chronological)
+-------------------------------------
+- Translate `.bend-only` benchmarks in `/bench` to idiomatic HVM.
+- Run benchmark timings with `-T1` only, and avoid the bench script for those checks.
+- Use smaller benchmark inputs to avoid multi-minute runs.
+- Investigate Bend constructor-inference issues and provide minimal reproductions.
+- Remove workaround code once language-level bug appeared fixed.
+- Commit/push with requested file-scoping constraints.
+- Improve benchmark tooling (`scripts/bench.sh`):
+  - add `-TN` (example: `-T1`) to choose one thread count,
+  - show time by default,
+  - show interactions/s only when `--ips` is used.
+- Main optimization objective:
+  - maximize compiled-mode performance (AOT) versus interpreted mode,
+  - focus on `mat_mul`,
+  - diagnose whether compiled fast paths are used or falling back.
+- Deep technical objective:
+  - make DUP compilation robust so hot paths stay compiled,
+  - avoid duct-tape fixes and preserve semantics.
+
+Critical User Instructions Learned and Applied
+----------------------------------------------
+- Always test with smaller cases first.
+- Avoid running long commands without timeout; always bound commands.
+- Do not use bench wrapper script for the specific targeted measurements requested.
+- Be explicit and concrete in explanations; avoid vague compiler jargon.
+- Preserve semantics; do not make argument evaluation stricter globally.
+- If applying strictness ideas, do it via analysis, not semantic mutation.
+- Fix foundations instead of adding scaffolding workarounds.
+
+What Was Diagnosed About Missing AOT Speedup
+--------------------------------------------
+- Initial problem:
+  - Most benchmarks showed little AOT speedup.
+  - `mat_mul` generated C had many `aot_fallback_alo(...)` points.
+- Key diagnosis:
+  - Hot evaluation was deopting frequently due emitted branches that residualized terms.
+  - DUP handling was a major source: prior logic only kept optimized flow under restrictive value conditions.
+  - REF dispatch and APP spine handling in head compilation were incomplete, causing fallback-heavy paths.
+
+Important Clarifications Discussed
+----------------------------------
+- HVM `let` in this lowering path appears as lambda application, which explains inner app shapes in core terms.
+- “Head mode” corresponds to `aot_emit_node(..., head=1)`:
+  - consumes APP frames from stack and keeps reducing at head.
+- “Expression mode” corresponds to `aot_emit_node(..., head=0)`:
+  - computes a subterm into a local `Term`.
+- `aot_emit_is_closed(...)` is not for head-mode constructor matching.
+  - It guards one direct `heap_read(arg_loc)` optimization in REF-call argument preparation so local binders are not captured incorrectly.
+- User challenged vague naming; wording was corrected to concrete function/branch names.
+
+ALO-DUP Semantics Clarified
+---------------------------
+- Discussed how ALO fallback can carry DUP-bound values through its captured environment.
+- Clarified that DUP-bound values may need DP-tag reconstruction (`DP0`/`DP1`) when not copy-free.
+- Clarified why “just keep compiling DUP body” is valid only if binder representation preserves semantics.
+- Implemented path follows this model:
+  - compile DUP body regardless,
+  - use copy-free check only to choose binder representation, not control-flow deopt.
+
+Concrete Code Changes (Current Uncommitted Work)
+------------------------------------------------
+Modified files:
+- `clang/aot/_.c`
+- `clang/aot/build.c`
+- `clang/aot/emit.c`
+- `clang/hvm.c`
+- `clang/runtime/init.c`
+- `clang/runtime/prepare.c`
+
+1) `clang/aot/emit.c`
+---------------------
+- Added environment argument helper:
+  - `aot_emit_env_arg(...)`
+- Added safety/optimization predicates:
+  - `aot_emit_is_closed(...)`
+  - `aot_emit_is_static_copy_free(...)`
+- Added head-mode `REF` handling:
+  - direct dispatch to compiled function when available,
+  - fallback to generic path when needed,
+  - stack argument extraction and reapplication path.
+- Added head-mode `APP` handling:
+  - evaluate argument subterm,
+  - push APP frame,
+  - continue compiling function head.
+- Added head-mode `DUP` handling:
+  - always continue into DUP body compilation,
+  - represent dynamic duplicate values with binder metadata (`xN_is_dup`, `xN_loc`).
+- Extended LAM binder setup:
+  - initialize DUP metadata registers for each binder (`xN_is_dup=0`, `xN_loc=0`).
+- VAR/BJV/DP/BJ reads now:
+  - handle lexical access carefully,
+  - generate DP0/DP1 terms when a binder is active as DUP-backed value.
+- OP2 emission improved:
+  - explicit `wnf(...)` before numeric fast op when needed.
+- Constructor expression case (`C01..C16`):
+  - direct `heap_read` only for dep==0 and static copy-free trees.
+- DUP expression case:
+  - no longer unconditional deopt on non-copy-free;
+  - compiles body with DP-aware binder representation.
+- APP expression case:
+  - lambda-application inline path emits binder setup + body compile.
+  - REF call path:
+    - detects strict arg0 and compiles it first,
+    - emits direct local reads for binder-like args,
+    - emits direct static constant reads when closed + static copy-free,
+    - otherwise uses `aot_fallback_alo(...)`.
+- Added generated function forward declarations:
+  - `aot_emit_decl(...)`,
+  - declarations emitted before definitions.
+
+2) `clang/aot/_.c`
+------------------
+- `aot_fallback_alo(...)` allocation optimization:
+  - moved from multiple small allocs to one contiguous block (`len*2 + 1` words).
+- Added static recursive copy-free checker:
+  - `aot_is_copy_free_static_rec(...)`
+- Extended `aot_is_copy_free(...)`:
+  - still fast-path `NUM` and `C00`,
+  - accepts static constructor trees (`C01..C16`) only when inside static heap segment.
+- Added direct compiled-ref invocation API:
+  - `aot_call_ref_direct(HvmAotFn fun, ...)`
+- Kept id-based dispatch wrapper:
+  - `aot_call_ref(...)` now delegates to direct API.
+- Added stack-range fast call helper:
+  - `aot_call_ref_fast(...)`
+
+3) `clang/aot/build.c`
+----------------------
+- Changed AOT C compile flags from `-O2` to:
+  - `-O3`
+  - `-ffast-math`
+  - `-flto`
+  - `-march=native`
+  - `-mtune=native`
+
+4) Static heap boundary tracking
+--------------------------------
+- `clang/hvm.c`:
+  - added global `HEAP_STATIC_END`.
+- `clang/runtime/init.c`:
+  - reset `HEAP_STATIC_END = 0` during runtime init.
+- `clang/runtime/prepare.c`:
+  - set `HEAP_STATIC_END = HEAP_NEXT_AT(0)` immediately after parsing program.
+
+What Failed, and Why
+--------------------
+- Failed direction: broad constructor copy-free handling for dynamic values.
+  - Symptom:
+    - Broke DUP-sensitive tests (notably bound-var duplication semantics).
+  - Root cause:
+    - Treating dynamic constructor trees as copy-free is unsound under DUP semantics.
+    - DP behavior and sharing identity matter for dynamic values.
+  - Resolution:
+    - Restrict constructor-tree copy-free acceptance to static heap only.
+    - Keep dynamic terms non-copy-free unless trivially safe (`NUM`, `C00`).
+
+- Requested strictness-analysis enhancement (from user) was not implemented in this patch set.
+  - Reason:
+    - scope was large (path-sensitive strictness through case-tree projections),
+    - immediate blocker for mat_mul was deopt shape in DUP/call emission, which was addressed first.
+  - User requirement retained:
+    - do not change semantics by making argument evaluation globally stricter.
+
+- Earlier mismatch during collapse-focused experimentation appeared in diff logs.
+  - There was an observed output/perf mismatch in intermediate generated artifacts.
+  - Final chosen code path was validated with targeted regression checks listed below.
+
+What Worked, and Why
+--------------------
+- Worked: DUP body compilation now continues in compiled code regardless of value class.
+  - Why:
+    - DP-aware binder representation (`xN_is_dup`, `xN_loc`) preserves semantics for non-copy-free values.
+    - Copy-free check now decides representation strategy, not “compile-or-deopt” control flow.
+
+- Worked: direct REF dispatch and stack-range fast calls reduce overhead.
+  - Why:
+    - fewer generic fallback constructions for known compiled refs.
+
+- Worked: static constant direct passing in REF args (when closed + static copy-free).
+  - Why:
+    - avoids unnecessary ALO residualization and environment capture cost for truly closed constants.
+
+- Worked: contiguous allocations in `aot_fallback_alo` and ref-call frame setup.
+  - Why:
+    - reduced allocation overhead and improved locality.
+
+Measured Results (Small Cases, `-T1`)
+-------------------------------------
+All measurements below used:
+- binary: `clang/main` built with current tree,
+- stats mode (`-s -S "-T1"`),
+- reduced input sizes per user request.
+
+`mat_mul_nat128.hvm`
+- interpreted:
+  - Itrs: 31,754,244
+  - Heap: 112,338,600
+  - Time: 0.375 s
+  - Perf: 84.70 M itrs/s
+- compiled (`--as-c`):
+  - Itrs: 29,657,349
+  - Heap: 25,529,888
+  - Time: 0.074 s
+  - Perf: 400.75 M itrs/s
+
+`mat_mul_nat192.hvm`
+- interpreted:
+  - Itrs: 106,834,948
+  - Heap: 377,797,032
+  - Time: 1.284 s
+  - Perf: 83.19 M itrs/s
+- compiled (`--as-c`):
+  - Itrs: 99,757,445
+  - Heap: 85,751,008
+  - Time: 0.262 s
+  - Perf: 381.37 M itrs/s
+
+Observed speedup on these reduced cases:
+- about 5.0x (nat128: 0.375 -> 0.074)
+- about 4.9x (nat192: 1.284 -> 0.262)
+
+Targeted Regression Checks Run
+------------------------------
+Executed with bounded commands and `--as-c`:
+- `test/autodup_bound_vars.hvm` -> pass
+- `test/autodup_value_path.hvm` -> pass
+- `test/collapse_supgen_mul.hvm -C4` -> pass
+
+Evidence files used during this phase:
+- `/private/tmp/worklog_nat128_interp.txt`
+- `/private/tmp/worklog_nat128_comp.txt`
+- `/private/tmp/worklog_nat192_interp.txt`
+- `/private/tmp/worklog_nat192_comp.txt`
+- `/private/tmp/worklog_test_bound.txt`
+- `/private/tmp/worklog_test_value.txt`
+- `/private/tmp/worklog_test_collapse.txt`
+
+Bench Script Status (From Prior Completed Work)
+-----------------------------------------------
+`scripts/bench.sh` currently includes:
+- `-TN` parsing (`-T1`, `-T2`, etc.) to run a single thread count.
+- default output metric = time (`- Time:` parsed as seconds).
+- `--ips` switches metric to interactions/s (`- Perf:` parsed).
+- this behavior aligns with user request.
+
+Communication/Process Corrections Applied
+-----------------------------------------
+- Adopted strict command timeouts after user warning about long hangs.
+- Avoided running broad bench automation where user requested targeted reduced cases.
+- Adjusted explanation style to map directly to concrete function names/branches.
+
+Known Limits and Open Technical Work
+------------------------------------
+- The current improvements significantly reduce deopt and improve mat_mul, but do not imply universal 100% deopt elimination for all programs.
+- Remaining deopt cases are mostly semantic-safety guards:
+  - lexical capture requirements,
+  - unsupported expression shapes in specific lowering branches.
+- A deeper foundational next step (if pursued):
+  - broaden direct compiled emission for more expression forms so fewer paths require ALO construction.
+  - keep safety invariants explicit to avoid unsound DUP/capture behavior.
+
+Current Git State Snapshot
+--------------------------
+- Branch: `main`
+- Status against remote: `main...origin/main` (no commit divergence)
+- Uncommitted modified files:
+  - `clang/aot/_.c`
+  - `clang/aot/build.c`
+  - `clang/aot/emit.c`
+  - `clang/hvm.c`
+  - `clang/runtime/init.c`
+  - `clang/runtime/prepare.c`
+- Untracked local artifacts:
+  - `.fill.tmp`
+  - `.tmpcheck/`
+
+Notes on Honesty / Confidence
+-----------------------------
+- Items marked as “prior completed work” are taken from repo state and conversation context.
+- Performance numbers in this file were rerun in this phase and are current.
+- Any claim about 100% compiled-path execution across all benchmarks is not asserted here.
+  - What is asserted: substantial compiled-mode gain on reduced `mat_mul` cases, with targeted correctness checks passing.
+
+End of Worklog
+--------------

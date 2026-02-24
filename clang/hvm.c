@@ -172,6 +172,7 @@ static u32 THREAD_COUNT = 1;
 // ============
 
 static Term    *HEAP;
+static u64      HEAP_STATIC_END = 0;
 #define HEAP_STRIDE 32
 static u64      HEAP_NEXT[MAX_THREADS * HEAP_STRIDE] __attribute__((aligned(256))) = {0};
 static u64      HEAP_END[MAX_THREADS * HEAP_STRIDE] __attribute__((aligned(256))) = {0};

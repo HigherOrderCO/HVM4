@@ -18,6 +18,7 @@ fn void runtime_init(u32 threads, int debug, int silent, int steps_enable) {
   heap_init_slices();
   symbols_init();
   prim_init();
+  HEAP_STATIC_END = 0;
 
   DEBUG = debug;
   SILENT = silent;

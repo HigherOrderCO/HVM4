@@ -53,21 +53,22 @@ fn void aot_itrs_add(u64 amount) {
 // Fallback
 // --------
 
-// Rebuilds an ALO node from captured APP-LAM arguments.
+// Rebuilds one plain ALO environment (all binders substituted).
 fn Term aot_fallback_alo(u64 tm_loc, u16 len, const Term *args) {
   if (len == 0) {
     return term_new(0, ALO, 0, tm_loc);
   }
 
+  u64 block  = heap_alloc((u64)len * 2 + 1);
   u64 ls_loc = 0;
   for (u16 i = 0; i < len; i++) {
-    u64 bind = heap_alloc(2);
+    u64 bind = block + (u64)i * 2;
     heap_set(bind + 0, term_sub_set(args[i], 1));
     heap_set(bind + 1, term_new(0, NUM, 0, ls_loc));
     ls_loc = bind;
   }
 
-  u64 alo_loc = heap_alloc(1);
+  u64 alo_loc = block + (u64)len * 2;
   u64 alo_val = ((ls_loc & ALO_LS_MASK) << ALO_TM_BITS) | (tm_loc & ALO_TM_MASK);
   heap_set(alo_loc, alo_val);
   return term_new(0, ALO, len, alo_loc);
@@ -82,6 +83,35 @@ fn Term aot_reapply(Term head, u16 argc, const Term *args, u16 from) {
 }
 
 // Returns one copy-free DUP value predicate used by generated code.
+fn int aot_is_copy_free_static_rec(Term term, u32 fuel) {
+  if (fuel == 0) {
+    return 0;
+  }
+
+  u8 tag = term_tag(term);
+  if (tag == NUM || tag == C00) {
+    return 1;
+  }
+  if (tag < C01 || tag > C16) {
+    return 0;
+  }
+
+  u64 loc = term_val(term);
+  if (loc >= HEAP_STATIC_END) {
+    return 0;
+  }
+
+  u32 ari = term_arity(term);
+  for (u32 i = 0; i < ari; i++) {
+    Term fld = heap_read(loc + i);
+    if (!aot_is_copy_free_static_rec(fld, fuel - 1)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+// Returns one copy-free DUP value predicate used by generated code.
 fn int aot_is_copy_free(Term term) {
   u8 tag = term_tag(term);
   if (tag == NUM) {
@@ -89,6 +119,12 @@ fn int aot_is_copy_free(Term term) {
   }
   if (tag == C00) {
     return 1;
+  }
+  if (tag >= C01 && tag <= C16) {
+    u64 loc = term_val(term);
+    if (loc < HEAP_STATIC_END) {
+      return aot_is_copy_free_static_rec(term, 1024);
+    }
   }
   return 0;
 }
@@ -102,7 +138,7 @@ fn u32 aot_call_depth(void) {
 }
 
 // Calls one compiled ref if available, else returns residual REF application.
-fn Term aot_call_ref(u32 ref_id, u16 argc, const Term *args) {
+fn Term aot_call_ref_direct(HvmAotFn fun, u32 ref_id, u16 argc, const Term *args) {
   if (argc > AOT_ARG_CAP) {
     return aot_reapply(term_new_ref(ref_id), argc, args, 0);
   }
@@ -111,16 +147,15 @@ fn Term aot_call_ref(u32 ref_id, u16 argc, const Term *args) {
     return aot_reapply(term_new_ref(ref_id), argc, args, 0);
   }
 
-  HvmAotFn fun = AOT_FNS[ref_id];
   if (fun == NULL) {
     return aot_reapply(term_new_ref(ref_id), argc, args, 0);
   }
 
   Term stack[AOT_ARG_CAP];
-  u32  s_pos = argc;
-
+  u32  s_pos  = argc;
+  u64  block  = heap_alloc((u64)argc * 2);
   for (u16 i = 0; i < argc; i++) {
-    u64 app_loc = heap_alloc(2);
+    u64 app_loc = block + (u64)i * 2;
     heap_set(app_loc + 0, term_new_era());
     heap_set(app_loc + 1, args[i]);
     stack[argc - 1 - i] = term_new(0, APP, 0, app_loc);
@@ -141,6 +176,34 @@ fn Term aot_call_ref(u32 ref_id, u16 argc, const Term *args) {
   }
 
   return out;
+}
+
+// Calls one compiled ref by id if available, else returns residual REF application.
+fn Term aot_call_ref(u32 ref_id, u16 argc, const Term *args) {
+  if (ref_id >= BOOK_CAP) {
+    return aot_reapply(term_new_ref(ref_id), argc, args, 0);
+  }
+  return aot_call_ref_direct(AOT_FNS[ref_id], ref_id, argc, args);
+}
+
+// Calls one compiled ref directly on the current stack range [base, *s_pos).
+// Returns 1 on success and writes the reduced term to `out`.
+fn int aot_call_ref_fast(u32 ref_id, Term *stack, u32 *s_pos, u32 base, Term *out) {
+  if (ref_id >= BOOK_CAP) {
+    return 0;
+  }
+
+  HvmAotFn fun = AOT_FNS[ref_id];
+  if (fun == NULL) {
+    return 0;
+  }
+  if (AOT_CALL_DEPTH >= AOT_MAX_DEPTH) {
+    return 0;
+  }
+  AOT_CALL_DEPTH++;
+  *out = fun(stack, s_pos, base);
+  AOT_CALL_DEPTH--;
+  return 1;
 }
 
 // Dispatch
