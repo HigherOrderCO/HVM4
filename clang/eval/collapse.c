@@ -77,7 +77,7 @@ static inline void eval_collapse_process_loc(EvalCollapseCtx *C, u32 me, u8 key,
           if (!C->silent) {
             print_term_quoted(t);
             if (C->show_itrs) {
-              printf(" \033[2m#%llu\033[0m", wnf_itrs_total());
+              printf(" \033[2m#%llu\033[0m", (unsigned long long)wnf_itrs_total());
             }
             printf("\n");
           }

@@ -20,7 +20,7 @@ fn int runtime_prepare(u32 *main_id, const char *src_path, char *src) {
   parse_program(src_path, src);
 
   if (HEAP_NEXT_AT(0) > (ALO_TM_MASK + 1)) {
-    fprintf(stderr, "Error: static book exceeds 24-bit location space (%llu words used)\n", HEAP_NEXT_AT(0));
+    fprintf(stderr, "Error: static book exceeds 24-bit location space (%llu words used)\n", (unsigned long long)HEAP_NEXT_AT(0));
     return 0;
   }
 

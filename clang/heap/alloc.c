@@ -9,6 +9,6 @@ fn u64 heap_alloc(u64 size) {
   }
   fprintf(stderr,
           "Out of heap memory in thread bank %u (need %llu words)\n",
-          tid, size);
+          tid, (unsigned long long)size);
   exit(1);
 }

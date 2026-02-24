@@ -52,16 +52,16 @@ fn void runtime_eval_main(u32 main_id, const RuntimeEvalCfg *cfg) {
     double ips = total_itrs / dt;
     u64 total_heap = heap_alloc_total();
 
-    printf("- Itrs: %llu interactions\n", total_itrs);
+    printf("- Itrs: %llu interactions\n", (unsigned long long)total_itrs);
     if (thread_get_count() > 1) {
       for (u32 t = 0; t < thread_get_count(); t++) {
-        printf("- Itrs[%u]: %llu interactions\n", t, wnf_itrs_thread(t));
+        printf("- Itrs[%u]: %llu interactions\n", t, (unsigned long long)wnf_itrs_thread(t));
       }
     }
-    printf("- Heap: %llu nodes\n", total_heap);
+    printf("- Heap: %llu nodes\n", (unsigned long long)total_heap);
     printf("- Time: %.3f seconds\n", dt);
     printf("- Perf: %.2f M interactions/s\n", ips / 1e6);
   } else if (run.silent) {
-    printf("- Itrs: %llu interactions\n", total_itrs);
+    printf("- Itrs: %llu interactions\n", (unsigned long long)total_itrs);
   }
 }
