@@ -70,7 +70,17 @@ __attribute__((cold, noinline)) static Term wnf_rebuild(Term cur, Term *stack, u
 fn Term wnf_pri(Term pri);
 fn int aot_try_call(u32 id, Term *stack, u32 *s_pos, u32 base, Term *out);
 
-__attribute__((hot)) fn Term wnf(Term term) {
+#ifndef __has_attribute
+  #define __has_attribute(x) 0
+#endif
+
+#if __has_attribute(hot)
+  #define WNF_HOT __attribute__((hot))
+#else
+  #define WNF_HOT
+#endif
+
+WNF_HOT fn Term wnf(Term term) {
   wnf_stack_init();
   Term *stack = WNF_STACK;
   u32  s_pos  = WNF_S_POS;
