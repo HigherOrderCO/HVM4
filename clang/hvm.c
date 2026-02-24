@@ -175,11 +175,12 @@ typedef struct {
 
 #if defined(HVM_WINDOWS)
   #define HEAP_CAP (1ULL << 30)
+  #define WNF_CAP  (1ULL << 25)
 #else
   #define HEAP_CAP (1ULL << 38)
+  #define WNF_CAP  (1ULL << 32)
 #endif
 #define BOOK_CAP (1ULL << 24)
-#define WNF_CAP  (1ULL << 32)
 #define MAX_THREADS 64
 
 // Thread Globals

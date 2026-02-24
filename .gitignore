@@ -10,5 +10,11 @@ test/ffi/*.dylib
 test/ffi/*/*.dylib
 test/ffi/*.so
 test/ffi/*/*.so
+test/ffi/*.dll
+test/ffi/*/*.dll
+test/ffi/*.lib
+test/ffi/*/*.lib
+test/ffi/*.exp
+test/ffi/*/*.exp
 .hvm/
 .cache/

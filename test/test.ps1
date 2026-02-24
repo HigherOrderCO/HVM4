@@ -162,29 +162,45 @@ function Invoke-WithTimeout {
         [array]$Arguments,
         [int]$TimeoutSecs
     )
-    
-    $job = Start-Job -ScriptBlock {
-        param($cmd, $args)
-        & $cmd @args 2>&1 | Out-String
-        $LASTEXITCODE
-    } -ArgumentList $Command, $Arguments
-    
-    $completed = $job | Wait-Job -Timeout $TimeoutSecs
-    
-    if (-not $completed) {
-        Stop-Job -Job $job -ErrorAction SilentlyContinue
-        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
-        return @{ Output = ""; ExitCode = 124 }
+
+    $stdoutFile = [System.IO.Path]::GetTempFileName()
+    $stderrFile = [System.IO.Path]::GetTempFileName()
+
+    try {
+        $proc = Start-Process -FilePath $Command -ArgumentList $Arguments -NoNewWindow -PassThru `
+            -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+
+        if (-not $proc.WaitForExit($TimeoutSecs * 1000)) {
+            try { $proc.Kill() } catch {}
+            try { $proc.WaitForExit() } catch {}
+            return @{ Output = ""; ExitCode = 124 }
+        }
+
+        $stdout = ""
+        $stderr = ""
+        if (Test-Path $stdoutFile) {
+            $stdout = [string](Get-Content -Path $stdoutFile -Raw -Encoding UTF8)
+        }
+        if (Test-Path $stderrFile) {
+            $stderr = [string](Get-Content -Path $stderrFile -Raw -Encoding UTF8)
+        }
+        $stdout = ([string]$stdout) -replace "(\r?\n)+$", ""
+        $stderr = ([string]$stderr) -replace "(\r?\n)+$", ""
+
+        $combined = ""
+        if (-not [string]::IsNullOrEmpty($stderr) -and -not [string]::IsNullOrEmpty($stdout)) {
+            $combined = "$stderr`n$stdout"
+        } elseif (-not [string]::IsNullOrEmpty($stderr)) {
+            $combined = $stderr
+        } else {
+            $combined = $stdout
+        }
+
+        $combined = [string]$combined
+        return @{ Output = $combined.Trim(); ExitCode = [int]$proc.ExitCode }
+    } finally {
+        Remove-Item -Path $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
     }
-    
-    $result = Receive-Job -Job $job
-    Remove-Job -Job $job
-    
-    # Last element is exit code, rest is output
-    $exitCode = $result[-1]
-    $output = $result[0..($result.Length - 2)] -join "`n"
-    
-    return @{ Output = $output.Trim(); ExitCode = [int]$exitCode }
 }
 
 # Strips ANSI escape codes
@@ -204,6 +220,8 @@ function Build-FfiLibrary {
     $ffiClang = Get-FfiClangConfig
     $ffiExt = $ffiClang.Ext
     $ffiLdFlags = $ffiClang.LdFlags
+    $ffiExportDefineClang = "-Dhvm_ffi_init=__declspec(dllexport)hvm_ffi_init"
+    $ffiExportDefineMsvc = "/Dhvm_ffi_init=__declspec(dllexport)hvm_ffi_init"
     
     if (Test-Path $ffiDir -PathType Container) {
         # Multiple C files in subdirectory
@@ -218,10 +236,10 @@ function Build-FfiLibrary {
             Register-Cleanup $out
             
             if ($compiler.Name -eq "clang") {
-                & $compiler.Cmd @($ffiLdFlags) "-I", $RootDir, "-o", $out, $src.FullName 2>&1 | Write-Host
+                & $compiler.Cmd @ffiLdFlags $ffiExportDefineClang "-I" $RootDir "-o" $out $src.FullName 2>&1 | Write-Host
             } else {
                 # MSVC
-                & $compiler.Cmd "/LD", "/Fe:$out", "/I", $RootDir, $src.FullName 2>&1 | Write-Host
+                & $compiler.Cmd "/LD" $ffiExportDefineMsvc "/Fe:$out" "/I" $RootDir $src.FullName 2>&1 | Write-Host
             }
             
             if ($LASTEXITCODE -ne 0) {
@@ -242,10 +260,10 @@ function Build-FfiLibrary {
         }
         
         if ($compiler.Name -eq "clang") {
-            & $compiler.Cmd @($ffiLdFlags) "-I", $RootDir, "-o", $out, $src 2>&1 | Write-Host
+            & $compiler.Cmd @ffiLdFlags $ffiExportDefineClang "-I" $RootDir "-o" $out $src 2>&1 | Write-Host
         } else {
             # MSVC
-            & $compiler.Cmd "/LD", "/Fe:$out", "/I", $RootDir, $src 2>&1 | Write-Host
+            & $compiler.Cmd "/LD" $ffiExportDefineMsvc "/Fe:$out" "/I" $RootDir $src 2>&1 | Write-Host
         }
         
         if ($LASTEXITCODE -ne 0) {
@@ -283,12 +301,11 @@ function Run-Tests {
             $lines = $content -split "`r?`n"
             
             foreach ($line in $lines) {
-                if ($line -match "^//! (.+)") {
-                    $flagLine = $matches[1]
-                    $extraFlags += $flagLine -split "\s+"
-                } elseif ($line -match "^//!-(.+)") {
-                    $flagLine = $matches[1]
-                    $extraFlags += $flagLine -split "\s+"
+                if ($line -match "^//!(.*)$") {
+                    $flagLine = $matches[1].Trim()
+                    if (-not [string]::IsNullOrEmpty($flagLine)) {
+                        $extraFlags += $flagLine -split "\s+"
+                    }
                 } elseif (-not [string]::IsNullOrWhiteSpace($line)) {
                     break
                 }
@@ -303,6 +320,12 @@ function Run-Tests {
             
             for ($i = $lines.Count - 1; $i -ge 0; $i--) {
                 $line = $lines[$i]
+                if ([string]::IsNullOrWhiteSpace($line)) {
+                    if ($nlinesExpected -eq 0 -and [string]::IsNullOrEmpty($expectPrefix) -and [string]::IsNullOrEmpty($expectContains)) {
+                        continue
+                    }
+                    break
+                }
                 if ($line -match "^//EXPECT_PREFIX:(.+)") {
                     $expectPrefix = $matches[1].Trim()
                     continue
@@ -314,7 +337,7 @@ function Run-Tests {
                 if ($line -match "^//!") {
                     $nocollapse = $true
                     $content = $line -replace "^//!", ""
-                } elseif ($line -match "^//(.+)") {
+                } elseif ($line -match "^//(.*)$") {
                     $content = $matches[1]
                 } else {
                     break
@@ -378,8 +401,8 @@ function Run-Tests {
             }
             
             # Strip ANSI escape codes for comparison
-            $actualClean = Strip-Ansi $actual
-            $expectedClean = Strip-Ansi $expected
+            $actualClean = (Strip-Ansi $actual) -replace "`r`n?", "`n"
+            $expectedClean = (Strip-Ansi $expected) -replace "`r`n?", "`n"
             
             # Compare output
             $pass = $false

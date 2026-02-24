@@ -187,39 +187,56 @@ fn void eval_collapse(Term term, int limit, int show_itrs, int silent) {
   u64 root_loc = heap_alloc(1);
   heap_set(root_loc, term);
 
-  EvalCollapseCtx C;
-  atomic_store_explicit(&C.printed.v, 0, memory_order_relaxed);
-  atomic_store_explicit(&C.pending.v, n, memory_order_relaxed);
-  C.limit = max_lines;
+  EvalCollapseCtx *C = malloc(sizeof(EvalCollapseCtx));
+  if (C == NULL) {
+    fprintf(stderr, "eval_collapse: context allocation failed\n");
+    exit(1);
+  }
+  atomic_store_explicit(&C->printed.v, 0, memory_order_relaxed);
+  atomic_store_explicit(&C->pending.v, n, memory_order_relaxed);
+  atomic_store_explicit(&C->stop.v, 0, memory_order_relaxed);
+  C->limit = max_lines;
 
   u64 batch = max_lines / (100 * (u64)n);
   if (batch < 1) batch = 1;
   if (batch > 64) batch = 64;
-  C.print_batch = batch;
+  C->print_batch = batch;
 
-  C.silent = silent;
-  C.show_itrs = show_itrs;
-  if (!wspq_init(&C.ws, n)) {
+  C->silent = silent;
+  C->show_itrs = show_itrs;
+  if (!wspq_init(&C->ws, n)) {
+    free(C);
     fprintf(stderr, "eval_collapse: queue allocation failed\n");
     exit(1);
   }
-  if (!cnf_pool_init(&C.cnf, n)) {
+  if (!cnf_pool_init(&C->cnf, n)) {
+    wspq_free(&C->ws);
+    free(C);
     fprintf(stderr, "eval_collapse: cnf queue allocation failed\n");
     exit(1);
   }
-  cnf_pool_set(&C.cnf);
+  cnf_pool_set(&C->cnf);
 
-  wspq_push(&C.ws, 0u, 0u, (u64)root_loc);
+  wspq_push(&C->ws, 0u, 0u, (u64)root_loc);
 
 #if HVM_WINDOWS
   HANDLE threads[MAX_THREADS];
   EvalCollapseArg args[MAX_THREADS];
   if (n > 1) {
     for (u32 i = 1; i < n; ++i) {
-      args[i].ctx = &C;
+      args[i].ctx = C;
       args[i].tid = i;
       threads[i] = CreateThread(NULL, EVAL_COLLAPSE_STACK_SIZE, eval_collapse_worker_win, &args[i], 0, NULL);
       if (threads[i] == NULL) {
+        atomic_store_explicit(&C->stop.v, 1, memory_order_release);
+        for (u32 j = 1; j < i; ++j) {
+          WaitForSingleObject(threads[j], INFINITE);
+          CloseHandle(threads[j]);
+        }
+        wspq_free(&C->ws);
+        cnf_pool_clear();
+        cnf_pool_free(&C->cnf);
+        free(C);
         fprintf(stderr, "eval_collapse: CreateThread failed\n");
         exit(1);
       }
@@ -227,7 +244,7 @@ fn void eval_collapse(Term term, int limit, int show_itrs, int silent) {
   }
 
   EvalCollapseArg arg0;
-  arg0.ctx = &C;
+  arg0.ctx = C;
   arg0.tid = 0;
   eval_collapse_worker_run(&arg0);
 
@@ -245,7 +262,7 @@ fn void eval_collapse(Term term, int limit, int show_itrs, int silent) {
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, (size_t)EVAL_COLLAPSE_STACK_SIZE);
     for (u32 i = 1; i < n; ++i) {
-      args[i].ctx = &C;
+      args[i].ctx = C;
       args[i].tid = i;
       pthread_create(&tids[i], &attr, eval_collapse_worker, &args[i]);
     }
@@ -253,7 +270,7 @@ fn void eval_collapse(Term term, int limit, int show_itrs, int silent) {
   }
 
   EvalCollapseArg arg0;
-  arg0.ctx = &C;
+  arg0.ctx = C;
   arg0.tid = 0;
   eval_collapse_worker_run(&arg0);
 
@@ -264,7 +281,8 @@ fn void eval_collapse(Term term, int limit, int show_itrs, int silent) {
   }
 #endif
 
-  wspq_free(&C.ws);
+  wspq_free(&C->ws);
   cnf_pool_clear();
-  cnf_pool_free(&C.cnf);
+  cnf_pool_free(&C->cnf);
+  free(C);
 }
