@@ -49,6 +49,16 @@ if ($env:HVM_TEST_TIMEOUT_SECS) {
     $TestTimeoutCompiledSecs = [int]$env:HVM_TEST_TIMEOUT_SECS
 }
 
+function Get-FfiClangConfig {
+    if ($IsMacOS) {
+        return @{ Ext = ".dylib"; LdFlags = @("-dynamiclib", "-fPIC") }
+    }
+    if ($IsWindows) {
+        return @{ Ext = ".dll"; LdFlags = @("-shared") }
+    }
+    return @{ Ext = ".so"; LdFlags = @("-shared", "-fPIC") }
+}
+
 # Build
 # -----
 
@@ -191,6 +201,9 @@ function Build-FfiLibrary {
     $testDir = Split-Path -Parent $TestFile
     $ffiDir = Join-Path $testDir $base
     $compiler = Find-Compiler
+    $ffiClang = Get-FfiClangConfig
+    $ffiExt = $ffiClang.Ext
+    $ffiLdFlags = $ffiClang.LdFlags
     
     if (Test-Path $ffiDir -PathType Container) {
         # Multiple C files in subdirectory
@@ -201,11 +214,11 @@ function Build-FfiLibrary {
         
         $dlls = @()
         foreach ($src in $cFiles) {
-            $out = Join-Path $testDir "$($src.BaseName).dll"
+            $out = Join-Path $src.DirectoryName "$($src.BaseName)$ffiExt"
             Register-Cleanup $out
             
             if ($compiler.Name -eq "clang") {
-                & $compiler.Cmd "-shared", "-fPIC", "-I", $RootDir, "-o", $out, $src.FullName 2>&1 | Write-Host
+                & $compiler.Cmd @($ffiLdFlags) "-I", $RootDir, "-o", $out, $src.FullName 2>&1 | Write-Host
             } else {
                 # MSVC
                 & $compiler.Cmd "/LD", "/Fe:$out", "/I", $RootDir, $src.FullName 2>&1 | Write-Host
@@ -221,7 +234,7 @@ function Build-FfiLibrary {
     } else {
         # Single C file
         $src = Join-Path $testDir "$base.c"
-        $out = Join-Path $testDir "$base.dll"
+        $out = Join-Path $testDir "$base$ffiExt"
         Register-Cleanup $out
         
         if (-not (Test-Path $src)) {
@@ -229,7 +242,7 @@ function Build-FfiLibrary {
         }
         
         if ($compiler.Name -eq "clang") {
-            & $compiler.Cmd "-shared", "-fPIC", "-I", $RootDir, "-o", $out, $src 2>&1 | Write-Host
+            & $compiler.Cmd @($ffiLdFlags) "-I", $RootDir, "-o", $out, $src 2>&1 | Write-Host
         } else {
             # MSVC
             & $compiler.Cmd "/LD", "/Fe:$out", "/I", $RootDir, $src 2>&1 | Write-Host
