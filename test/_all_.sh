@@ -72,6 +72,15 @@ if ! mkdir -p "$HVM_TMP_DIR"; then
   exit 1
 fi
 
+ffi_ext=".so"
+ffi_ldflags=(-shared -fPIC)
+case "$(uname -s)" in
+  Darwin*)
+    ffi_ext=".dylib"
+    ffi_ldflags=(-dynamiclib -fPIC)
+    ;;
+esac
+
 # Timeout
 # -------
 
@@ -239,8 +248,8 @@ run_tests() {
           continue
         fi
         for src in "${c_files[@]}"; do
-          out="${src%.c}.dylib"
-          if ! clang -dynamiclib -fPIC -I "$ROOT_DIR" -o "$out" "$src"; then
+          out="${src%.c}${ffi_ext}"
+          if ! clang "${ffi_ldflags[@]}" -I "$ROOT_DIR" -o "$out" "$src"; then
             echo "[FAIL] $name (failed to build $src)" >&2
             status=1
             continue 2
@@ -249,13 +258,13 @@ run_tests() {
         done
       else
         src="${base}.c"
-        out="${base}.dylib"
+        out="${base}${ffi_ext}"
         if [ ! -f "$src" ]; then
           echo "[FAIL] $name (missing $src)" >&2
           status=1
           continue
         fi
-        if ! clang -dynamiclib -fPIC -I "$ROOT_DIR" -o "$out" "$src"; then
+        if ! clang "${ffi_ldflags[@]}" -I "$ROOT_DIR" -o "$out" "$src"; then
           echo "[FAIL] $name (failed to build $src)" >&2
           status=1
           continue

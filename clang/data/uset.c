@@ -4,6 +4,12 @@
 // - Used by parallel normalization to track visited heap locations.
 // - One bit per heap location.
 
+#include <sys/mman.h>
+
+#ifndef MAP_ANONYMOUS
+  #define MAP_ANONYMOUS MAP_ANON
+#endif
+
 typedef struct {
   _Atomic u64 *words;
   u64 word_count;
@@ -11,18 +17,30 @@ typedef struct {
 
 // Initialize bitset storage.
 fn void uset_init(Uset *set) {
-  set->words = (_Atomic u64 *)calloc((HEAP_CAP >> 6), sizeof(u64));
-  if (!set->words) {
+  set->word_count = HEAP_CAP >> 6;
+  set->words = NULL;
+  if (set->word_count == 0 || set->word_count > ((u64)SIZE_MAX / sizeof(u64))) {
     fprintf(stderr, "uset: allocation failed\n");
     exit(1);
   }
-  set->word_count = HEAP_CAP >> 6;
+  size_t bytes = (size_t)(set->word_count * sizeof(u64));
+  int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_NORESERVE
+  mmap_flags |= MAP_NORESERVE;
+#endif
+  void *map = mmap(NULL, bytes, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
+  if (map == MAP_FAILED) {
+    fprintf(stderr, "uset: allocation failed\n");
+    exit(1);
+  }
+  set->words = (_Atomic u64 *)map;
 }
 
 // Release storage and reset state.
 fn void uset_free(Uset *set) {
   if (set->words) {
-    free((void *)set->words);
+    size_t bytes = (size_t)(set->word_count * sizeof(u64));
+    munmap((void *)set->words, bytes);
   }
   *set = (Uset){0};
 }
