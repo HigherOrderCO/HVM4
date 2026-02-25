@@ -283,6 +283,47 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         return;
       }
 
+      case USE: {
+        u64 use_loc = term_val(term);
+        char frm[32];
+        char app[32];
+        char arg[32];
+        char tag_n[32];
+        aot_emit_tmp(frm, sizeof(frm), "frm", tmp);
+        aot_emit_tmp(app, sizeof(app), "app", tmp);
+        aot_emit_tmp(arg, sizeof(arg), "arg", tmp);
+        aot_emit_tmp(tag_n, sizeof(tag_n), "tag", tmp);
+
+        fprintf(f, "%sif (*s_pos <= base) {\n", pad);
+        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        fprintf(f, "%s}\n", pad);
+        fprintf(f, "%sTerm %s = stack[*s_pos - 1];\n", pad, frm);
+        fprintf(f, "%sif (term_tag(%s) != APP) {\n", pad, frm);
+        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        fprintf(f, "%s}\n", pad);
+        fprintf(f, "%su64 %s = term_val(%s);\n", pad, app, frm);
+        fprintf(f, "%sTerm %s = heap_read(%s + 1);\n", pad, arg, app);
+        fprintf(f, "%su8 %s = term_tag(%s);\n", pad, tag_n, arg);
+        fprintf(f, "%sif (%s != NAM && %s != BJV && %s != BJ0 && %s != BJ1 && %s != DRY && %s != ERA && %s != SUP && %s != LAM && %s != NUM && %s != MAT && %s != SWI && %s != USE && %s != INC && %s != ANY && (%s < C00 || %s > C16)) {\n", pad, tag_n, tag_n, tag_n, tag_n, tag_n, tag_n, tag_n, tag_n, tag_n, tag_n, tag_n, tag_n, tag_n, tag_n, tag_n, tag_n);
+        fprintf(f, "%s%s = aot_force_whnf(%s, stack, s_pos);\n", pad1, arg, arg);
+        fprintf(f, "%sheap_set(%s + 1, %s);\n", pad1, app, arg);
+        fprintf(f, "%s%s = term_tag(%s);\n", pad1, tag_n, arg);
+        fprintf(f, "%s}\n", pad);
+
+        fprintf(f, "%sif (%s == ERA) {\n", pad, tag_n);
+        fprintf(f, "%s(*s_pos)--;\n", pad1);
+        aot_emit_itrs_inc(f, pad1);
+        fprintf(f, "%sreturn term_new_era();\n", pad1);
+        fprintf(f, "%s}\n", pad);
+        fprintf(f, "%sif (%s == SUP || %s == INC) {\n", pad, tag_n, tag_n);
+        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        fprintf(f, "%s}\n", pad);
+
+        aot_emit_itrs_inc(f, pad);
+        aot_emit_node(f, use_loc + 0, dep, out, 1, pad, tmp);
+        return;
+      }
+
       case SWI: {
         u64 mat_loc = term_val(term);
         char frm[32];
@@ -352,9 +393,10 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_itrs_inc(f, pad1);
         fprintf(f, "%su32 %s = (u32)(%s - C00);\n", pad1, ari, tag_n);
         fprintf(f, "%su64 %s = term_val(%s);\n", pad1, ctr, arg);
+        fprintf(f, "%su64 block = (%s == 0) ? 0 : heap_alloc((u64)%s * 2);\n", pad1, ari, ari);
         fprintf(f, "%sfor (u32 j = %s; j > 0; j--) {\n", pad1, ari);
         fprintf(f, "%s  Term %s = heap_read(%s + (u64)(j - 1));\n", pad1, fld, ctr);
-        fprintf(f, "%s  u64 %s = heap_alloc(2);\n", pad1, cell);
+        fprintf(f, "%s  u64 %s = block + (u64)(j - 1) * 2;\n", pad1, cell);
         fprintf(f, "%s  heap_set(%s + 0, term_new_era());\n", pad1, cell);
         fprintf(f, "%s  heap_set(%s + 1, %s);\n", pad1, cell, fld);
         fprintf(f, "%s  stack[*s_pos] = term_new(0, APP, 0, %s);\n", pad1, cell);
@@ -440,6 +482,50 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         return;
       }
       fprintf(f, "%sTerm %s = x%u;\n", pad, out, (u32)(lvl - 1));
+      return;
+    }
+    case OP2: {
+      u64 op2_loc = term_val(term);
+      char lhs_n[32];
+      char rhs_n[32];
+      aot_emit_tmp(lhs_n, sizeof(lhs_n), "lhs", tmp);
+      aot_emit_tmp(rhs_n, sizeof(rhs_n), "rhs", tmp);
+      aot_emit_node(f, op2_loc + 0, dep, lhs_n, 0, pad, tmp);
+      aot_emit_node(f, op2_loc + 1, dep, rhs_n, 0, pad, tmp);
+      fprintf(f, "%sTerm %s = term_new_op2(%u, %s, %s);\n", pad, out, term_ext(term), lhs_n, rhs_n);
+      return;
+    }
+    case EQL: {
+      u64 eql_loc = term_val(term);
+      char lhs_n[32];
+      char rhs_n[32];
+      aot_emit_tmp(lhs_n, sizeof(lhs_n), "eqla", tmp);
+      aot_emit_tmp(rhs_n, sizeof(rhs_n), "eqlb", tmp);
+      aot_emit_node(f, eql_loc + 0, dep, lhs_n, 0, pad, tmp);
+      aot_emit_node(f, eql_loc + 1, dep, rhs_n, 0, pad, tmp);
+      fprintf(f, "%sTerm %s = term_new_eql(%s, %s);\n", pad, out, lhs_n, rhs_n);
+      return;
+    }
+    case AND: {
+      u64 and_loc = term_val(term);
+      char lhs_n[32];
+      char rhs_n[32];
+      aot_emit_tmp(lhs_n, sizeof(lhs_n), "anda", tmp);
+      aot_emit_tmp(rhs_n, sizeof(rhs_n), "andb", tmp);
+      aot_emit_node(f, and_loc + 0, dep, lhs_n, 0, pad, tmp);
+      aot_emit_node(f, and_loc + 1, dep, rhs_n, 0, pad, tmp);
+      fprintf(f, "%sTerm %s = term_new_and(%s, %s);\n", pad, out, lhs_n, rhs_n);
+      return;
+    }
+    case OR: {
+      u64 or_loc = term_val(term);
+      char lhs_n[32];
+      char rhs_n[32];
+      aot_emit_tmp(lhs_n, sizeof(lhs_n), "ora", tmp);
+      aot_emit_tmp(rhs_n, sizeof(rhs_n), "orb", tmp);
+      aot_emit_node(f, or_loc + 0, dep, lhs_n, 0, pad, tmp);
+      aot_emit_node(f, or_loc + 1, dep, rhs_n, 0, pad, tmp);
+      fprintf(f, "%sTerm %s = term_new_or(%s, %s);\n", pad, out, lhs_n, rhs_n);
       return;
     }
     default: {
