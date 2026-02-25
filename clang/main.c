@@ -15,6 +15,13 @@
 //   --as-c: Emit + compile + run standalone AOT executable once
 //   -o, --output: Emit + compile standalone AOT executable to a file path
 
+#if defined(_WIN32) || defined(_WIN64)
+  // The default Windows stack reserve is too small for some deep benchmarks.
+  #if defined(_MSC_VER)
+    #pragma comment(linker, "/STACK:8388608")
+  #endif
+#endif
+
 #include "hvm.c"
 
 // CLI

@@ -70,10 +70,16 @@ __attribute__((cold, noinline)) static Term wnf_rebuild(Term cur, Term *stack, u
 fn Term wnf_pri(Term pri);
 fn int aot_try_call(u32 id, Term *stack, u32 *s_pos, u32 base, Term *out);
 
+#if WNF_CAP >= 0x100000000ULL
+  #define WNF_STACK_CAP_TERMS 0xFFFFFFFFu
+#else
+  #define WNF_STACK_CAP_TERMS ((u32)WNF_CAP)
+#endif
+
 fn void wnf_stack_push(Term *stack, u32 *s_pos, Term frame) {
-  if (__builtin_expect(*s_pos >= WNF_CAP, 0)) {
+  if (__builtin_expect(*s_pos >= WNF_STACK_CAP_TERMS, 0)) {
     fprintf(stderr, "RUNTIME_ERROR: wnf stack overflow (cap=%llu terms)\n",
-            (unsigned long long)WNF_CAP);
+            (unsigned long long)WNF_STACK_CAP_TERMS);
     exit(1);
   }
   stack[(*s_pos)++] = frame;
