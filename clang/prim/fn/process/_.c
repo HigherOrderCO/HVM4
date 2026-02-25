@@ -32,11 +32,11 @@ fn Term wnf(Term term);
 
 fn Term process_new_err(const char *prim, u32 code, const char *msg) {
   Term txt = term_string_printf("ERROR(%s): E%u %s", prim, code, msg);
-  return term_new_ctr(NAM_ERR, 1, &txt);
+  return term_new_ctr(SYM_ERR, 1, &txt);
 }
 
 fn Term process_new_ok(Term val) {
-  return term_new_ctr(NAM_OK, 1, &val);
+  return term_new_ctr(SYM_OK, 1, &val);
 }
 
 fn Term process_new_proc(u32 id, u32 seq) {

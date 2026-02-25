@@ -55,17 +55,17 @@ fn Term env_go_name(Term *args) {
       return term_new_sup(lab, t0, t1);
     }
     case C00 ... C16: {
-      if (term_tag(list_wnf) == C00 && term_ext(list_wnf) == NAM_NIL) {
+      if (term_tag(list_wnf) == C00 && term_ext(list_wnf) == SYM_NIL) {
         // %env_go_name(acc, #Nil)
         // ----------------------- env-go-name-nil
         // %env_go_io(acc(#Nil))
-        Term nil = term_new_ctr(NAM_NIL, 0, 0);
+        Term nil = term_new_ctr(SYM_NIL, 0, 0);
         Term name = term_new_app(acc, nil);
         Term io_args[1] = {name};
         Term io = term_new_pri(table_find("env_go_io", 9), 1, io_args);
         return wnf(io);
       }
-      if (term_tag(list_wnf) == C02 && term_ext(list_wnf) == NAM_CON) {
+      if (term_tag(list_wnf) == C02 && term_ext(list_wnf) == SYM_CON) {
         // %env_go_name(acc, #Con{h,t})
         // ---------------------------- env-go-name-con
         // %env_go_chr(acc, h, t)
@@ -114,7 +114,7 @@ fn Term env_go_chr(Term *args) {
       u32  inc_loc     = term_val(head_wnf);
       Term inner       = heap_read(inc_loc);
       Term con_args[2] = {inner, tail};
-      Term con         = term_new_ctr(NAM_CON, 2, con_args);
+      Term con         = term_new_ctr(SYM_CON, 2, con_args);
       Term app         = term_new_app(acc, con);
       Term next        = term_new_pri(table_find("env", 3), 1, &app);
       heap_set(inc_loc, next);
@@ -132,8 +132,8 @@ fn Term env_go_chr(Term *args) {
       Copy T            = term_clone(lab, tail);
       Term con0_args[2] = {x, T.k0};
       Term con1_args[2] = {y, T.k1};
-      Term con0         = term_new_ctr(NAM_CON, 2, con0_args);
-      Term con1         = term_new_ctr(NAM_CON, 2, con1_args);
+      Term con0         = term_new_ctr(SYM_CON, 2, con0_args);
+      Term con1         = term_new_ctr(SYM_CON, 2, con1_args);
       Term app0         = term_new_app(A.k0, con0);
       Term app1         = term_new_app(A.k1, con1);
       Term t0           = term_new_pri(table_find("env", 3), 1, &app0);
@@ -141,7 +141,7 @@ fn Term env_go_chr(Term *args) {
       return term_new_sup(lab, t0, t1);
     }
     case C00 ... C16: {
-      if (term_tag(head_wnf) == C01 && term_ext(head_wnf) == NAM_CHR) {
+      if (term_tag(head_wnf) == C01 && term_ext(head_wnf) == SYM_CHR) {
         // %env_go_chr(acc, #Chr{c}, t)
         // ---------------------------- env-go-chr-chr
         // %env_go_num(acc, c, t)
@@ -160,7 +160,7 @@ fn Term env_go_chr(Term *args) {
       // ----------------------- env-go-chr-default
       // %env_go_io(acc(#Con{h, t}))
       Term con_args[2] = {head_wnf, tail};
-      Term con = term_new_ctr(NAM_CON, 2, con_args);
+      Term con = term_new_ctr(SYM_CON, 2, con_args);
       Term name = term_new_app(acc, con);
       Term io_args[1] = {name};
       Term io = term_new_pri(table_find("env_go_io", 9), 1, io_args);
@@ -190,9 +190,9 @@ fn Term env_go_num(Term *args) {
       // ↑(%env(acc(#Con{#Chr{x}, t})))
       u32  inc_loc     = term_val(code_wnf);
       Term inner       = heap_read(inc_loc);
-      Term chr         = term_new_ctr(NAM_CHR, 1, &inner);
+      Term chr         = term_new_ctr(SYM_CHR, 1, &inner);
       Term con_args[2] = {chr, tail};
-      Term con         = term_new_ctr(NAM_CON, 2, con_args);
+      Term con         = term_new_ctr(SYM_CON, 2, con_args);
       Term app         = term_new_app(acc, con);
       Term next        = term_new_pri(table_find("env", 3), 1, &app);
       heap_set(inc_loc, next);
@@ -208,12 +208,12 @@ fn Term env_go_num(Term *args) {
       Term y            = heap_read(sup_loc + 1);
       Copy A            = term_clone(lab, acc);
       Copy T            = term_clone(lab, tail);
-      Term chr0         = term_new_ctr(NAM_CHR, 1, &x);
-      Term chr1         = term_new_ctr(NAM_CHR, 1, &y);
+      Term chr0         = term_new_ctr(SYM_CHR, 1, &x);
+      Term chr1         = term_new_ctr(SYM_CHR, 1, &y);
       Term con0_args[2] = {chr0, T.k0};
       Term con1_args[2] = {chr1, T.k1};
-      Term con0         = term_new_ctr(NAM_CON, 2, con0_args);
-      Term con1         = term_new_ctr(NAM_CON, 2, con1_args);
+      Term con0         = term_new_ctr(SYM_CON, 2, con0_args);
+      Term con1         = term_new_ctr(SYM_CON, 2, con1_args);
       Term app0         = term_new_app(A.k0, con0);
       Term app1         = term_new_app(A.k1, con1);
       Term t0           = term_new_pri(table_find("env", 3), 1, &app0);
@@ -226,9 +226,9 @@ fn Term env_go_num(Term *args) {
       // %env_go_name(λx.acc(#Con{#Chr{n}, x}), t)
       u64  loc         = heap_alloc(1);
       Term var         = term_new_var(loc);
-      Term chr         = term_new_ctr(NAM_CHR, 1, &code_wnf);
+      Term chr         = term_new_ctr(SYM_CHR, 1, &code_wnf);
       Term con_args[2] = {chr, var};
-      Term con         = term_new_ctr(NAM_CON, 2, con_args);
+      Term con         = term_new_ctr(SYM_CON, 2, con_args);
       Term bod         = term_new_app(acc, con);
       Term acc_next    = term_new_lam_at(loc, bod);
       Term args0[2]    = {acc_next, tail};
@@ -239,9 +239,9 @@ fn Term env_go_num(Term *args) {
       // %env_go_num(acc, c, t)
       // ----------------------- env-go-num-default
       // %env_go_io(acc(#Con{#Chr{c}, t}))
-      Term chr = term_new_ctr(NAM_CHR, 1, &code_wnf);
+      Term chr = term_new_ctr(SYM_CHR, 1, &code_wnf);
       Term con_args[2] = {chr, tail};
-      Term con = term_new_ctr(NAM_CON, 2, con_args);
+      Term con = term_new_ctr(SYM_CON, 2, con_args);
       Term name = term_new_app(acc, con);
       Term io_args[1] = {name};
       Term io = term_new_pri(table_find("env_go_io", 9), 1, io_args);
@@ -266,11 +266,11 @@ fn Term prim_fn_env_go_io(Term *args) {
 
   const char *value = getenv(name);
   if (value == NULL) {
-    return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf(NOT_FOUND_FMT, name) });
+    return term_new_ctr(SYM_ERR, 1, (Term[]){ term_string_printf(NOT_FOUND_FMT, name) });
   }
 
   Term out = term_string_from_utf8(value);
-  return term_new_ctr(NAM_OK, 1, &out);
+  return term_new_ctr(SYM_OK, 1, &out);
 }
 
 fn void prim_env_init(void) {

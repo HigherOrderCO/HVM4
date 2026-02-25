@@ -89,7 +89,7 @@ fn Term prim_fn_stream_close_go_io(Term *args) {
   }
 
   stream_set_closed(id);
-  Term nil = term_new_ctr(NAM_NIL, 0, NULL);
+  Term nil = term_new_ctr(SYM_NIL, 0, NULL);
   return stream_new_ok(nil);
 }
 

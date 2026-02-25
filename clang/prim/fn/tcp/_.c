@@ -91,11 +91,11 @@ fn Term wnf(Term term);
 
 fn Term tcp_new_err(const char *prim, u32 code, const char *msg) {
   Term txt = term_string_printf("ERROR(%s): E%u %s", prim, code, msg);
-  return term_new_ctr(NAM_ERR, 1, &txt);
+  return term_new_ctr(SYM_ERR, 1, &txt);
 }
 
 fn Term tcp_new_ok(Term val) {
-  return term_new_ctr(NAM_OK, 1, &val);
+  return term_new_ctr(SYM_OK, 1, &val);
 }
 
 fn Term tcp_new_tcp(u32 id, u32 seq) {
@@ -535,12 +535,12 @@ fn u8 tcp_decode_bytes(
   u32  len = 0;
   u32  cap = 0;
 
-  while (term_tag(cur) == C02 && term_ext(cur) == NAM_CON) {
+  while (term_tag(cur) == C02 && term_ext(cur) == SYM_CON) {
     u32  loc  = term_val(cur);
     Term head = wnf(heap_read(loc + 0));
     Term tail = heap_read(loc + 1);
 
-    if (term_tag(head) != C01 || term_ext(head) != NAM_BYT) {
+    if (term_tag(head) != C01 || term_ext(head) != SYM_BYT) {
       free(buf);
       *err_out = tcp_new_err("tcp_send", TCP_ERR_BAD_ARG, "invalid `bytes`; expected List<#BYT{n}>");
       return 0;
@@ -593,7 +593,7 @@ fn u8 tcp_decode_bytes(
     cur      = wnf(tail);
   }
 
-  if (term_tag(cur) != C00 || term_ext(cur) != NAM_NIL) {
+  if (term_tag(cur) != C00 || term_ext(cur) != SYM_NIL) {
     free(buf);
     *err_out = tcp_new_err("tcp_send", TCP_ERR_BAD_ARG, "invalid `bytes`; expected List<#BYT{n}>");
     return 0;
@@ -605,20 +605,20 @@ fn u8 tcp_decode_bytes(
 }
 
 fn Term tcp_bytes_to_list(const u8 *buf, u32 len) {
-  Term nil = term_new_ctr(NAM_NIL, 0, NULL);
+  Term nil = term_new_ctr(SYM_NIL, 0, NULL);
   if (len == 0) {
     return nil;
   }
 
   Term byt[1] = {term_new_num(buf[0])};
-  Term head_tail[2] = {term_new_ctr(NAM_BYT, 1, byt), nil};
-  Term out = term_new_ctr(NAM_CON, 2, head_tail);
+  Term head_tail[2] = {term_new_ctr(SYM_BYT, 1, byt), nil};
+  Term out = term_new_ctr(SYM_CON, 2, head_tail);
   Term cur = out;
 
   for (u32 i = 1; i < len; ++i) {
     byt[0]       = term_new_num(buf[i]);
-    head_tail[0] = term_new_ctr(NAM_BYT, 1, byt);
-    heap_set(term_val(cur) + 1, term_new_ctr(NAM_CON, 2, head_tail));
+    head_tail[0] = term_new_ctr(SYM_BYT, 1, byt);
+    heap_set(term_val(cur) + 1, term_new_ctr(SYM_CON, 2, head_tail));
     cur = heap_read(term_val(cur) + 1);
   }
 

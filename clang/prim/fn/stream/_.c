@@ -33,11 +33,11 @@ fn Term wnf(Term term);
 
 fn Term stream_new_err(const char *prim, u32 code, const char *msg) {
   Term txt = term_string_printf("ERROR(%s): E%u %s", prim, code, msg);
-  return term_new_ctr(NAM_ERR, 1, &txt);
+  return term_new_ctr(SYM_ERR, 1, &txt);
 }
 
 fn Term stream_new_ok(Term val) {
-  return term_new_ctr(NAM_OK, 1, &val);
+  return term_new_ctr(SYM_OK, 1, &val);
 }
 
 fn Term stream_new_handle(u32 id, u32 seq) {
@@ -52,7 +52,7 @@ fn Term stream_new_pend(u32 id, u32 seq) {
 
 fn Term stream_new_byt(u32 byt) {
   Term arg = term_new_num(byt);
-  return term_new_ctr(NAM_BYT, 1, &arg);
+  return term_new_ctr(SYM_BYT, 1, &arg);
 }
 
 fn Term stream_new_eof(void) {

@@ -4,7 +4,7 @@
 fn Term prim_fn_argv(Term *args) {
   (void)args[0];
 
-  Term nil      = term_new_ctr(NAM_NIL, 0, 0);
+  Term nil      = term_new_ctr(SYM_NIL, 0, 0);
   Term out      = nil;
   Term cur      = nil;
   u8   has_node = 0;
@@ -14,7 +14,7 @@ fn Term prim_fn_argv(Term *args) {
 
     Term str     = term_string_from_utf8(arg);
     Term h_t[2]  = {str, nil};
-    Term node    = term_new_ctr(NAM_CON, 2, h_t);
+    Term node    = term_new_ctr(SYM_CON, 2, h_t);
 
     if (!has_node) {
       out      = node;

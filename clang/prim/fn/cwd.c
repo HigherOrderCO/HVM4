@@ -12,11 +12,11 @@ fn Term prim_fn_cwd(Term *args) {
 
   if (getcwd(cwd, MAX_CWD) == NULL) {
     int err = errno;
-    return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf(GETCWD_ERR_FMT, strerror(err), err) });
+    return term_new_ctr(SYM_ERR, 1, (Term[]){ term_string_printf(GETCWD_ERR_FMT, strerror(err), err) });
   }
 
   Term out = term_string_from_utf8(cwd);
-  return term_new_ctr(NAM_OK, 1, &out);
+  return term_new_ctr(SYM_OK, 1, &out);
 }
 
 fn void prim_cwd_init(void) {

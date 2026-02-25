@@ -63,11 +63,11 @@ fn Term write_bytes_go_path(Term *args) {
       return term_new_sup(lab, t0, t1);
     }
     case C00 ... C16: {
-      if (term_tag(list_wnf) == C00 && term_ext(list_wnf) == NAM_NIL) {
+      if (term_tag(list_wnf) == C00 && term_ext(list_wnf) == SYM_NIL) {
         // %write_bytes_go_path(acc, #Nil, data)
         // -------------------------------------- write-bytes-go-path-nil
         // %write_bytes_go_data(acc(#Nil), λx.x, data)
-        Term nil = term_new_ctr(NAM_NIL, 0, 0);
+        Term nil = term_new_ctr(SYM_NIL, 0, 0);
         Term path = term_new_app(acc, nil);
         u64  loc      = heap_alloc(1);
         Term var      = term_new_var(loc);
@@ -76,7 +76,7 @@ fn Term write_bytes_go_path(Term *args) {
         Term t        = term_new_pri(table_find("write_bytes_go_data", 19), 3, args0);
         return wnf(t);
       }
-      if (term_tag(list_wnf) == C02 && term_ext(list_wnf) == NAM_CON) {
+      if (term_tag(list_wnf) == C02 && term_ext(list_wnf) == SYM_CON) {
         // %write_bytes_go_path(acc, #Con{h,t}, data)
         // ------------------------------------------- write-bytes-go-path-con
         // %write_bytes_go_chr(acc, h, t, data)
@@ -129,7 +129,7 @@ fn Term write_bytes_go_chr(Term *args) {
       u32  inc_loc     = term_val(head_wnf);
       Term inner       = heap_read(inc_loc);
       Term con_args[2] = {inner, tail};
-      Term con         = term_new_ctr(NAM_CON, 2, con_args);
+      Term con         = term_new_ctr(SYM_CON, 2, con_args);
       Term app         = term_new_app(acc, con);
       Term next_args[2] = {app, data};
       Term next        = term_new_pri(table_find("write_bytes", 11), 2, next_args);
@@ -149,8 +149,8 @@ fn Term write_bytes_go_chr(Term *args) {
       Copy D            = term_clone(lab, data);
       Term con0_args[2] = {x, T.k0};
       Term con1_args[2] = {y, T.k1};
-      Term con0         = term_new_ctr(NAM_CON, 2, con0_args);
-      Term con1         = term_new_ctr(NAM_CON, 2, con1_args);
+      Term con0         = term_new_ctr(SYM_CON, 2, con0_args);
+      Term con1         = term_new_ctr(SYM_CON, 2, con1_args);
       Term app0         = term_new_app(A.k0, con0);
       Term app1         = term_new_app(A.k1, con1);
       Term args0[2]     = {app0, D.k0};
@@ -160,7 +160,7 @@ fn Term write_bytes_go_chr(Term *args) {
       return term_new_sup(lab, t0, t1);
     }
     case C00 ... C16: {
-      if (term_tag(head_wnf) == C01 && term_ext(head_wnf) == NAM_CHR) {
+      if (term_tag(head_wnf) == C01 && term_ext(head_wnf) == SYM_CHR) {
         // %write_bytes_go_chr(acc, #Chr{c}, t, data)
         // ------------------------------------------- write-bytes-go-chr-chr
         // %write_bytes_go_num(acc, c, t, data)
@@ -179,7 +179,7 @@ fn Term write_bytes_go_chr(Term *args) {
       // ------------------------------------- write-bytes-go-chr-default
       // %write_bytes_go_data(acc(#Con{h, t}), λx.x, data)
       Term con_args[2] = {head_wnf, tail};
-      Term con = term_new_ctr(NAM_CON, 2, con_args);
+      Term con = term_new_ctr(SYM_CON, 2, con_args);
       Term path = term_new_app(acc, con);
       u64  loc      = heap_alloc(1);
       Term var      = term_new_var(loc);
@@ -213,9 +213,9 @@ fn Term write_bytes_go_num(Term *args) {
       // ↑(%write_bytes(acc(#Con{#Chr{x}, t}), data))
       u32  inc_loc     = term_val(code_wnf);
       Term inner       = heap_read(inc_loc);
-      Term chr         = term_new_ctr(NAM_CHR, 1, &inner);
+      Term chr         = term_new_ctr(SYM_CHR, 1, &inner);
       Term con_args[2] = {chr, tail};
-      Term con         = term_new_ctr(NAM_CON, 2, con_args);
+      Term con         = term_new_ctr(SYM_CON, 2, con_args);
       Term app         = term_new_app(acc, con);
       Term next_args[2] = {app, data};
       Term next        = term_new_pri(table_find("write_bytes", 11), 2, next_args);
@@ -233,12 +233,12 @@ fn Term write_bytes_go_num(Term *args) {
       Copy A            = term_clone(lab, acc);
       Copy T            = term_clone(lab, tail);
       Copy D            = term_clone(lab, data);
-      Term chr0         = term_new_ctr(NAM_CHR, 1, &x);
-      Term chr1         = term_new_ctr(NAM_CHR, 1, &y);
+      Term chr0         = term_new_ctr(SYM_CHR, 1, &x);
+      Term chr1         = term_new_ctr(SYM_CHR, 1, &y);
       Term con0_args[2] = {chr0, T.k0};
       Term con1_args[2] = {chr1, T.k1};
-      Term con0         = term_new_ctr(NAM_CON, 2, con0_args);
-      Term con1         = term_new_ctr(NAM_CON, 2, con1_args);
+      Term con0         = term_new_ctr(SYM_CON, 2, con0_args);
+      Term con1         = term_new_ctr(SYM_CON, 2, con1_args);
       Term app0         = term_new_app(A.k0, con0);
       Term app1         = term_new_app(A.k1, con1);
       Term args0[2]     = {app0, D.k0};
@@ -253,9 +253,9 @@ fn Term write_bytes_go_num(Term *args) {
       // %write_bytes_go_path(λx.acc(#Con{#Chr{n}, x}), t, data)
       u64  loc         = heap_alloc(1);
       Term var         = term_new_var(loc);
-      Term chr         = term_new_ctr(NAM_CHR, 1, &code_wnf);
+      Term chr         = term_new_ctr(SYM_CHR, 1, &code_wnf);
       Term con_args[2] = {chr, var};
-      Term con         = term_new_ctr(NAM_CON, 2, con_args);
+      Term con         = term_new_ctr(SYM_CON, 2, con_args);
       Term bod         = term_new_app(acc, con);
       Term acc_next    = term_new_lam_at(loc, bod);
       Term args0[3]    = {acc_next, tail, data};
@@ -266,9 +266,9 @@ fn Term write_bytes_go_num(Term *args) {
       // %write_bytes_go_num(acc, c, t, data)
       // ------------------------------------- write-bytes-go-num-default
       // %write_bytes_go_data(acc(#Con{#Chr{c}, t}), λx.x, data)
-      Term chr = term_new_ctr(NAM_CHR, 1, &code_wnf);
+      Term chr = term_new_ctr(SYM_CHR, 1, &code_wnf);
       Term con_args[2] = {chr, tail};
-      Term con = term_new_ctr(NAM_CON, 2, con_args);
+      Term con = term_new_ctr(SYM_CON, 2, con_args);
       Term path = term_new_app(acc, con);
       u64  loc      = heap_alloc(1);
       Term var      = term_new_var(loc);
@@ -326,17 +326,17 @@ fn Term write_bytes_go_data(Term *args) {
       return term_new_sup(lab, t0, t1);
     }
     case C00 ... C16: {
-      if (term_tag(list_wnf) == C00 && term_ext(list_wnf) == NAM_NIL) {
+      if (term_tag(list_wnf) == C00 && term_ext(list_wnf) == SYM_NIL) {
         // %write_bytes_go_data(path, acc, #Nil)
         // ------------------------------------- write-bytes-go-data-nil
         // %write_bytes_go_io(path, acc(#Nil))
-        Term nil = term_new_ctr(NAM_NIL, 0, 0);
+        Term nil = term_new_ctr(SYM_NIL, 0, 0);
         Term data = term_new_app(acc, nil);
         Term io_args[2] = {path, data};
         Term io = term_new_pri(table_find("write_bytes_go_io", 17), 2, io_args);
         return wnf(io);
       }
-      if (term_tag(list_wnf) == C02 && term_ext(list_wnf) == NAM_CON) {
+      if (term_tag(list_wnf) == C02 && term_ext(list_wnf) == SYM_CON) {
         // %write_bytes_go_data(path, acc, #Con{h,t})
         // ------------------------------------------ write-bytes-go-data-con
         // %write_bytes_go_data_byt(path, acc, h, t)
@@ -386,7 +386,7 @@ fn Term write_bytes_go_data_byt(Term *args) {
       u32  inc_loc     = term_val(head_wnf);
       Term inner       = heap_read(inc_loc);
       Term con_args[2] = {inner, tail};
-      Term con         = term_new_ctr(NAM_CON, 2, con_args);
+      Term con         = term_new_ctr(SYM_CON, 2, con_args);
       Term data        = term_new_app(acc, con);
       Term next_args[2] = {path, data};
       Term next        = term_new_pri(table_find("write_bytes", 11), 2, next_args);
@@ -406,8 +406,8 @@ fn Term write_bytes_go_data_byt(Term *args) {
       Copy T            = term_clone(lab, tail);
       Term con0_args[2] = {x, T.k0};
       Term con1_args[2] = {y, T.k1};
-      Term con0         = term_new_ctr(NAM_CON, 2, con0_args);
-      Term con1         = term_new_ctr(NAM_CON, 2, con1_args);
+      Term con0         = term_new_ctr(SYM_CON, 2, con0_args);
+      Term con1         = term_new_ctr(SYM_CON, 2, con1_args);
       Term data0        = term_new_app(A.k0, con0);
       Term data1        = term_new_app(A.k1, con1);
       Term args0[2]     = {P.k0, data0};
@@ -417,7 +417,7 @@ fn Term write_bytes_go_data_byt(Term *args) {
       return term_new_sup(lab, t0, t1);
     }
     case C00 ... C16: {
-      if (term_tag(head_wnf) == C01 && term_ext(head_wnf) == NAM_BYT) {
+      if (term_tag(head_wnf) == C01 && term_ext(head_wnf) == SYM_BYT) {
         // %write_bytes_go_data_byt(path, acc, #BYT{c}, t)
         // ------------------------------------------------ write-bytes-go-data-byt-byt
         // %write_bytes_go_data_num(path, acc, c, t)
@@ -436,7 +436,7 @@ fn Term write_bytes_go_data_byt(Term *args) {
       // ------------------------------------------ write-bytes-go-data-byt-default
       // %write_bytes_go_io(path, acc(#Con{h, t}))
       Term con_args[2] = {head_wnf, tail};
-      Term con = term_new_ctr(NAM_CON, 2, con_args);
+      Term con = term_new_ctr(SYM_CON, 2, con_args);
       Term data = term_new_app(acc, con);
       Term io_args[2] = {path, data};
       Term io = term_new_pri(table_find("write_bytes_go_io", 17), 2, io_args);
@@ -467,9 +467,9 @@ fn Term write_bytes_go_data_num(Term *args) {
       // ↑(%write_bytes(path, acc(#Con{#BYT{x}, t})))
       u32  inc_loc     = term_val(code_wnf);
       Term inner       = heap_read(inc_loc);
-      Term byt         = term_new_ctr(NAM_BYT, 1, &inner);
+      Term byt         = term_new_ctr(SYM_BYT, 1, &inner);
       Term con_args[2] = {byt, tail};
-      Term con         = term_new_ctr(NAM_CON, 2, con_args);
+      Term con         = term_new_ctr(SYM_CON, 2, con_args);
       Term data        = term_new_app(acc, con);
       Term next_args[2] = {path, data};
       Term next        = term_new_pri(table_find("write_bytes", 11), 2, next_args);
@@ -487,12 +487,12 @@ fn Term write_bytes_go_data_num(Term *args) {
       Copy P            = term_clone(lab, path);
       Copy A            = term_clone(lab, acc);
       Copy T            = term_clone(lab, tail);
-      Term byt0         = term_new_ctr(NAM_BYT, 1, &x);
-      Term byt1         = term_new_ctr(NAM_BYT, 1, &y);
+      Term byt0         = term_new_ctr(SYM_BYT, 1, &x);
+      Term byt1         = term_new_ctr(SYM_BYT, 1, &y);
       Term con0_args[2] = {byt0, T.k0};
       Term con1_args[2] = {byt1, T.k1};
-      Term con0         = term_new_ctr(NAM_CON, 2, con0_args);
-      Term con1         = term_new_ctr(NAM_CON, 2, con1_args);
+      Term con0         = term_new_ctr(SYM_CON, 2, con0_args);
+      Term con1         = term_new_ctr(SYM_CON, 2, con1_args);
       Term data0        = term_new_app(A.k0, con0);
       Term data1        = term_new_app(A.k1, con1);
       Term args0[2]     = {P.k0, data0};
@@ -507,9 +507,9 @@ fn Term write_bytes_go_data_num(Term *args) {
       // %write_bytes_go_data(path, λx.acc(#Con{#BYT{n}, x}), t)
       u64  loc         = heap_alloc(1);
       Term var         = term_new_var(loc);
-      Term byt         = term_new_ctr(NAM_BYT, 1, &code_wnf);
+      Term byt         = term_new_ctr(SYM_BYT, 1, &code_wnf);
       Term con_args[2] = {byt, var};
-      Term con         = term_new_ctr(NAM_CON, 2, con_args);
+      Term con         = term_new_ctr(SYM_CON, 2, con_args);
       Term bod         = term_new_app(acc, con);
       Term acc_next    = term_new_lam_at(loc, bod);
       Term args0[3]    = {path, acc_next, tail};
@@ -520,9 +520,9 @@ fn Term write_bytes_go_data_num(Term *args) {
       // %write_bytes_go_data_num(path, acc, c, t)
       // ------------------------------------------ write-bytes-go-data-num-default
       // %write_bytes_go_io(path, acc(#Con{#BYT{c}, t}))
-      Term byt = term_new_ctr(NAM_BYT, 1, &code_wnf);
+      Term byt = term_new_ctr(SYM_BYT, 1, &code_wnf);
       Term con_args[2] = {byt, tail};
-      Term con = term_new_ctr(NAM_CON, 2, con_args);
+      Term con = term_new_ctr(SYM_CON, 2, con_args);
       Term data = term_new_app(acc, con);
       Term io_args[2] = {path, data};
       Term io = term_new_pri(table_find("write_bytes_go_io", 17), 2, io_args);
@@ -555,16 +555,16 @@ fn Term prim_fn_write_bytes_go_io(Term *args) {
   FILE *file = fopen(path, "wb");
   if (!file) {
     int err = errno;
-    return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf(OPEN_PATH_ERR_FMT, path, strerror(err), err) });
+    return term_new_ctr(SYM_ERR, 1, (Term[]){ term_string_printf(OPEN_PATH_ERR_FMT, path, strerror(err), err) });
   }
 
   // Write hvm4 bytes list List<#BYT{NUM}> into file.
   data_item = wnf(data_item);
   while (term_tag(data_item) == C02) {
     // wnf(data_item) must be List<#BYT{b}>
-    if (term_ext(data_item) != NAM_CON) {
+    if (term_ext(data_item) != SYM_CON) {
       fclose(file);
-      return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf("%s", DATA_EXPECTED) });
+      return term_new_ctr(SYM_ERR, 1, (Term[]){ term_string_printf("%s", DATA_EXPECTED) });
     }
 
     Term head_loc = term_val(data_item);
@@ -573,9 +573,9 @@ fn Term prim_fn_write_bytes_go_io(Term *args) {
     head = wnf(head);
 
     // wnf(head) must be #BYT{b}
-    if (term_tag(head) != C01 || term_ext(head) != NAM_BYT) {
+    if (term_tag(head) != C01 || term_ext(head) != SYM_BYT) {
       fclose(file);
-      return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf("%s", DATA_EXPECTED) });
+      return term_new_ctr(SYM_ERR, 1, (Term[]){ term_string_printf("%s", DATA_EXPECTED) });
     }
 
     Term b_loc = term_val(head);
@@ -584,14 +584,14 @@ fn Term prim_fn_write_bytes_go_io(Term *args) {
     // b in #BYT{b} must be NUM
     if (term_tag(b_trm) != NUM) {
       fclose(file);
-      return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf("%s", DATA_EXPECTED) });
+      return term_new_ctr(SYM_ERR, 1, (Term[]){ term_string_printf("%s", DATA_EXPECTED) });
     }
 
     // NUM must fit one byte.
     u32 b = term_val(b_trm);
     if (b > 0xFF) {
       fclose(file);
-      return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf(DATA_INVALID_BYTE_FMT, (unsigned long long)b, data_i) });
+      return term_new_ctr(SYM_ERR, 1, (Term[]){ term_string_printf(DATA_INVALID_BYTE_FMT, (unsigned long long)b, data_i) });
     }
 
     unsigned char out = (unsigned char)b;
@@ -599,32 +599,32 @@ fn Term prim_fn_write_bytes_go_io(Term *args) {
       // Capture errno before fclose because fclose may overwrite it.
       int err = errno;
       fclose(file);
-      return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf(WRITE_IO_ERR_FMT, path, strerror(err), err) });
+      return term_new_ctr(SYM_ERR, 1, (Term[]){ term_string_printf(WRITE_IO_ERR_FMT, path, strerror(err), err) });
     }
 
     data_i += 1;
     data_item = wnf(tail);
   }
 
-  if (term_tag(data_item) != C00 || term_ext(data_item) != NAM_NIL) {
+  if (term_tag(data_item) != C00 || term_ext(data_item) != SYM_NIL) {
     fclose(file);
-    return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf("%s", DATA_EXPECTED) });
+    return term_new_ctr(SYM_ERR, 1, (Term[]){ term_string_printf("%s", DATA_EXPECTED) });
   }
 
   if (fflush(file) != 0) {
     // Capture errno before fclose because fclose may overwrite it.
     int err = errno;
     fclose(file);
-    return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf(FLUSH_ERR_FMT, path, strerror(err), err) });
+    return term_new_ctr(SYM_ERR, 1, (Term[]){ term_string_printf(FLUSH_ERR_FMT, path, strerror(err), err) });
   }
 
   if (fclose(file) != 0) {
     int err = errno;
-    return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf(CLOSE_ERR_FMT, path, strerror(err), err) });
+    return term_new_ctr(SYM_ERR, 1, (Term[]){ term_string_printf(CLOSE_ERR_FMT, path, strerror(err), err) });
   }
 
-  Term Nil = term_new_ctr(NAM_NIL, 0, 0);
-  return term_new_ctr(NAM_OK, 1, &Nil);
+  Term Nil = term_new_ctr(SYM_NIL, 0, 0);
+  return term_new_ctr(SYM_OK, 1, &Nil);
 }
 
 fn void prim_write_bytes_init(void) {

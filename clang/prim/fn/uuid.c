@@ -72,7 +72,7 @@ fn Term prim_fn_uuid(Term *args) {
   u8 bytes[16];
   int err = 0;
   if (!uuid_fill_random(bytes, &err)) {
-    return term_new_ctr(NAM_ERR, 1, (Term[]){ term_string_printf(RNG_ERR_FMT, strerror(err), err) });
+    return term_new_ctr(SYM_ERR, 1, (Term[]){ term_string_printf(RNG_ERR_FMT, strerror(err), err) });
   }
 
   // RFC4122 variant + version 4 layout bits.
@@ -82,7 +82,7 @@ fn Term prim_fn_uuid(Term *args) {
   char str[37];
   uuid_v4_format(bytes, str);
   Term out = term_string_from_utf8(str);
-  return term_new_ctr(NAM_OK, 1, &out);
+  return term_new_ctr(SYM_OK, 1, &out);
 }
 
 fn void prim_uuid_init(void) {

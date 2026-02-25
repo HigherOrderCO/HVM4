@@ -98,7 +98,7 @@ fn Term prim_fn_tcp_connect_go_io(Term *args) {
     Term evt = tcp_fail_from_gai_evt("tcp_connect", gai_err);
     u32  loc = term_val(evt);
     Term msg = heap_read(loc + 1);
-    return term_new_ctr(NAM_ERR, 1, &msg);
+    return term_new_ctr(SYM_ERR, 1, &msg);
   }
 
   int fd      = -1;

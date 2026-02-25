@@ -1,0 +1,4 @@
+//! -- hello
+@main = %log(λ{[]: "no argv"; <>: λx,t. x}(%argv([])))
+//!hello
+//![]

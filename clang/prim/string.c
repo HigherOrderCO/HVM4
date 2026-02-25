@@ -226,13 +226,13 @@ fn int term_chr_from_scalar(u32 cp, Term *out) {
   }
 
   Term num = term_new_num(cp);
-  *out = term_new_ctr(NAM_CHR, 1, &num);
+  *out = term_new_ctr(SYM_CHR, 1, &num);
   return 1;
 }
 
 // NOTE: Assumes `s` is a NUL-terminated UTF-8 C string.
 fn Term term_string_from_utf8(const char *s) {
-  Term nil      = term_new_ctr(NAM_NIL, 0, 0);
+  Term nil      = term_new_ctr(SYM_NIL, 0, 0);
   Term out      = nil;
   Term cur      = nil;
   u32  idx      = 0;
@@ -258,7 +258,7 @@ fn Term term_string_from_utf8(const char *s) {
     }
 
     Term args[2] = {chr, nil};
-    Term node    = term_new_ctr(NAM_CON, 2, args);
+    Term node    = term_new_ctr(SYM_CON, 2, args);
 
     if (!has_node) {
       out      = node;
@@ -340,7 +340,7 @@ fn int term_string_to_utf8_cstr(Term src, char *dst, int cap, int *out_len, HStr
 
   while (term_tag(cur) == C02 && len < cap) {
     // wnf(cur) must be List<#CHR{c}>
-    if (term_ext(cur) != NAM_CON) {
+    if (term_ext(cur) != SYM_CON) {
       hstr_set(err, HSTR_BAD_SHAPE, i, len, 0);
       return 0;
     }
@@ -350,7 +350,7 @@ fn int term_string_to_utf8_cstr(Term src, char *dst, int cap, int *out_len, HStr
     Term tail = heap_read(loc + 1);
 
     // wnf(head) must be #CHR{c}
-    if (term_tag(head) != C01 || term_ext(head) != NAM_CHR) {
+    if (term_tag(head) != C01 || term_ext(head) != SYM_CHR) {
       hstr_set(err, HSTR_BAD_SHAPE, i, len, 0);
       return 0;
     }
@@ -384,7 +384,7 @@ fn int term_string_to_utf8_cstr(Term src, char *dst, int cap, int *out_len, HStr
     hstr_set(err, HSTR_TOO_LONG, i, len, 0);
     return 0;
   }
-  if (term_tag(cur) != C00 || term_ext(cur) != NAM_NIL) {
+  if (term_tag(cur) != C00 || term_ext(cur) != SYM_NIL) {
     hstr_set(err, HSTR_BAD_SHAPE, i, len, 0);
     return 0;
   }
@@ -433,5 +433,5 @@ fn Term term_string_from_hstrerr(const char *prim, const char *arg, int cap, HSt
       msg = term_string_printf("%sinvalid `%s`", prefix, arg);
       break;
   }
-  return term_new_ctr(NAM_ERR, 1, &msg);
+  return term_new_ctr(SYM_ERR, 1, &msg);
 }

@@ -109,11 +109,11 @@ fn Term wnf(Term term);
 
 fn Term http_new_err(const char *prim, u32 code, const char *msg) {
   Term txt = term_string_printf("ERROR(%s): E%u %s", prim, code, msg);
-  return term_new_ctr(NAM_ERR, 1, &txt);
+  return term_new_ctr(SYM_ERR, 1, &txt);
 }
 
 fn Term http_new_ok(Term val) {
-  return term_new_ctr(NAM_OK, 1, &val);
+  return term_new_ctr(SYM_OK, 1, &val);
 }
 
 fn Term http_new_http(u32 id, u32 seq) {
@@ -627,7 +627,7 @@ fn u8 http_parse_header_item(Term term, HttpReq *req, Term *err_out) {
 fn u8 http_parse_headers(Term term, HttpReq *req, Term *err_out) {
   Term cur = wnf(term);
 
-  while (term_tag(cur) == C02 && term_ext(cur) == NAM_CON) {
+  while (term_tag(cur) == C02 && term_ext(cur) == SYM_CON) {
     u32  loc  = term_val(cur);
     Term head = heap_read(loc + 0);
     Term tail = heap_read(loc + 1);
@@ -639,7 +639,7 @@ fn u8 http_parse_headers(Term term, HttpReq *req, Term *err_out) {
     cur = wnf(tail);
   }
 
-  if (term_tag(cur) != C00 || term_ext(cur) != NAM_NIL) {
+  if (term_tag(cur) != C00 || term_ext(cur) != SYM_NIL) {
     *err_out = http_new_err("http_request", HTTP_ERR_BAD_ARG, "invalid `headers`; expected List<#Hdr{name,value}>");
     return 0;
   }
@@ -650,12 +650,12 @@ fn u8 http_parse_headers(Term term, HttpReq *req, Term *err_out) {
 fn u8 http_parse_body_bytes_list(Term term, HttpReq *req, Term *err_out) {
   Term cur = wnf(term);
 
-  while (term_tag(cur) == C02 && term_ext(cur) == NAM_CON) {
+  while (term_tag(cur) == C02 && term_ext(cur) == SYM_CON) {
     u32  loc  = term_val(cur);
     Term head = wnf(heap_read(loc + 0));
     Term tail = heap_read(loc + 1);
 
-    if (term_tag(head) != C01 || term_ext(head) != NAM_BYT) {
+    if (term_tag(head) != C01 || term_ext(head) != SYM_BYT) {
       *err_out = http_new_err("http_request", HTTP_ERR_BAD_ARG, "invalid `body`; expected List<#BYT{n}>");
       return 0;
     }
@@ -680,7 +680,7 @@ fn u8 http_parse_body_bytes_list(Term term, HttpReq *req, Term *err_out) {
     cur = wnf(tail);
   }
 
-  if (term_tag(cur) != C00 || term_ext(cur) != NAM_NIL) {
+  if (term_tag(cur) != C00 || term_ext(cur) != SYM_NIL) {
     *err_out = http_new_err("http_request", HTTP_ERR_BAD_ARG, "invalid `body`; expected List<#BYT{n}>");
     return 0;
   }
@@ -1216,14 +1216,14 @@ fn int http_read_header_pairs(const char *hdr_path, HttpHdrPair **pairs_out, u32
 }
 
 fn Term http_pairs_to_term(HttpHdrPair *pairs, u32 len) {
-  Term out = term_new_ctr(NAM_NIL, 0, NULL);
+  Term out = term_new_ctr(SYM_NIL, 0, NULL);
 
   for (u32 i = len; i > 0; --i) {
     Term name = term_string_from_utf8(pairs[i - 1].name);
     Term val  = term_string_from_utf8(pairs[i - 1].value);
     Term hdr  = http_new_hdr(name, val);
     Term args[2] = {hdr, out};
-    out = term_new_ctr(NAM_CON, 2, args);
+    out = term_new_ctr(SYM_CON, 2, args);
   }
 
   return out;
@@ -1236,7 +1236,7 @@ fn int http_read_body_bytes(const char *body_path, u32 cap, Term *body_out, int 
     return -1;
   }
 
-  Term nil = term_new_ctr(NAM_NIL, 0, NULL);
+  Term nil = term_new_ctr(SYM_NIL, 0, NULL);
   u8   byte = 0;
   int  first = fgetc(f);
   if (first == EOF) {
@@ -1255,8 +1255,8 @@ fn int http_read_body_bytes(const char *body_path, u32 cap, Term *body_out, int 
   u32  count = 1;
 
   Term byt_num[1] = {term_new_num(byte)};
-  Term node[2]    = {term_new_ctr(NAM_BYT, 1, byt_num), nil};
-  Term out        = term_new_ctr(NAM_CON, 2, node);
+  Term node[2]    = {term_new_ctr(SYM_BYT, 1, byt_num), nil};
+  Term out        = term_new_ctr(SYM_CON, 2, node);
   Term curr       = out;
 
   while (1) {
@@ -1272,8 +1272,8 @@ fn int http_read_body_bytes(const char *body_path, u32 cap, Term *body_out, int 
     }
 
     byt_num[0] = term_new_num((u8)got);
-    node[0]    = term_new_ctr(NAM_BYT, 1, byt_num);
-    heap_set(term_val(curr) + 1, term_new_ctr(NAM_CON, 2, node));
+    node[0]    = term_new_ctr(SYM_BYT, 1, byt_num);
+    heap_set(term_val(curr) + 1, term_new_ctr(SYM_CON, 2, node));
     curr = heap_read(term_val(curr) + 1);
   }
 

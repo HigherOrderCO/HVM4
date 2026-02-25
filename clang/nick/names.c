@@ -11,17 +11,6 @@ static u32 SYM_BYT = 0;
 static u32 SYM_OK  = 0;
 static u32 SYM_ERR = 0;
 
-// Backward-compatible aliases used across the runtime.
-#define NAM_ZER SYM_ZER
-#define NAM_SUC SYM_SUC
-#define NAM_NIL SYM_NIL
-#define NAM_CON SYM_CON
-#define NAM_CHR SYM_CHR
-#define NAM_U8  SYM_U8
-#define NAM_BYT SYM_BYT
-#define NAM_OK  SYM_OK
-#define NAM_ERR SYM_ERR
-
 fn void symbols_init(void) {
   SYM_ZER = table_find("ZER", 3);
   SYM_SUC = table_find("SUC", 3);
