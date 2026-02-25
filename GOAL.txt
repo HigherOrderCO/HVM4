@@ -1,0 +1,445 @@
+GOAL: Improve, optimize and extend HVM's AOT compiler. 
+======================================================
+
+HVM has an AOT compiler at clang/aot, which converts user-defined functions into
+faster, native C procedures. The way it works is by "emulating" the interpreter
+against the top-level function we're compiling, with the stack remaining
+dynamic. In other words, the AOT compiler, in theory, is a *partial application*
+of the interpreter to a statically known top-level definition. For example,
+consider the function:
+
+mul2 = λ{0:0;1+:λp.mul2(p-1)}
+main = mul2(123)
+
+On interpreted mode, 'mul2(123)' *expands* mul2 lazily via ALO (allocation) nodes,
+allowing the program above to unfold as:
+
+<λ{0:0;1+:λp.mul2(p-1)}>(123)
+<λp.mul2(p-1)>(123)
+λp.<mul2(p-1)>(123)
+<mul2(p-1)|p←123>
+<mul2(p-1)|p←123>
+<mul2|p←123>(<p-1|p←123>)
+mul2(123-1)
+
+Where <p> is an ALO node pointing to a static, immutable top-level definition
+Term AST. Note that, due to ALO laziness, we never had to allocate the left
+side of the λ-match, making it memory-efficient. Yet, it is still wasteful in
+the sense that, given that we *know* the shape of mul2 statically, we could
+have just compiled it to a native C function that doesn't allocate anything
+at all - not even the λp. or the mul2(...) on the correct branch:
+
+Term mul2() {
+  // perform an inline APP-SWI-U32 interaction
+  Term x = ... pop app arg from the stack ...
+  switch (term_tag(x)) {
+    case U32: {
+      switch (term_val(x)) {
+        case 0: {
+          ...
+        }
+        default: {
+          // perform an inline APP-LAM interaction
+          Term p = ... pop app arg from the stack ...
+          ...
+        }
+      }
+    }
+  }
+}
+
+There is a catch, though: supporting all interactions in this "hot path" would
+explode the compiled code size as each function would basically have a built-in
+copy of HVM's interaction-net evaluator. As such, we only cover a subset of all
+interactions, including beta-reduction, λ-matches, fast dups (of arity-0 vals),
+and so on - basically anything that would be fast in C. When an unsupported
+interaction like APP-MAT-SUP would be needed, we just fallback and alloc an ALO
+node with the reconstructed intermediate expression.
+
+Now, while this idea is theoretically sound, the implementation, which was mostly
+Ai driven, is still lackluster. The AI lacks interaction net knowledge and HVM4
+foundations, so, it struggles with making progress without introducing incorrect
+assumptions and breaking the code in ways that can't be repaired. Working on this
+requires a very solid understanding of HVM's core foundations, and the AI lacks
+that, currently. Below is a table with all benchmarks, comparing the interpreted
+mode with the compiled mode:
+
++--------------+-------------+-------------+
+| benchmark    |    hvmi     |    hvmc     |
++--------------+-------------+-------------+
+| bignat_mul   |   1.565892s |   1.652525s |
+| cnot_04      |   0.024805s |   0.082247s |
+| cnot_16      |   0.028848s |   0.094131s |
+| cnot_24      |   1.249406s |   1.457540s |
+| collatz      |     TIMEOUT |     TIMEOUT |
+| edit_dist    |   1.582906s |   1.745439s |
+| gab_boyer    |   1.488060s |   1.489207s |
+| gab_deriv    |   1.510860s |   1.780837s |
+| gab_tak      |   0.029224s |   0.085373s |
+| gab_takl     |   1.755080s |   1.931637s |
+| gen_easy     |   0.237862s |   0.289988s |
+| gen_hard     |     TIMEOUT |     TIMEOUT |
+| gen_mul4k    |   1.355235s |   1.444730s |
+| graph_color  |     TIMEOUT |     TIMEOUT |
+| huffman      |   1.762610s |   1.869296s |
+| lambda_eval  |   1.676202s |   1.856088s |
+| mat_mul      |   1.585469s |   1.780599s |
+| nqueens      |   1.485036s |   1.712027s |
+| prime_sieve  |   1.355702s |   1.398508s |
+| queue_bank   |   0.745647s |   0.773584s |
+| ray_sphere   |   1.598270s |   1.753360s |
+| seq_pingpong |   1.471877s |   1.490475s |
+| sort_merge   |   1.516936s |   0.864962s |
+| sort_quick   |   1.643071s |   1.796579s |
+| spin_tree    |     TIMEOUT |     TIMEOUT |
+| tree_fold    |   0.810934s |   0.906734s |
+| trie_bitwise |   1.785426s |   1.850693s |
+| u32_fib      |    TIMEOUT* |   1.279875s |
++--------------+-------------+-------------+
+* manual run: u32_fib takes 5.5s on interpreted mode
+
+As you can see, other than u32_fib, most benchmarks show no difference. That is
+mostly attributable to the compiler being very initial and not covering many
+interactions, as well as it falling back to the cold interpreted path too early.
+For example, in the term below:
+
+foo = λx. !X&L=x; λ{...stuff...}
+
+The current compiler bails out from optimized mode as soon as it hits the outer
+DUP expression; a practical limitation, no theoretical reason. Similarly, many
+interactions like numeric ops aren't properly implemented. Also, in HVM, there
+is no LET Term variant, so, (λname.(...))(123) and (λ{λname....})(123) are used
+as lazy and strict LET's respectively, yet, that is not accounted for by the
+compiler, which will, on this case, too, just fall back to the cold mode. And so
+on - in general, the fast paths are not really used in most existing benchmarks,
+and we just fall back to the cold mode too early. Yet, extending the compiler
+with all missing optimizations to allow ALL the functions above to fully run on
+compiled mode with no or almost no interpreter fallback - which is absolutely
+possible in theory - is a hard engineering problem.
+
+Below, we present the post-mortem of an AI that attempted to improve mat-mul:
+
+# HVM4 AOT Optimization Post-Mortem:
+# Fast-Paths, DUP Semantics, and Unlocking ~5x Speedups
+
+## 1. The Goal
+
+The primary objective of this experimental engineering phase was to
+drastically maximize the Ahead-Of-Time (AOT) compiled-mode performance
+in HVM4 (Higher-Order Virtual Machine 4) compared to its interpreted
+mode. Specifically, the target was to optimize intensive compute
+workloads, exemplified by the `mat_mul` (matrix multiplication)
+benchmark.
+
+In tracing the execution of the AOT compiled output, we observed that
+the generated C code was frequently falling back to the interpreter.
+The goal was to deep-dive into the compiler's emission logic, diagnose
+exactly why these fallbacks were occurring, and implement robust
+structural fast-paths to keep hot loops executing entirely as compiled,
+native C code. A critical constraint from the outset was to avoid
+duct-tape fixes or superficial scaffolding, instead aiming to fix the
+foundational lowering pathways—preserving the strictness and lazy
+duplication semantics of the language.
+
+## 2. The Diagnosis: The AOT Fallback Problem
+
+Before our optimizations, benchmarks were showing unexpectedly little
+AOT speedup. Profiling the generated C code for `mat_mul` revealed a
+massive proliferation of `aot_fallback_alo(...)` calls.
+
+**The Root Cause:** Hot evaluation was deoptimizing (bailing out to the
+interpreter) constantly due to emitted branches that residualized
+terms. The main culprits were:
+
+1. **DUP Handling:** When the AOT compiler encountered a `DUP`
+   (duplication) node, prior logic only kept the optimized execution
+   flow if the value being duplicated met highly restrictive
+   "copy-free" conditions (like being a raw number `NUM` or a
+   zero-arity constructor `C00`). If a dynamic structure was
+   duplicated, the AOT emitted a hard bailout.
+
+2. **REF and APP spines:** Head compilation of references (`REF`) and
+   application (`APP`) spines was incomplete. Known function calls
+   weren't directly invoking their compiled C equivalents natively;
+   instead, they were constructing fallback environments, dropping out
+   of compiled space, and routing through the generic dynamic
+   interpreter dispatch.
+
+## 3. What Was Tried: Core Insights and Implementation
+
+To address this, we overhauled the `clang/aot/emit.c` generator and
+runtime components. Here are the core technical insights and the
+specific code snippets that powered the optimization.
+
+### Insight 1: DUP Compilation Continuation (The Silver Bullet)
+
+The single most transformative insight was that **we do not need to
+deoptimize when duplicating a non-copy-free value**. Instead, we can
+continue compiling the DUP body regardless of the value's class by
+shifting the fallback decision from *control-flow* to *binder
+representation metadata*.
+
+We introduced runtime flags in the generated C code for every bound
+variable (`xN_is_dup` and `xN_loc`).
+
+**How we emitted the DUP body (from `clang/aot/emit.c`):**
+
+```c
+// Instead of unconditionally bailing out, we emit code to check
+// the value dynamically:
+fprintf(f, "%sTerm x%u = %s;\n", pad1, dep, val);
+fprintf(f, "%su8 x%u_is_dup = 0;\n", pad1, dep);
+fprintf(f, "%su64 x%u_loc = 0;\n", pad1, dep);
+
+// If it's not copy-free, we don't deopt! We just flag it as a DUP.
+fprintf(f, "%sif (!aot_is_copy_free(x%u)) {\n", pad1, dep);
+fprintf(f, "%s  x%u_is_dup = 1;\n", pad1, dep);
+fprintf(f, "%s  x%u_loc = heap_alloc(1);\n", pad1, dep);
+fprintf(f, "%s  heap_set_rel(x%u_loc, x%u);\n", pad1, dep, dep);
+fprintf(f, "%s}\n", pad1);
+
+// And we CONTINUE compiling the body inline!
+aot_emit_itrs_inc(f, pad1);
+aot_emit_node(f, dup_loc + 1, dep + 1, bod, 0, pad1, tmp);
+fprintf(f, "%s%s = %s;\n", pad1, out, bod);
+```
+
+When a variable bound by this DUP is subsequently read in the body
+(e.g., as `DP0` or `DP1`), the generated code inspects the metadata
+to conditionally reconstruct the Interaction Net `DP` node, fully
+preserving the semantics without leaving AOT:
+
+```c
+// Generating a DP0 read
+fprintf(f, "%sTerm %s;\n", pad, out);
+fprintf(f, "%sif (x%u_is_dup) {\n", pad, idx);
+fprintf(f, "%s  %s = term_new(0, DP0, %u, x%u_loc);\n",
+  pad, out, lab, idx);
+fprintf(f, "%s} else {\n", pad);
+fprintf(f, "%s  %s = x%u;\n", pad, out, idx);
+fprintf(f, "%s}\n", pad);
+```
+
+### Insight 2: Head-Mode Direct REF Dispatch and Forward Declarations
+
+When compiling a `REF` in "head mode" (where it consumes `APP` frames
+directly from the stack), we realized we were wasting cycles boxing
+arguments and calling the generic dispatcher. We introduced
+`aot_emit_decl` to generate C forward declarations for all compiled
+definitions:
+
+```c
+fn void aot_emit_decl(FILE *f, u32 id) {
+  // ... lookup logic ...
+  fprintf(f, "static Term %s"
+    "(Term *stack, u32 *s_pos, u32 base);\n", fun_name);
+}
+```
+
+With these declarations, the generated code for a `REF` could bypass
+`aot_call_ref` entirely if the function was statically known, invoking
+it directly while utilizing a depth counter to prevent C stack
+overflows:
+
+```c
+fprintf(f, "%sif (aot_call_depth() < AOT_MAX_DEPTH) {\n", pad1);
+fprintf(f, "%sAOT_CALL_DEPTH++;\n", pad2);
+fprintf(f, "%s%s = %s(stack, s_pos, base);\n",
+  pad2, out_n, fun_name);
+fprintf(f, "%sAOT_CALL_DEPTH--;\n", pad2);
+fprintf(f, "%sreturn %s;\n", pad2, out_n);
+fprintf(f, "%s}\n", pad1);
+```
+
+### Insight 3: Lambda Application (Let-binding) Inlining
+
+In HVM4 lowering, `let` bindings often appear as immediate
+applications of a Lambda (`APP` of a `LAM`). We introduced an inline
+path for this specific shape. If an `APP` is applying a known `LAM`,
+we sidestep the stack entirely:
+
+```c
+if (term_tag(fun_term) == LAM) {
+  u64 lam_loc = term_val(fun_term);
+  fprintf(f, "%sTerm x%u = ", pad, dep);
+  aot_emit_alo_expr(f, app_loc + 1, dep); // Bind argument locally
+  fprintf(f, ";\n");
+
+  // Initialize DUP metadata for the newly bound arg
+  fprintf(f, "%su8 x%u_is_dup = 0;\n", pad, dep);
+  fprintf(f, "%su64 x%u_loc = 0;\n", pad, dep);
+
+  aot_emit_itrs_inc(f, pad);
+  // Compile body inline
+  aot_emit_node(f, lam_loc, dep + 1, out, 0, pad, tmp);
+  return;
+}
+```
+
+### Insight 4: Contiguous Fallback Allocation
+
+When we *did* have to fall back, the environment construction
+(`aot_fallback_alo`) was too slow because it executed a loop of
+independent allocations. We optimized this by allocating the exact
+size needed in a single contiguous block:
+
+```c
+// Optimized version
+u64 block  = heap_alloc((u64)len * 2 + 1);
+u64 ls_loc = 0;
+for (u16 i = 0; i < len; i++) {
+  u64 bind = block + (u64)i * 2;
+  heap_set(bind + 0, term_sub_set(args[i], 1));
+  heap_set(bind + 1, term_new(0, NUM, 0, ls_loc));
+  ls_loc = bind;
+}
+u64 alo_loc = block + (u64)len * 2; // Grab the last slot
+```
+
+### Insight 5: Static Heap Boundary Tracking for Broadened Copy-Free
+### Semantics
+
+To allow more data to be considered "copy-free" (meaning it doesn't
+need expensive DP0/DP1 Interaction Net node reconstruction), we
+differentiated between static program data (which never mutates and is
+globally safe to share) and dynamic runtime data. We introduced a
+global boundary:
+
+```c
+// clang/runtime/prepare.c
+parse_program(src_path, src);
+HEAP_STATIC_END = HEAP_NEXT_AT(0);
+```
+
+This enabled the AOT compiler to recursively verify if a complex data
+structure (like constructors `C01..C16`) lived entirely in the static
+book heap:
+
+```c
+fn int aot_is_copy_free_static_rec(Term term, u32 fuel) {
+  // ... base cases ...
+  u64 loc = term_val(term);
+  if (loc >= HEAP_STATIC_END) return 0; // Dynamic? Not safe!
+
+  // Recursively check fields
+  u32 ari = term_arity(term);
+  for (u32 i = 0; i < ari; i++) {
+    if (!aot_is_copy_free_static_rec(
+          heap_read(loc + i), fuel - 1))
+      return 0;
+  }
+  return 1;
+}
+```
+
+## 4. The Results: The Performance Leap
+
+By keeping execution paths inside compiled native C, we achieved
+massive, measurable speedups on targeted benchmarks running under `-T1`
+(single-threaded).
+
+For **`mat_mul_nat128.hvm`**:
+
+*   **Interpreted**: 31,754,244 Itrs, 0.375s (84.70 M itrs/s)
+*   **Compiled**: 29,657,349 Itrs, 0.074s (400.75 M itrs/s)
+*   **Speedup**: **~5.0x**
+
+For **`mat_mul_nat192.hvm`**:
+
+*   **Interpreted**: 106,834,948 Itrs, 1.284s (83.19 M itrs/s)
+*   **Compiled**: 99,757,445 Itrs, 0.262s (381.37 M itrs/s)
+*   **Speedup**: **~4.9x**
+
+## 5. What Didn't Work (The Pitfalls)
+
+Despite the incredible performance gains, the optimizations introduced
+subtle, fatal semantic flaws.
+
+**1. Dynamic Copy-Free Soundness vs Identity:**
+
+We attempted to treat certain dynamic constructor trees as copy-free,
+assuming immutability. However, under strict Interaction Net evaluation
+semantics, DP behavior and *sharing identity* matter heavily for
+dynamic values. Treating dynamic constructor trees as copy-free is
+fundamentally unsound because it unlinks the spatial locality expected
+by the duplicator nets.
+
+**2. Binder Representation Identity Loss in Autodup:**
+
+While `xN_is_dup` and the `term_new(0, DP0...)` reconstruction
+successfully kept the hot loop inside C, it inadvertently broke
+bound-variable duplication semantics (specifically failing the
+`test/autodup_bound_vars.hvm` regression test). When an already-bound
+variable was duplicated, capturing its pending value dynamically via C
+stack representations disconnected the variable from the global
+interaction net graph. When the graph attempted to lazily reduce the
+duplications later, the identities of the nodes didn't match, causing
+deadlocks and incorrect results.
+
+## 6. Conclusion & Rollback
+
+Despite the monumental efforts and the spectacular ~5x performance
+leap on heavy math benchmarks, we had to rollback this entire patchset
+since it has broken core semantic regression tests (like bound-variable
+duplication) and various other benchmarks that rely on strict graph
+identity.
+
+However, note that the insights acquired during that experimentation
+will be deeply valuable to future work. We now conclusively know that
+**DUP fallbacks are the primary bottleneck** in the AOT backend. We
+also know that extending C representations to encompass lazy DP
+behaviors holds the key to unlocking C-native speeds. Future work will
+leverage these exact same concepts—direct dispatch, lambda inlining,
+static heap boundaries, and continuation through DUPs—but implemented
+with a rigorous, formal tracking of Interaction Net node identity to
+guarantee semantic preservation.
+
+--- (end of post-morten)
+
+Now, to recap, your ultimate GOAL is to improve, optimize and extend the HVM4 to
+C compiler. If this works as intended, must see *massive* (10x-100x)
+improvements in ALL the baseline numbers above on compiled mode. Small
+improvements (like 5%) do NOT count as it just means we're observing noise, and
+should NOT be commited, specially if they increase code size and complexity.
+Truly running on compiled mode is supposed to wield big gains compared to
+running on interpreted mode.
+
+You should do so NOT by micro-optimizations, but ensuring that all functions and
+computations that occur in the benchmark cases (which are basically case-tree
+recursive functions - i.e., very representative of typical workloads) are
+properly hitting the fast paths on the compiled C mode. You must also take extra
+care to keep the compiler code organized, elegant, simple and functional - no
+duct taping, no hacks. Only solid foundational work is allowed for now.
+
+When reporting progress, make sure to include metrics on how much is running on
+compiled mode vs how much is falling back to interpreted mode. That's the main
+number we want to maximize.
+
+An acceptable commit is one that improves one or more benchmarks by at least
+10%. It is also acceptable to commit a smaller improvement IF you can provide
+evidence that it is increasing the time spent on hot compiled paths rather
+than on the interpreter.
+
+You should NOT optimize MAT-SUP interactions, and you should NOT optimize for
+cases when the top of the stack is a DUP node (which basically mean that the
+current function is being DUP's before saturating its case-tree arguments; for
+example, in `! F = nat_eql(3n) ... F₀(3n) ...`, we would call the native nat_eql
+function with `[App(3n), Dup(...), App(3n), ...]` on the stack; there is nothing
+we can do here since the second argument isn't available, so, we just bail out.
+Similar interaction-net-related situations shouldn't be optimized. We must only
+cover expressions that *can* be reduced efficiently via native C procedures. We
+MUST though ensure that inline dups/lets/similar in the static top-level
+definition code do NOT impact our ability to fully compile it into fast mode
+(since these DUPs are applied to expressions in the current scope, NOT to the
+function call itself!).
+
+IMPORTANT:
+- do NOT push a commit if it breaks any of the tests. always run the test suite.
+- do NOT push a commit if it breaks any of the benchmarks. you can run all the
+  benchmarks by recompiling, and then running:
+  `~/t/dev/bench/bench.ts --timeout 3 hvmi hvmc`
+  always use timeout 3, and always test both modes
+
+You can use 'ttok' to measure token count.
+
+Now, work towards completing the GOAL.
