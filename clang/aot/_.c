@@ -83,22 +83,31 @@ fn void aot_itrs_add(u64 amount) {
 // Fallback
 // --------
 
-// Rebuilds an ALO node from captured APP-LAM arguments.
-fn Term aot_fallback_alo(u64 tm_loc, u16 len, const Term *args) {
+// Rebuilds an ALO node from captured lexical environment entries.
+// - Non-dup binders store term_sub_set(value, 1) (LAM semantics).
+// - Dup binders reuse the shared DUP cell location stored in args[i].
+fn Term aot_fallback_alo(u64 tm_loc, u16 len, const Term *args, u64 env_is_dup) {
   aot_prof_inc(&AOT_PROF_FALLBACK_ALO, 1);
   if (len == 0) {
     return term_new(0, ALO, 0, tm_loc);
   }
 
+  // Keep one contiguous allocation for all freshly built bind entries plus ALO pair.
+  // Dup binders may reuse existing cells, so this may reserve extra space.
+  u64 block = heap_alloc((u64)len * 2 + 1);
   u64 ls_loc = 0;
   for (u16 i = 0; i < len; i++) {
-    u64 bind = heap_alloc(2);
-    heap_set(bind + 0, term_sub_set(args[i], 1));
+    u64 bind = block + (u64)i * 2;
+    if (env_is_dup & (1ULL << i)) {
+      bind = (u64)args[i];
+    } else {
+      heap_set(bind + 0, term_sub_set(args[i], 1));
+    }
     heap_set(bind + 1, term_new(0, NUM, 0, ls_loc));
     ls_loc = bind;
   }
 
-  u64 alo_loc = heap_alloc(1);
+  u64 alo_loc = block + (u64)len * 2;
   u64 alo_val = ((ls_loc & ALO_LS_MASK) << ALO_TM_BITS) | (tm_loc & ALO_TM_MASK);
   heap_set(alo_loc, alo_val);
   return term_new(0, ALO, len, alo_loc);

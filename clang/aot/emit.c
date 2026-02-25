@@ -191,38 +191,39 @@ fn void aot_emit_env_args(FILE *f, u32 dep) {
 }
 
 // Emits one ALO expression for static `loc` under current lexical depth.
-fn void aot_emit_alo_expr(FILE *f, u64 loc, u32 dep) {
+fn void aot_emit_alo_expr(FILE *f, u64 loc, u32 dep, u64 env_is_dup) {
   fprintf(f, "aot_fallback_alo(%lluULL, ", (unsigned long long)loc);
   aot_emit_env_args(f, dep);
-  fprintf(f, ")");
+  fprintf(f, ", 0x%llXULL)", (unsigned long long)env_is_dup);
 }
 
 // Emits one deopt return for current location + lexical env.
-fn void aot_emit_ret_fallback_loc(FILE *f, u64 loc, u32 dep, const char *pad) {
+fn void aot_emit_ret_fallback_loc(FILE *f, u64 loc, u32 dep, u64 env_is_dup, const char *pad) {
   fprintf(f, "%sreturn ", pad);
-  aot_emit_alo_expr(f, loc, dep);
+  aot_emit_alo_expr(f, loc, dep, env_is_dup);
   fprintf(f, ";\n");
 }
 
 // Emits one recursive node.
 // - `head=1`: consumes APP frames from `stack/*s_pos` and returns from F_<def>.
 // - `head=0`: materializes one lazy expression into local `Term <out>`.
-fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const char *pad, u32 *tmp);
+fn void aot_emit_node(FILE *f, u64 loc, u32 dep, u64 env_is_dup, const char *out, u8 head, const char *pad, u32 *tmp);
 
 // Returns current head term without consuming pending APP frames.
-fn void aot_emit_ret_head(FILE *f, u64 loc, u32 dep, const char *pad, u32 *tmp) {
+fn void aot_emit_ret_head(FILE *f, u64 loc, u32 dep, u64 env_is_dup, const char *pad, u32 *tmp) {
   char head_n[32];
 
   aot_emit_tmp(head_n, sizeof(head_n), "head", tmp);
 
-  aot_emit_node(f, loc, dep, head_n, 0, pad, tmp);
+  aot_emit_node(f, loc, dep, env_is_dup, head_n, 0, pad, tmp);
+  fprintf(f, "%saot_prof_head_return();\n", pad);
   fprintf(f, "%sreturn %s;\n", pad, head_n);
 }
 
 // Emit Core
 // ---------
 
-fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const char *pad, u32 *tmp) {
+fn void aot_emit_node(FILE *f, u64 loc, u32 dep, u64 env_is_dup, const char *out, u8 head, const char *pad, u32 *tmp) {
   Term term = heap_read(loc);
   u8   tag  = term_tag(term);
 
@@ -235,26 +236,42 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
     aot_emit_wnf_comment(f, loc, pad);
     switch (tag) {
       case APP: {
-        u64 app_loc = term_val(term);
-        u64 fun_loc = app_loc + 0;
-        u64 arg_loc = app_loc + 1;
+        u64  app_loc  = term_val(term);
+        u64  fun_loc  = app_loc + 0;
+        u64  arg_loc  = app_loc + 1;
+        Term fun_term = heap_read(fun_loc);
+
+        // Inline APP-LAM as a strict let-binding to avoid stack round-trips.
+        if (term_tag(fun_term) == LAM) {
+          if (dep >= AOT_ENV_CAP) {
+            aot_emit_ret_fallback_loc(f, loc, dep, env_is_dup, pad);
+            return;
+          }
+          char arg_n[32];
+          aot_emit_tmp(arg_n, sizeof(arg_n), "arg", tmp);
+          aot_emit_node(f, arg_loc, dep, env_is_dup, arg_n, 0, pad, tmp);
+          fprintf(f, "%sTerm x%u = %s;\n", pad, dep, arg_n);
+          aot_emit_itrs_inc(f, pad);
+          aot_emit_node(f, term_val(fun_term), dep + 1, env_is_dup, out, 1, pad, tmp);
+          return;
+        }
+
         char arg_n[32];
         char app_n[32];
         aot_emit_tmp(arg_n, sizeof(arg_n), "arg", tmp);
         aot_emit_tmp(app_n, sizeof(app_n), "app", tmp);
 
         fprintf(f, "%sif ((*s_pos - base) >= AOT_ARG_CAP) {\n", pad);
-        aot_emit_ret_fallback_loc(f, loc, dep, pad1);
+        aot_emit_ret_fallback_loc(f, loc, dep, env_is_dup, pad1);
         fprintf(f, "%s}\n", pad);
 
-        aot_emit_node(f, arg_loc, dep, arg_n, 0, pad, tmp);
+        aot_emit_node(f, arg_loc, dep, env_is_dup, arg_n, 0, pad, tmp);
         fprintf(f, "%su64 %s = heap_alloc(2);\n", pad, app_n);
         fprintf(f, "%sheap_set(%s + 0, term_new_era());\n", pad, app_n);
         fprintf(f, "%sheap_set(%s + 1, %s);\n", pad, app_n, arg_n);
         fprintf(f, "%sstack[*s_pos] = term_new(0, APP, 0, %s);\n", pad, app_n);
         fprintf(f, "%s(*s_pos)++;\n", pad);
-
-        aot_emit_node(f, fun_loc, dep, out, 1, pad, tmp);
+        aot_emit_node(f, fun_loc, dep, env_is_dup, out, 1, pad, tmp);
         return;
       }
 
@@ -265,21 +282,37 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_tmp(app, sizeof(app), "app", tmp);
 
         fprintf(f, "%sif (*s_pos <= base) {\n", pad);
-        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        aot_emit_ret_head(f, loc, dep, env_is_dup, pad1, tmp);
         fprintf(f, "%s}\n", pad);
         if (dep >= AOT_ENV_CAP) {
-          aot_emit_ret_fallback_loc(f, loc, dep, pad);
+          aot_emit_ret_fallback_loc(f, loc, dep, env_is_dup, pad);
           return;
         }
         fprintf(f, "%sTerm %s = stack[*s_pos - 1];\n", pad, frm);
         fprintf(f, "%sif (term_tag(%s) != APP) {\n", pad, frm);
-        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        aot_emit_ret_head(f, loc, dep, env_is_dup, pad1, tmp);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%s(*s_pos)--;\n", pad);
         fprintf(f, "%su64 %s = term_val(%s);\n", pad, app, frm);
         fprintf(f, "%sTerm x%u = heap_read(%s + 1);\n", pad, dep, app);
         aot_emit_itrs_inc(f, pad);
-        aot_emit_node(f, term_val(term), dep + 1, out, 1, pad, tmp);
+        aot_emit_node(f, term_val(term), dep + 1, env_is_dup, out, 1, pad, tmp);
+        return;
+      }
+
+      case DUP: {
+        u64 dup_loc = term_val(term);
+        if (dep >= AOT_ENV_CAP) {
+          aot_emit_ret_fallback_loc(f, loc, dep, env_is_dup, pad);
+          return;
+        }
+        char val_n[32];
+        aot_emit_tmp(val_n, sizeof(val_n), "dupv", tmp);
+        aot_emit_node(f, dup_loc + 0, dep, env_is_dup, val_n, 0, pad, tmp);
+        fprintf(f, "%sTerm x%u = heap_alloc(2);\n", pad, dep);
+        fprintf(f, "%sheap_set(x%u + 0, %s);\n", pad, dep, val_n);
+        fprintf(f, "%sheap_set(x%u + 1, term_new_num(0));\n", pad, dep);
+        aot_emit_node(f, dup_loc + 1, dep + 1, env_is_dup | (1ULL << dep), out, 1, pad, tmp);
         return;
       }
 
@@ -295,11 +328,11 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_tmp(tag_n, sizeof(tag_n), "tag", tmp);
 
         fprintf(f, "%sif (*s_pos <= base) {\n", pad);
-        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        aot_emit_ret_head(f, loc, dep, env_is_dup, pad1, tmp);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%sTerm %s = stack[*s_pos - 1];\n", pad, frm);
         fprintf(f, "%sif (term_tag(%s) != APP) {\n", pad, frm);
-        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        aot_emit_ret_head(f, loc, dep, env_is_dup, pad1, tmp);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%su64 %s = term_val(%s);\n", pad, app, frm);
         fprintf(f, "%sTerm %s = heap_read(%s + 1);\n", pad, arg, app);
@@ -316,11 +349,11 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         fprintf(f, "%sreturn term_new_era();\n", pad1);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%sif (%s == SUP || %s == INC) {\n", pad, tag_n, tag_n);
-        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        aot_emit_ret_head(f, loc, dep, env_is_dup, pad1, tmp);
         fprintf(f, "%s}\n", pad);
 
         aot_emit_itrs_inc(f, pad);
-        aot_emit_node(f, use_loc + 0, dep, out, 1, pad, tmp);
+        aot_emit_node(f, use_loc + 0, dep, env_is_dup, out, 1, pad, tmp);
         return;
       }
 
@@ -334,24 +367,24 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_tmp(arg, sizeof(arg), "arg", tmp);
 
         fprintf(f, "%sif (*s_pos <= base) {\n", pad);
-        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        aot_emit_ret_head(f, loc, dep, env_is_dup, pad1, tmp);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%sTerm %s = stack[*s_pos - 1];\n", pad, frm);
         fprintf(f, "%sif (term_tag(%s) != APP) {\n", pad, frm);
-        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        aot_emit_ret_head(f, loc, dep, env_is_dup, pad1, tmp);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%su64 %s = term_val(%s);\n", pad, app, frm);
         fprintf(f, "%sTerm %s = heap_read(%s + 1);\n", pad, arg, app);
         fprintf(f, "%sif (term_tag(%s) != NUM) {\n", pad, arg);
-        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        aot_emit_ret_head(f, loc, dep, env_is_dup, pad1, tmp);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%sif (term_val(%s) == %uULL) {\n", pad, arg, term_ext(term));
         fprintf(f, "%s(*s_pos)--;\n", pad1);
         aot_emit_itrs_inc(f, pad1);
-        aot_emit_node(f, mat_loc + 0, dep, out, 1, pad1, tmp);
+        aot_emit_node(f, mat_loc + 0, dep, env_is_dup, out, 1, pad1, tmp);
         fprintf(f, "%s} else {\n", pad);
         aot_emit_itrs_inc(f, pad1);
-        aot_emit_node(f, mat_loc + 1, dep, out, 1, pad1, tmp);
+        aot_emit_node(f, mat_loc + 1, dep, env_is_dup, out, 1, pad1, tmp);
         fprintf(f, "%s}\n", pad);
         return;
       }
@@ -376,22 +409,25 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_tmp(cell, sizeof(cell), "cell", tmp);
 
         fprintf(f, "%sif (*s_pos <= base) {\n", pad);
-        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        aot_emit_ret_head(f, loc, dep, env_is_dup, pad1, tmp);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%sTerm %s = stack[*s_pos - 1];\n", pad, frm);
         fprintf(f, "%sif (term_tag(%s) != APP) {\n", pad, frm);
-        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        aot_emit_ret_head(f, loc, dep, env_is_dup, pad1, tmp);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%su64 %s = term_val(%s);\n", pad, app, frm);
         fprintf(f, "%sTerm %s = heap_read(%s + 1);\n", pad, arg, app);
         fprintf(f, "%su8 %s = term_tag(%s);\n", pad, tag_n, arg);
         fprintf(f, "%sif (%s < C00 || %s > C16) {\n", pad, tag_n, tag_n);
-        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        aot_emit_ret_head(f, loc, dep, env_is_dup, pad1, tmp);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%sif (term_ext(%s) == %u) {\n", pad, arg, term_ext(term));
         fprintf(f, "%s(*s_pos)--;\n", pad1);
         aot_emit_itrs_inc(f, pad1);
         fprintf(f, "%su32 %s = (u32)(%s - C00);\n", pad1, ari, tag_n);
+        fprintf(f, "%sif (((*s_pos - base) + %s) > AOT_ARG_CAP) {\n", pad1, ari);
+        aot_emit_ret_fallback_loc(f, loc, dep, env_is_dup, pad2);
+        fprintf(f, "%s}\n", pad1);
         fprintf(f, "%su64 %s = term_val(%s);\n", pad1, ctr, arg);
         fprintf(f, "%su64 block = (%s == 0) ? 0 : heap_alloc((u64)%s * 2);\n", pad1, ari, ari);
         fprintf(f, "%sfor (u32 j = %s; j > 0; j--) {\n", pad1, ari);
@@ -402,10 +438,10 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         fprintf(f, "%s  stack[*s_pos] = term_new(0, APP, 0, %s);\n", pad1, cell);
         fprintf(f, "%s  (*s_pos)++;\n", pad1);
         fprintf(f, "%s}\n", pad1);
-        aot_emit_node(f, mat_loc + 0, dep, out, 1, pad1, tmp);
+        aot_emit_node(f, mat_loc + 0, dep, env_is_dup, out, 1, pad1, tmp);
         fprintf(f, "%s} else {\n", pad);
         aot_emit_itrs_inc(f, pad1);
-        aot_emit_node(f, mat_loc + 1, dep, out, 1, pad1, tmp);
+        aot_emit_node(f, mat_loc + 1, dep, env_is_dup, out, 1, pad1, tmp);
         fprintf(f, "%s}\n", pad);
         return;
       }
@@ -420,13 +456,13 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_tmp(rhs, sizeof(rhs), "rhs", tmp);
         aot_emit_tmp(out_n, sizeof(out_n), "out", tmp);
 
-        aot_emit_node(f, arg + 0, dep, lhs, 0, pad, tmp);
+        aot_emit_node(f, arg + 0, dep, env_is_dup, lhs, 0, pad, tmp);
 
         fprintf(f, "%sTerm %s;\n", pad, out_n);
         fprintf(f, "%sif (term_tag(%s) == ERA) {\n", pad, lhs);
         fprintf(f, "%s%s = wnf_op2_era();\n", pad1, out_n);
         fprintf(f, "%s} else if (term_tag(%s) == NUM) {\n", pad, lhs);
-        aot_emit_node(f, arg + 1, dep, rhs, 0, pad1, tmp);
+        aot_emit_node(f, arg + 1, dep, env_is_dup, rhs, 0, pad1, tmp);
         fprintf(f, "%sif (term_tag(%s) == ERA) {\n", pad1, rhs);
         fprintf(f, "%s%s = wnf_op2_num_era();\n", pad2, out_n);
         fprintf(f, "%s} else if (term_tag(%s) == NUM) {\n", pad1, rhs);
@@ -436,7 +472,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         fprintf(f, "%s}\n", pad1);
         fprintf(f, "%s} else {\n", pad);
         fprintf(f, "%s%s = term_new_op2(%u, %s, ", pad1, out_n, opr, lhs);
-        aot_emit_alo_expr(f, arg + 1, dep);
+        aot_emit_alo_expr(f, arg + 1, dep, env_is_dup);
         fprintf(f, ");\n");
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%sreturn %s;\n", pad, out_n);
@@ -444,15 +480,33 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       }
 
       case REF: {
+        u32 ref_id = term_ext(term);
         fprintf(f, "%sif (STEPS_ITRS_LIM == 0) {\n", pad);
-        fprintf(f, "%sreturn aot_call_ref(%u, stack, s_pos, base);\n", pad1, term_ext(term));
+        if (ref_id < TABLE.len && BOOK[ref_id] != 0) {
+          char *ref_name = table_get(ref_id);
+          if (ref_name != NULL) {
+            char fun_name[256];
+            char out_n[32];
+            aot_emit_fun_name(fun_name, sizeof(fun_name), ref_name);
+            aot_emit_tmp(out_n, sizeof(out_n), "ref", tmp);
+            fprintf(f, "%sif (aot_call_depth() < AOT_MAX_DEPTH) {\n", pad1);
+            fprintf(f, "%sWNF_S_POS = *s_pos;\n", pad2);
+            fprintf(f, "%sAOT_CALL_DEPTH++;\n", pad2);
+            fprintf(f, "%sTerm %s = %s(stack, s_pos, base);\n", pad2, out_n, fun_name);
+            fprintf(f, "%sAOT_CALL_DEPTH--;\n", pad2);
+            fprintf(f, "%sWNF_S_POS = *s_pos;\n", pad2);
+            fprintf(f, "%sreturn %s;\n", pad2, out_n);
+            fprintf(f, "%s}\n", pad1);
+          }
+        }
+        fprintf(f, "%sreturn term_new_ref(%u);\n", pad1, ref_id);
         fprintf(f, "%s}\n", pad);
-        aot_emit_ret_head(f, loc, dep, pad, tmp);
+        aot_emit_ret_head(f, loc, dep, env_is_dup, pad, tmp);
         return;
       }
 
       default: {
-        aot_emit_ret_head(f, loc, dep, pad, tmp);
+        aot_emit_ret_head(f, loc, dep, env_is_dup, pad, tmp);
         return;
       }
     }
@@ -469,19 +523,76 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       return;
     }
     case VAR:
-    case BJV:
+    case BJV: {
+      u64 lvl = term_val(term);
+      if (lvl == 0 || lvl > dep) {
+        fprintf(f, "%sTerm %s = ", pad, out);
+        aot_emit_alo_expr(f, loc, dep, env_is_dup);
+        fprintf(f, ";\n");
+        return;
+      }
+      u32 idx = (u32)(lvl - 1);
+      if (env_is_dup & (1ULL << idx)) {
+        fprintf(f, "%sTerm %s = heap_read(x%u);\n", pad, out, idx);
+      } else {
+        fprintf(f, "%sTerm %s = x%u;\n", pad, out, idx);
+      }
+      return;
+    }
     case DP0:
-    case BJ0:
+    case BJ0: {
+      u64 lvl = term_val(term);
+      if (lvl == 0 || lvl > dep) {
+        fprintf(f, "%sTerm %s = ", pad, out);
+        aot_emit_alo_expr(f, loc, dep, env_is_dup);
+        fprintf(f, ";\n");
+        return;
+      }
+      u32 idx = (u32)(lvl - 1);
+      u32 lab = term_ext(term);
+      if (env_is_dup & (1ULL << idx)) {
+        fprintf(f, "%sTerm %s = term_new_dp0(%u, x%u);\n", pad, out, lab, idx);
+      } else {
+        fprintf(f, "%sTerm %s = x%u;\n", pad, out, idx);
+      }
+      return;
+    }
     case DP1:
     case BJ1: {
       u64 lvl = term_val(term);
       if (lvl == 0 || lvl > dep) {
         fprintf(f, "%sTerm %s = ", pad, out);
-        aot_emit_alo_expr(f, loc, dep);
+        aot_emit_alo_expr(f, loc, dep, env_is_dup);
         fprintf(f, ";\n");
         return;
       }
-      fprintf(f, "%sTerm %s = x%u;\n", pad, out, (u32)(lvl - 1));
+      u32 idx = (u32)(lvl - 1);
+      u32 lab = term_ext(term);
+      if (env_is_dup & (1ULL << idx)) {
+        fprintf(f, "%sTerm %s = term_new_dp1(%u, x%u);\n", pad, out, lab, idx);
+      } else {
+        fprintf(f, "%sTerm %s = x%u;\n", pad, out, idx);
+      }
+      return;
+    }
+    case DUP: {
+      u64 dup_loc = term_val(term);
+      if (dep >= AOT_ENV_CAP) {
+        fprintf(f, "%sTerm %s = ", pad, out);
+        aot_emit_alo_expr(f, loc, dep, env_is_dup);
+        fprintf(f, ";\n");
+        return;
+      }
+      char val_n[32];
+      char bod_n[32];
+      aot_emit_tmp(val_n, sizeof(val_n), "dupv", tmp);
+      aot_emit_tmp(bod_n, sizeof(bod_n), "dupb", tmp);
+      aot_emit_node(f, dup_loc + 0, dep, env_is_dup, val_n, 0, pad, tmp);
+      fprintf(f, "%sTerm x%u = heap_alloc(2);\n", pad, dep);
+      fprintf(f, "%sheap_set(x%u + 0, %s);\n", pad, dep, val_n);
+      fprintf(f, "%sheap_set(x%u + 1, term_new_num(0));\n", pad, dep);
+      aot_emit_node(f, dup_loc + 1, dep + 1, env_is_dup | (1ULL << dep), bod_n, 0, pad, tmp);
+      fprintf(f, "%sTerm %s = %s;\n", pad, out, bod_n);
       return;
     }
     case OP2: {
@@ -490,8 +601,8 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       char rhs_n[32];
       aot_emit_tmp(lhs_n, sizeof(lhs_n), "lhs", tmp);
       aot_emit_tmp(rhs_n, sizeof(rhs_n), "rhs", tmp);
-      aot_emit_node(f, op2_loc + 0, dep, lhs_n, 0, pad, tmp);
-      aot_emit_node(f, op2_loc + 1, dep, rhs_n, 0, pad, tmp);
+      aot_emit_node(f, op2_loc + 0, dep, env_is_dup, lhs_n, 0, pad, tmp);
+      aot_emit_node(f, op2_loc + 1, dep, env_is_dup, rhs_n, 0, pad, tmp);
       fprintf(f, "%sTerm %s = term_new_op2(%u, %s, %s);\n", pad, out, term_ext(term), lhs_n, rhs_n);
       return;
     }
@@ -501,8 +612,8 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       char rhs_n[32];
       aot_emit_tmp(lhs_n, sizeof(lhs_n), "eqla", tmp);
       aot_emit_tmp(rhs_n, sizeof(rhs_n), "eqlb", tmp);
-      aot_emit_node(f, eql_loc + 0, dep, lhs_n, 0, pad, tmp);
-      aot_emit_node(f, eql_loc + 1, dep, rhs_n, 0, pad, tmp);
+      aot_emit_node(f, eql_loc + 0, dep, env_is_dup, lhs_n, 0, pad, tmp);
+      aot_emit_node(f, eql_loc + 1, dep, env_is_dup, rhs_n, 0, pad, tmp);
       fprintf(f, "%sTerm %s = term_new_eql(%s, %s);\n", pad, out, lhs_n, rhs_n);
       return;
     }
@@ -512,8 +623,8 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       char rhs_n[32];
       aot_emit_tmp(lhs_n, sizeof(lhs_n), "anda", tmp);
       aot_emit_tmp(rhs_n, sizeof(rhs_n), "andb", tmp);
-      aot_emit_node(f, and_loc + 0, dep, lhs_n, 0, pad, tmp);
-      aot_emit_node(f, and_loc + 1, dep, rhs_n, 0, pad, tmp);
+      aot_emit_node(f, and_loc + 0, dep, env_is_dup, lhs_n, 0, pad, tmp);
+      aot_emit_node(f, and_loc + 1, dep, env_is_dup, rhs_n, 0, pad, tmp);
       fprintf(f, "%sTerm %s = term_new_and(%s, %s);\n", pad, out, lhs_n, rhs_n);
       return;
     }
@@ -523,14 +634,14 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       char rhs_n[32];
       aot_emit_tmp(lhs_n, sizeof(lhs_n), "ora", tmp);
       aot_emit_tmp(rhs_n, sizeof(rhs_n), "orb", tmp);
-      aot_emit_node(f, or_loc + 0, dep, lhs_n, 0, pad, tmp);
-      aot_emit_node(f, or_loc + 1, dep, rhs_n, 0, pad, tmp);
+      aot_emit_node(f, or_loc + 0, dep, env_is_dup, lhs_n, 0, pad, tmp);
+      aot_emit_node(f, or_loc + 1, dep, env_is_dup, rhs_n, 0, pad, tmp);
       fprintf(f, "%sTerm %s = term_new_or(%s, %s);\n", pad, out, lhs_n, rhs_n);
       return;
     }
     default: {
       fprintf(f, "%sTerm %s = ", pad, out);
-      aot_emit_alo_expr(f, loc, dep);
+      aot_emit_alo_expr(f, loc, dep, env_is_dup);
       fprintf(f, ";\n");
       return;
     }
@@ -539,6 +650,24 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
 
 // Definition Emitter
 // ------------------
+
+// Emits forward declarations for compiled definitions.
+fn void aot_emit_decls(FILE *f) {
+  fprintf(f, "// Forward declarations for compiled definitions.\n");
+  for (u32 id = 0; id < TABLE.len; id++) {
+    if (BOOK[id] == 0) {
+      continue;
+    }
+    char *name = table_get(id);
+    if (name == NULL) {
+      continue;
+    }
+    char fun_name[256];
+    aot_emit_fun_name(fun_name, sizeof(fun_name), name);
+    fprintf(f, "static Term %s(Term *stack, u32 *s_pos, u32 base);\n", fun_name);
+  }
+  fprintf(f, "\n");
+}
 
 // Emits one compiled definition.
 fn void aot_emit_def(FILE *f, u32 id) {
@@ -557,13 +686,14 @@ fn void aot_emit_def(FILE *f, u32 id) {
 
   fprintf(f, "// Compiled function for @%s (id %u).\n", name, id);
   fprintf(f, "static Term %s(Term *stack, u32 *s_pos, u32 base) {\n", fun_name);
+  fprintf(f, "  aot_prof_fn_entry();\n");
   fprintf(f, "  if (aot_call_depth() >= AOT_MAX_DEPTH) {\n");
-  fprintf(f, "    return aot_fallback_alo(%lluULL, 0, NULL);\n", (unsigned long long)root);
+  fprintf(f, "    return aot_fallback_alo(%lluULL, 0, NULL, 0ULL);\n", (unsigned long long)root);
   fprintf(f, "  }\n");
   fprintf(f, "\n");
   {
     u32 tmp = 0;
-    aot_emit_node(f, root, 0, NULL, 1, "  ", &tmp);
+    aot_emit_node(f, root, 0, 0ULL, NULL, 1, "  ", &tmp);
   }
   fprintf(f, "}\n\n");
 }
@@ -667,7 +797,7 @@ fn void aot_emit_to_file(FILE *f, const char *runtime_path, const char *src_path
   fprintf(f, "// AOT summary:\n");
   fprintf(f, "// - Includes full runtime TU directly (%s).\n", runtime_path);
   fprintf(f, "// - Emits one tree-shaped function per definition.\n");
-  fprintf(f, "// - Uses lexical binder registers x0, x1, ...\n");
+  fprintf(f, "// - Uses lexical binder registers x0, x1, ... (LAM and DUP binders).\n");
   fprintf(f, "// - Deopts by returning linear-safe residual terms.\n\n");
 
   fprintf(f, "#include ");
@@ -677,6 +807,7 @@ fn void aot_emit_to_file(FILE *f, const char *runtime_path, const char *src_path
   aot_emit_c_string_decl(f, "AOT_SOURCE_PATH", src_path);
   aot_emit_c_string_decl(f, "AOT_SOURCE_TEXT", src_text);
   aot_emit_ffi_table(f, cfg);
+  aot_emit_decls(f);
 
   for (u32 id = 0; id < TABLE.len; id++) {
     if (BOOK[id] == 0) {
