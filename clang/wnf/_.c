@@ -70,6 +70,15 @@ __attribute__((cold, noinline)) static Term wnf_rebuild(Term cur, Term *stack, u
 fn Term wnf_pri(Term pri);
 fn int aot_try_call(u32 id, Term *stack, u32 *s_pos, u32 base, Term *out);
 
+fn void wnf_stack_push(Term *stack, u32 *s_pos, Term frame) {
+  if (__builtin_expect(*s_pos >= WNF_CAP, 0)) {
+    fprintf(stderr, "RUNTIME_ERROR: wnf stack overflow (cap=%llu terms)\n",
+            (unsigned long long)WNF_CAP);
+    exit(1);
+  }
+  stack[(*s_pos)++] = frame;
+}
+
 #ifndef __has_attribute
   #define __has_attribute(x) 0
 #endif
@@ -118,7 +127,7 @@ WNF_HOT fn Term wnf(Term term) {
           next = term_sub_set(cell, 0);
           goto enter;
         }
-        stack[s_pos++] = next;
+        wnf_stack_push(stack, &s_pos, next);
         next = cell;
         goto enter;
       }
@@ -126,7 +135,7 @@ WNF_HOT fn Term wnf(Term term) {
       case APP: {
         u64  loc = term_val(next);
         Term fun = heap_read(loc);
-        stack[s_pos++] = next;
+        wnf_stack_push(stack, &s_pos, next);
         next = fun;
         goto enter;
       }
@@ -235,7 +244,7 @@ WNF_HOT fn Term wnf(Term term) {
       case OP2: {
         u64  loc = term_val(next);
         Term x   = heap_read(loc + 0);
-        stack[s_pos++] = next;
+        wnf_stack_push(stack, &s_pos, next);
         next = x;
         goto enter;
       }
@@ -243,7 +252,7 @@ WNF_HOT fn Term wnf(Term term) {
       case EQL: {
         u64  loc = term_val(next);
         Term a   = heap_read(loc + 0);
-        stack[s_pos++] = next;
+        wnf_stack_push(stack, &s_pos, next);
         next = a;
         goto enter;
       }
@@ -251,7 +260,7 @@ WNF_HOT fn Term wnf(Term term) {
       case AND: {
         u64  loc = term_val(next);
         Term a   = heap_read(loc + 0);
-        stack[s_pos++] = next;
+        wnf_stack_push(stack, &s_pos, next);
         next = a;
         goto enter;
       }
@@ -259,7 +268,7 @@ WNF_HOT fn Term wnf(Term term) {
       case OR: {
         u64  loc = term_val(next);
         Term a   = heap_read(loc + 0);
-        stack[s_pos++] = next;
+        wnf_stack_push(stack, &s_pos, next);
         next = a;
         goto enter;
       }
@@ -267,7 +276,7 @@ WNF_HOT fn Term wnf(Term term) {
       case DSU: {
         u64  loc = term_val(next);
         Term lab = heap_read(loc + 0);
-        stack[s_pos++] = next;
+        wnf_stack_push(stack, &s_pos, next);
         next = lab;
         goto enter;
       }
@@ -275,7 +284,7 @@ WNF_HOT fn Term wnf(Term term) {
       case DDU: {
         u64  loc = term_val(next);
         Term lab = heap_read(loc + 0);
-        stack[s_pos++] = next;
+        wnf_stack_push(stack, &s_pos, next);
         next = lab;
         goto enter;
       }
@@ -356,12 +365,12 @@ WNF_HOT fn Term wnf(Term term) {
             }
             case MAT:
             case SWI: {
-              stack[s_pos++] = whnf;
+              wnf_stack_push(stack, &s_pos, whnf);
               next = arg;
               goto enter;
             }
             case USE: {
-              stack[s_pos++] = whnf;
+              wnf_stack_push(stack, &s_pos, whnf);
               next = arg;
               goto enter;
             }
@@ -522,7 +531,7 @@ WNF_HOT fn Term wnf(Term term) {
                 continue;
               }
               // x is NUM, now reduce y: push F_OP2_NUM frame
-              stack[s_pos++] = term_new(0, F_OP2_NUM, opr, term_val(whnf));
+              wnf_stack_push(stack, &s_pos, term_new(0, F_OP2_NUM, opr, term_val(whnf)));
               next = y;
               goto enter;
             }
@@ -605,7 +614,7 @@ WNF_HOT fn Term wnf(Term term) {
               // Store a's WHNF location, push F_EQL_R, enter b
               // We store a in heap_read(loc+0) for later retrieval
               heap_set(loc + 0, whnf);
-              stack[s_pos++] = term_new(0, F_EQL_R, 0, loc);
+              wnf_stack_push(stack, &s_pos, term_new(0, F_EQL_R, 0, loc));
               next = b;
               goto enter;
             }

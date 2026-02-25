@@ -13,11 +13,18 @@ fn void heap_init_slices(void) {
     }
     HEAP_NEXT_AT(t) = start;
     HEAP_END_AT(t) = end;
+#if HVM_WINDOWS
+    u64 page_words = HEAP_PAGE_WORDS > 0 ? HEAP_PAGE_WORDS : 1;
+    HEAP_COMMIT_AT(t) = (start / page_words) * page_words;
+#else
+    HEAP_COMMIT_AT(t) = 0;
+#endif
     at += bank_sz;
   }
 
   for (u32 t = threads; t < MAX_THREADS; t++) {
     HEAP_NEXT_AT(t) = 0;
     HEAP_END_AT(t) = 0;
+    HEAP_COMMIT_AT(t) = 0;
   }
 }

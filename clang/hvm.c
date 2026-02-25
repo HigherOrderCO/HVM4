@@ -173,11 +173,10 @@ typedef struct {
 // Capacities
 // ==========
 
+#define HEAP_CAP (1ULL << 38)
 #if defined(HVM_WINDOWS)
-  #define HEAP_CAP (1ULL << 30)
-  #define WNF_CAP  (1ULL << 25)
+  #define WNF_CAP  (1ULL << 27)
 #else
-  #define HEAP_CAP (1ULL << 38)
   #define WNF_CAP  (1ULL << 32)
 #endif
 #define BOOK_CAP (1ULL << 24)
@@ -198,8 +197,14 @@ static Term    *HEAP;
 #define HEAP_STRIDE 32
 static u64      HEAP_NEXT[MAX_THREADS * HEAP_STRIDE] __attribute__((aligned(256))) = {0};
 static u64      HEAP_END[MAX_THREADS * HEAP_STRIDE] __attribute__((aligned(256))) = {0};
+static u64      HEAP_COMMIT[MAX_THREADS * HEAP_STRIDE] __attribute__((aligned(256))) = {0};
 #define HEAP_NEXT_AT(t) HEAP_NEXT[(t) * HEAP_STRIDE]
 #define HEAP_END_AT(t)  HEAP_END[(t) * HEAP_STRIDE]
+#define HEAP_COMMIT_AT(t) HEAP_COMMIT[(t) * HEAP_STRIDE]
+#if defined(HVM_WINDOWS)
+static u64 HEAP_PAGE_WORDS = 1;
+static u64 HEAP_COMMIT_STEP_WORDS = 1;
+#endif
 
 // Book Globals
 // ============

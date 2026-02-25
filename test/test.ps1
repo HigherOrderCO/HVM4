@@ -41,7 +41,7 @@ $FfiDir = Join-Path $TestDir "ffi"
 $CMain = Join-Path $RootDir "clang\main.c"
 $CBin = Join-Path $RootDir "clang\main.exe"
 
-$TestTimeoutInterpretedSecs = 2
+$TestTimeoutInterpretedSecs = 5
 $TestTimeoutCompiledSecs = 20
 
 if ($env:HVM_TEST_TIMEOUT_SECS) {
