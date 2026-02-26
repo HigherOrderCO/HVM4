@@ -1,17 +1,19 @@
-Round 5 (2026-02-26)
+Round 6 (2026-02-26)
 
-What changed this round
-- Final code change: `clang/aot/emit.c` only.
-- Added inline DUP forcing in compiled strict `OP2` paths:
-  - after emitting lhs (`arg+0`), if lhs is `DP0/DP1`, emit `lhs = aot_force_dup(lhs)`;
-  - in the `lhs == NUM` branch, after emitting rhs (`arg+1`), if rhs is `DP0/DP1`, emit `rhs = aot_force_dup(rhs)`.
-- This follows expert guidance A1: when strict local WNF touches env-bound DP vars, try inline DUP interactions first instead of dropping to interpreter behavior.
+What changed this round (final)
+- Final code change: `clang/aot/_.c` only.
+- Raised `AOT_ARG_CAP` from `16` to `64`.
+- No emitter/runtime semantic changes landed beyond that cap update.
 
-Attempted but reverted (important)
-- I implemented a broader strict helper in `clang/aot/_.c` (`aot_force_strict`) that forced `DP` + opened `ALO` and wired it into head `SWI/MAT/OP2`.
-- This was UNSAFE: AOT tests regressed immediately (`collapse_supgen_mul`, `enum_primes`, `factorial`, `fib*`), including segfaults and `cannot apply a number` runtime errors.
-- Root lesson: naively opening ALO at strict sites breaks invariants; broad strict forcing should not be reintroduced without a much tighter correctness model.
-- Reverted all of that, restored previous `SWI/MAT` behavior, kept only OP2 DP forcing.
+Large experiment attempted, then fully reverted
+- I attempted strict `MAT/SWI` scrutinee forcing in compiled code:
+  - first with `aot_force_whnf()` calling `wnf()` directly,
+  - then with `WNF_S_POS` sync,
+  - then with APP-frame scrutinee writeback,
+  - then with bounded ALO-only forcing via `wnf_alo_*`.
+- All those variants caused AOT regressions (segfaults, `cannot apply a number`, wrong outputs, huge malformed terms in `enum_primes`, hangs/kills).
+- Everything from that forcing experiment was reverted.
+- Key lesson: strict-site forcing is very sensitive to stack/frame invariants; do not reintroduce without an explicit semantic model for APP-frame ownership and reentrancy boundaries.
 
 Validation on final state
 - Rebuilt: `cd clang && clang -O2 -o main main.c`.
@@ -22,22 +24,20 @@ Validation on final state
   - `../bench/bench/gab_tak/main.hvm`
   - `../bench/bench/gab_takl/main.hvm`
 
-Deopt counters (unchanged hotspot)
-- `HVM_AOT_DEOPT=1` still reports:
-  - `gab_tak`: total `5544`, dominant `EXPR_UNSUPPORTED_TAG=5434`, hottest `site[12]=5196`.
-  - `gab_takl`: total `16678507`, dominant `EXPR_UNSUPPORTED_TAG=16614897`, hottest `site[24]=16502527`.
-- Conclusion: this round’s OP2-DP improvement is correctness-safe and local, but does not target the tak/takl dominant strict-MAT hotspot.
-
-Concrete evidence of new emission
-- `./clang/main test/dup_fresh.hvm --to-c` now emits DP forcing in OP2:
-  - `lhs_1 = aot_force_dup(lhs_1);`
-  - `rhs_2 = aot_force_dup(rhs_2);`
-- `HVM_AOT_DEOPT=1 ./clang/main test/dup_fresh.hvm --as-c` => `AOT_DEOPT total=0`.
+Deopt counters after `AOT_ARG_CAP=64`
+- `HVM_AOT_DEOPT=1 ./clang/main ../bench/bench/gab_tak/main.hvm --as-c -S`
+  - total `5544`
+  - `EXPR_UNSUPPORTED_TAG=5434` (dominant)
+  - `HEAD_APP_ARG_CAP=15`
+- `HVM_AOT_DEOPT=1 ./clang/main ../bench/bench/gab_takl/main.hvm --as-c -S`
+  - total `16678507`
+  - `EXPR_UNSUPPORTED_TAG=16614897` (dominant)
+  - `HEAD_APP_ARG_CAP=48958`
+- Hotspot remains strict-match mismatch (`EXPR_UNSUPPORTED_TAG`), but cap-hit bucket is now constrained and non-dominant.
 
 Operational notes
-- `--as-c` temp binary path remains deterministic (`hvm4-aot-as-c.main.bin`): keep probes serial.
+- `--as-c` temp binary remains deterministic (`hvm4-aot-as-c.main.bin`): keep probe runs serial.
 
 Next likely step
-- Keep strict forcing DP-focused unless a precisely scoped safe ALO/APP-LAM rule is proven.
-- Add stricter observability for strict-match deopts (dedicated reason/site metadata for head MAT/SWI tag-mismatch path) before another forcing attempt.
-- Revisit `AOT_ARG_CAP` policy after strict-match hotspot is instrumented more explicitly.
+- Add explicit strict-site deopt reason/source mapping for head `MAT/SWI` mismatch path (site -> kind/expected class/static loc) before any new forcing.
+- Pursue a formally safe strict forcing rule only after clarifying whether mismatch/default branches must consume forced scrutinee vs original thunk in APP-frame terms.

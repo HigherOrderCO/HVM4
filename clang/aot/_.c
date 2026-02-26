@@ -34,7 +34,7 @@ fn Term wnf_dup_nod(u32 lab, u64 loc, u8 side, Term term);
 static HvmAotFn AOT_FNS[BOOK_CAP] = {0};
 
 // AOT runtime limits.
-#define AOT_ARG_CAP   16
+#define AOT_ARG_CAP   64
 #define AOT_ENV_CAP   16
 #define AOT_MAX_DEPTH 4096
 #define AOT_FORCE_DUP_FUEL 32

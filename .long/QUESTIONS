@@ -1,35 +1,18 @@
-1) Strict MAT/SWI forcing subset after failed ALO attempt
+1) Strict MAT/SWI mismatch semantics with forced scrutinee (APP-frame consistency)
 
 Context:
-- Current dominant deopt in `gab_tak` / `gab_takl` is still strict-match tag mismatch fallback (`EXPR_UNSUPPORTED_TAG` at MAT checks).
-- I attempted a bounded helper that forced strict scrutinees by handling `DP` plus opening `ALO` (using `wnf_alo_*`) before MAT/SWI checks.
-- That change caused severe AOT regressions (wrong results + segfaults in `collapse_supgen_mul`, `enum_primes`, `factorial`, `fib*`) and was reverted.
-- Final safe state now keeps only DP forcing (`aot_force_dup`) and OP2-local DP forcing.
+- Current dominant deopt remains head strict-match mismatch (`EXPR_UNSUPPORTED_TAG`) on `gab_tak`/`gab_takl`.
+- I tried forcing strict scrutinees in compiled `MAT/SWI` before tag checks.
+- This exposed a subtle invariant: mismatch/default branches reuse the existing APP frame (they do not pop it), so after forcing `arg` there is a question whether the frame must hold the forced WHNF value or the original thunk.
+- In interpreter terms, `APP-MAT-CTR-MIS` / `APP-MAT-NUM-MIS` produce `(default_branch forced_scrutinee_whnf)`.
+- In compiled code, using original thunk vs forced WHNF in that frame appears to affect correctness and may be tied to prior regressions.
 
 Question:
-- For strict match in compiled mode, what exact next forcing subset is semantically safe?
-  1) DP-only (status quo),
-  2) DP + very specific ALO case(s) only,
-  3) DP + APP-LAM only when fun is statically proven LAM,
-  4) another narrowly-scoped rule.
-- Please provide one concrete "safe first" rule with a disallowed list, so I can implement without repeating regressions.
+- For compiled strict `MAT/SWI`, after we force a scrutinee to WHNF for tag inspection, what is the required semantic contract for mismatch/default continuation?
+  1) always pass forced WHNF scrutinee,
+  2) always preserve original thunk,
+  3) conditional rule (if so, exact condition).
+- Please answer with one concrete rule + one minimal pseudo-example so I can codify this invariant and avoid further unsafe forcing attempts.
 
 Why this matters:
-- We need to reduce the strict-match deopt hotspot, but broad forcing is demonstrably unsafe.
-
-2) `AOT_ARG_CAP` policy for compiled head APP chains
-
-Context:
-- Deopt counters still show `HEAD_APP_ARG_CAP` hits (`gab_tak`: 103, `gab_takl`: 63592).
-- Current cap is fixed at 16.
-- Raising cap could cut deopts quickly but may paper over structural issues.
-
-Question:
-- Preferred policy now:
-  1) keep 16 and focus only on structural compilation fixes,
-  2) raise cap now (if yes, recommended value),
-  3) use a dynamic strategy tied to runtime stack bounds,
-  4) another policy.
-
-Why this matters:
-- This is the second-largest remaining deopt bucket on tak/takl once strict-match mismatch dominates.
+- This is currently the blocker for implementing strict-site forcing safely; without this rule we keep hitting hard-to-debug graph corruption/regressions.
