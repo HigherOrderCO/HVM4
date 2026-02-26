@@ -1,21 +1,21 @@
-1) Strict mismatch contract after scrutinee forcing in compiled head MAT/SWI (APP-frame ownership)
+1) Strict-force REF policy: should local WHNF forcing allow compiled REF calls under a depth budget, or always stay interpreter-only?
 
 Context:
-- Dominant deopt in AOT remains strict mismatch (`EXPR_UNSUPPORTED_TAG`).
-- I added strict-site metadata and can now pinpoint hotspots, e.g. in `gab_takl`:
-  - `site[24] kind=HEAD_MAT_NON_CTR loc=45 expect_ctr_ext=10`
-- We previously tried strict forcing experiments and hit regressions (segfaults, wrong outputs, hangs), likely due to violating frame/state invariants.
-- The critical ambiguity is mismatch/default continuation semantics once we force scrutinee to WHNF for tag inspection.
+- Round 8 added strict scrutinee forcing for head `MAT/SWI` (`DP0/DP1/APP/ALO/REF`) plus writeback of forced WHNF into APP arg slot.
+- Initial version crashed on `test/match_recursive_arg` with stack overflow because force-local `wnf(term)` re-entered compiled REF calls through `aot_try_call` recursively.
+- I fixed this by adding thread-local gate `AOT_TRY_CALL_ENABLED` and disabling `aot_try_call` during `aot_force_whnf_local`; this made tests/parity pass and dropped strict mismatch deopts drastically.
+- However, this also means strict forcing currently evaluates REF via interpreter/Alo path even when compiled code exists.
 
 Precise question:
-- In compiled head `MAT/SWI`, if we force scrutinee before checking tag and it mismatches the strict case, what exact value must be propagated in continuation semantics?
-  1) Always forced WHNF scrutinee,
-  2) Always original thunk from APP frame,
-  3) Conditional rule (please specify exact condition).
+- In strict local forcing mode, what is the preferred long-term policy?
+  1) Always disable compiled REF calls (current safe behavior),
+  2) Allow compiled REF calls but with explicit depth/call budget in `aot_try_call`,
+  3) Another rule (please specify exact condition/mechanism).
 
 Why this matters:
-- This rule determines whether compiled mismatch path must rewrite the current APP frame argument slot (or equivalent) before continuing/deopting.
-- Without this contract, any renewed strict forcing is unsafe and we will likely reintroduce prior correctness bugs.
+- Option (1) is safest and currently correct, but may leave performance on the table.
+- Option (2) could improve forcing speed but risks reintroducing recursive C-stack blowups if not formally bounded.
+- I need the semantic/engineering contract to redesign this path without reintroducing prior crashes.
 
 Request:
-- Please provide one concrete rule and a minimal interaction-style example (before/after term shape) that disambiguates the required behavior.
+- Please state the intended contract and one concrete pseudo-flow for recursive case-trees (like `mat_self`) showing how force-local REF calls should be bounded/handled.

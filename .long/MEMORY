@@ -1,61 +1,74 @@
-Round 7 (2026-02-26)
+Round 8 (2026-02-26)
 
 What changed this round (landed)
 - Landed code changes in:
   - `clang/aot/_.c`
   - `clang/aot/emit.c`
-- Added strict-site deopt metadata plumbing (source-mapped by static term loc):
-  - New `AotDeoptSiteKind` enum:
-    - `AOT_DEOPT_SITE_KIND_HEAD_SWI_NON_NUM`
-    - `AOT_DEOPT_SITE_KIND_HEAD_MAT_NON_CTR`
-  - New runtime metadata arrays keyed by deopt site id:
-    - kind, static loc, aux (expected case ext).
-  - New runtime API: `aot_deopt_site_define(site, kind, loc, aux)`.
-  - `aot_deopt_dump(stderr)` top-sites now prints metadata when present:
-    - `kind=... loc=... expect_num=...` or `expect_ctr_ext=...`.
-- Emitter now stores per-site metadata while assigning site ids and emits:
-  - `aot_register_deopt_sites_generated()` in generated C,
-  - called from generated `main()` before eval.
-- Head strict mismatch emission change:
-  - In compiled head `SWI`: `arg` non-NUM now returns direct fallback with metadata kind `HEAD_SWI_NON_NUM`.
-  - In compiled head `MAT`: scrutinee non-CTR-tag now returns direct fallback with metadata kind `HEAD_MAT_NON_CTR`.
-  - Reason stays `AOT_DEOPT_EXPR_UNSUPPORTED_TAG` for continuity of existing counters.
+- Added conservative strict scrutinee forcing path for compiled head `SWI` / `MAT`:
+  - New runtime helpers:
+    - `aot_force_whnf_local(Term term, u32 stack_top)`
+    - `aot_force_strict(Term term, u32 stack_top)`
+    - `aot_can_force_strict_tag(u8 tag)`
+  - `aot_force_strict` behavior:
+    - first applies existing bounded `aot_force_dup` for `DP0/DP1`
+    - then WHNF-forces `APP/ALO/REF` via local `wnf` call when needed
+- Emitter changes for head strict checks:
+  - `SWI`/`MAT` now force scrutinee when tag is in `{DP0, DP1, APP, ALO, REF}`
+  - after forcing, writes back forced scrutinee to current APP arg slot with `heap_set_rel(app + 1, arg)`
+  - strict mismatch still deopts with same reason/site metadata plumbing from round 7
 
-Why this was done
-- `EXPR_UNSUPPORTED_TAG` remained dominant and opaque in `gab_tak`/`gab_takl`.
-- We need exact hotspot attribution (strict site kind + static loc + expected class/ext) before retrying any strict forcing redesign.
+Critical bug hit + fix
+- Initial implementation segfaulted on `test/match_recursive_arg` (AOT only).
+- ASan trace showed deep recursive cycle:
+  - `aot_force_whnf_local -> wnf -> aot_try_call -> F_mat_self -> ...`
+  - stack overflow due forcing path re-entering compiled calls recursively.
+- Root cause:
+  - strict local forcing called `wnf`, and `wnf` REF path used `aot_try_call` (compiled re-entry), which is not depth-guarded.
+- Fix landed:
+  - Added thread-local gate `AOT_TRY_CALL_ENABLED` (default on).
+  - `aot_try_call` returns 0 when gate is off.
+  - `aot_force_whnf_local` now temporarily disables `aot_try_call` around `wnf(term)`, forcing REF handling through interpreter ALO expansion instead of recursive compiled re-entry.
+  - This preserves correctness and eliminates the stack-overflow regression.
+
+Human expert answer integrated
+- `.long/ANSWERS` now confirms strict mismatch contract unambiguously:
+  - After forcing scrutinee to WHNF, continuation must propagate the forced WHNF value (never original thunk).
+- Current writeback in strict emission aligns with this rule.
 
 Validation
-- Rebuild: `cd clang && clang -O2 -o main main.c` passes.
-- Full suite: `./test/_all_.sh` passes (interpreted + AOT).
+- Rebuild passes:
+  - `cd clang && clang -O2 -o main main.c`
+- Full suite passes:
+  - `./test/_all_.sh` (interpreted + AOT)
+- Regression reproduction/fix proof:
+  - `./clang/main test/match_recursive_arg.hvm --as-c -C` now returns `#Z{}` (previously segfaulted).
 - Parity (hvmi == hvmc `--as-c`) passes on:
   - `../bench/bench/gab_deriv/main.hvm`
   - `../bench/bench/gen_easy/main.hvm -C1`
   - `../bench/bench/gab_tak/main.hvm`
   - `../bench/bench/gab_takl/main.hvm`
-- Deopt probe snapshots (serial `--as-c` runs):
-  - `gab_tak`:
-    - total `5544`
-    - `HEAD_APP_ARG_CAP=15`
-    - `EXPR_UNSUPPORTED_TAG=5434`
-    - top strict sites now explicit, e.g.:
-      - `site[12] ... kind=HEAD_MAT_NON_CTR loc=22 expect_ctr_ext=0`
-  - `gab_takl`:
-    - total `16678507`
-    - `HEAD_APP_ARG_CAP=48958`
-    - `EXPR_UNSUPPORTED_TAG=16614897`
-    - dominant hotspot now source-mapped, e.g.:
-      - `site[24] ... kind=HEAD_MAT_NON_CTR loc=45 expect_ctr_ext=10`
+- Deopt snapshots (`HVM_AOT_DEOPT=1`, serial runs):
+  - `gab_tak`: total `113`
+    - `EXPR_APP_UNSUPPORTED_FUN=57`
+    - `EXPR_OP2_RHS_CAPTURE=56`
+  - `gab_takl`: total `519`
+    - `EXPR_APP_UNSUPPORTED_FUN=260`
+    - `EXPR_OP2_RHS_CAPTURE=259`
+- Comparison with prior round:
+  - dominant strict mismatch deopts (`EXPR_UNSUPPORTED_TAG`, millions in `gab_takl`) collapsed massively after strict forcing + writeback.
 
 Operational notes
-- `--as-c` temp artifacts remain deterministic (`hvm4-aot-as-c.main.c/.bin`); probe runs must be serial.
-- I accidentally ran two `--as-c` probes in parallel once and got unusable duplicate output; reran serially.
+- `--as-c` temp artifacts remain deterministic under tmp root (`hvm4-aot-as-c.main.c/.bin`); probe runs must stay serial.
+- Avoid running multiple `--as-c` probes in parallel.
 
-Key lesson
-- Add observability before forcing semantics changes. This metadata layer is low-risk and gives precise targeting for the next safe strict forcing iteration.
+Key lessons
+- Forcing scrutinee WHNF is effective, but forcing must not recurse into compiled entrypoints unchecked.
+- Local-force mode must isolate stack segment *and* control REF dispatch path.
+- Source-mapped deopt metadata from round 7 was essential to verify this change reduced the intended hotspot.
 
-Next likely step
-- Use the new strict-site metadata to implement a formally safe mismatch forcing contract for head `MAT/SWI`:
-  - decide and codify APP-frame scrutinee ownership on mismatch/default,
-  - then apply bounded forcing only where contract is proven,
-  - keep deopt counters to validate reduced `EXPR_UNSUPPORTED_TAG` without regressions.
+Next likely steps
+- Target new top reasons now exposed post-fix:
+  - `EXPR_APP_UNSUPPORTED_FUN`
+  - `EXPR_OP2_RHS_CAPTURE`
+- Consider a proper depth-governed `aot_try_call` path (or dedicated force-mode call policy) so strict forcing can regain compiled REF speed safely without recursive stack blowups.
+- Keep validating with `gab_takl` deopt counters after each forcing policy tweak.

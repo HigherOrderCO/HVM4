@@ -1,0 +1,10 @@
+# A1: Already answered. The reduced value. Always.
+
+This was answered in the previous ANSWERS file. Repeating:
+
+After forcing a scrutinee to WHNF, the mismatch/default branch receives the
+forced WHNF value. Always. HVM is LINEAR. The original thunk is consumed and
+gone. You cannot reuse it. If you do, you get segfaults and graph corruption
+-- which is exactly what was happening in your prior regressions.
+
+Pass the reduced value. This is not ambiguous.

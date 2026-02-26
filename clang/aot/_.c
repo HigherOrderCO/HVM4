@@ -26,6 +26,7 @@ fn Term wnf_dup_nam(u32 lab, u64 loc, u8 side, Term nam);
 fn Term wnf_dup_lam(u32 lab, u64 loc, u8 side, Term lam);
 fn Term wnf_dup_sup(u32 lab, u64 loc, u8 side, Term sup);
 fn Term wnf_dup_nod(u32 lab, u64 loc, u8 side, Term term);
+fn Term wnf(Term term);
 
 // Runtime
 // -------
@@ -43,6 +44,7 @@ static HvmAotFn AOT_FNS[BOOK_CAP] = {0};
 
 // Thread-local compiled-call depth for recursion cutoff.
 static _Thread_local u32 AOT_CALL_DEPTH = 0;
+static _Thread_local u8  AOT_TRY_CALL_ENABLED = 1;
 
 // Counts one interaction on compiled paths.
 fn void aot_itrs_inc(void) {
@@ -282,6 +284,35 @@ fn int aot_is_copy_free(Term term) {
   return 0;
 }
 
+// Returns 1 when strict head forcing can expose a new WHNF scrutinee tag.
+fn int aot_can_force_strict_tag(u8 tag) {
+  switch (tag) {
+    case APP:
+    case ALO:
+    case REF: {
+      return 1;
+    }
+    default: {
+      return 0;
+    }
+  }
+}
+
+// Forces one term to WHNF using a stack segment above caller-owned frames.
+fn Term aot_force_whnf_local(Term term, u32 stack_top) {
+  u32 saved_sp = WNF_S_POS;
+  u8  saved_tc = AOT_TRY_CALL_ENABLED;
+  if (stack_top == 0) {
+    stack_top = 1;
+  }
+  WNF_S_POS = stack_top;
+  AOT_TRY_CALL_ENABLED = 0;
+  Term out = wnf(term);
+  AOT_TRY_CALL_ENABLED = saved_tc;
+  WNF_S_POS = saved_sp;
+  return out;
+}
+
 // Tries bounded conservative DP forcing for a strict AOT scrutinee.
 // Unknown payloads are restored and returned unchanged.
 fn Term aot_force_dup(Term term) {
@@ -345,6 +376,19 @@ fn Term aot_force_dup(Term term) {
   return term;
 }
 
+// Tries conservative strict forcing for compiled SWI/MAT scrutinees.
+fn Term aot_force_strict(Term term, u32 stack_top) {
+  u8 tag = term_tag(term);
+  if (tag == DP0 || tag == DP1) {
+    term = aot_force_dup(term);
+    tag = term_tag(term);
+  }
+  if (aot_can_force_strict_tag(tag)) {
+    term = aot_force_whnf_local(term, stack_top);
+  }
+  return term;
+}
+
 // Calls
 // -----
 
@@ -376,6 +420,10 @@ fn Term aot_call_ref(u32 ref_id, Term *stack, u32 *s_pos, u32 base) {
 
 // Tries to execute a compiled function for a REF; returns 0 when absent.
 fn int aot_try_call(u32 id, Term *stack, u32 *s_pos, u32 base, Term *out) {
+  if (!AOT_TRY_CALL_ENABLED) {
+    return 0;
+  }
+
   if (STEPS_ITRS_LIM != 0) {
     return 0;
   }

@@ -355,8 +355,9 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%su64 %s = term_val(%s);\n", pad, app, frm);
         fprintf(f, "%sTerm %s = heap_read(%s + 1);\n", pad, arg, app);
-        fprintf(f, "%sif (term_tag(%s) == DP0 || term_tag(%s) == DP1) {\n", pad, arg, arg);
-        fprintf(f, "%s%s = aot_force_dup(%s);\n", pad1, arg, arg);
+        fprintf(f, "%sif (term_tag(%s) == DP0 || term_tag(%s) == DP1 || term_tag(%s) == APP || term_tag(%s) == ALO || term_tag(%s) == REF) {\n", pad, arg, arg, arg, arg, arg);
+        fprintf(f, "%s%s = aot_force_strict(%s, *s_pos);\n", pad1, arg, arg);
+        fprintf(f, "%sheap_set_rel(%s + 1, %s);\n", pad1, app, arg);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%sif (term_tag(%s) != NUM) {\n", pad, arg);
         aot_emit_ret_fallback_loc_meta(f, loc, dep, AOT_DEOPT_EXPR_UNSUPPORTED_TAG, AOT_DEOPT_SITE_KIND_HEAD_SWI_NON_NUM, term_ext(term), pad1);
@@ -400,8 +401,9 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%su64 %s = term_val(%s);\n", pad, app, frm);
         fprintf(f, "%sTerm %s = heap_read(%s + 1);\n", pad, arg, app);
-        fprintf(f, "%sif (term_tag(%s) == DP0 || term_tag(%s) == DP1) {\n", pad, arg, arg);
-        fprintf(f, "%s%s = aot_force_dup(%s);\n", pad1, arg, arg);
+        fprintf(f, "%sif (term_tag(%s) == DP0 || term_tag(%s) == DP1 || term_tag(%s) == APP || term_tag(%s) == ALO || term_tag(%s) == REF) {\n", pad, arg, arg, arg, arg, arg);
+        fprintf(f, "%s%s = aot_force_strict(%s, *s_pos);\n", pad1, arg, arg);
+        fprintf(f, "%sheap_set_rel(%s + 1, %s);\n", pad1, app, arg);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%su8 %s = term_tag(%s);\n", pad, tag_n, arg);
         fprintf(f, "%sif (%s < C00 || %s > C16) {\n", pad, tag_n, tag_n);
