@@ -66,6 +66,36 @@ fn const char *cli_prog_name(const char *argv0) {
   return sep + 1;
 }
 
+#if HVM_WINDOWS
+fn char *cli_realpath(const char *path) {
+  if (path == NULL || path[0] == '\0') {
+    return NULL;
+  }
+
+  DWORD need = GetFullPathNameA(path, 0, NULL, NULL);
+  if (need == 0) {
+    return NULL;
+  }
+
+  char *abs = malloc((size_t)need);
+  if (abs == NULL) {
+    return NULL;
+  }
+
+  DWORD got = GetFullPathNameA(path, need, abs, NULL);
+  if (got == 0 || got >= need) {
+    free(abs);
+    return NULL;
+  }
+
+  return abs;
+}
+#else
+fn char *cli_realpath(const char *path) {
+  return realpath(path, NULL);
+}
+#endif
+
 // Returns 1 if `text` is a non-empty decimal unsigned integer.
 fn int cli_is_uint(const char *text) {
   if (text == NULL || text[0] == '\0') {
@@ -357,20 +387,7 @@ int main(int argc, char **argv) {
   }
 
   // Parse and validate source, then resolve @main.
-#if HVM_WINDOWS
-  char *abs_path = NULL;
-  char *abs_path_buf = malloc(PATH_MAX);
-  if (abs_path_buf != NULL) {
-    DWORD abs_len = GetFullPathNameA(opts.file, PATH_MAX, abs_path_buf, NULL);
-    if (abs_len > 0 && abs_len < PATH_MAX) {
-      abs_path = abs_path_buf;
-    } else {
-      free(abs_path_buf);
-    }
-  }
-#else
-  char *abs_path = realpath(opts.file, NULL);
-#endif
+  char *abs_path = cli_realpath(opts.file);
   const char *src_path = abs_path ? abs_path : opts.file;
   u32 main_id = 0;
   if (!runtime_prepare(&main_id, src_path, src)) {
