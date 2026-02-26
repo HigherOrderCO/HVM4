@@ -49,11 +49,11 @@ Term mul2() {
 
 That function just pops applications from the top-level stack, and consumes
 them, performing "inline interactions", and returning only the final result. To
-be more specific, every top-level definition that formatted as a "case-tree" -
+be more specific, every top-level definition that is formatted as a "case-tree";
 that is, a tree of λ's and λ-matches, with possibly interleaved local
 definitions (LET's) and duplications (DUP's), with each branch head ("tail
 position") being an expression composed of applications, operations and
-recursive calls, SHOULD be compiled to the equivalent C native function, bailing
+recursive calls; SHOULD be compiled to the equivalent C native function, bailing
 out only when interaction net specific interactions (ex: pattern-matching when
 the argument of the top stack frame APP is a SUP node, or when the top stack
 frame is a DUP instead of an APP, and similar C-incompatible cases).
@@ -131,8 +131,6 @@ You can run them via:
 
 (Don't forget to rebuild and ensure the global `hvm` points to ./clang/main!)
 
-IMPORTANT: do NOT push a commit if it breaks any of the tests or benchmarks.
-
 NOTE: the following commit:
 7834b787c42f0f6e1844eee4339a497e9357b62a
 Made a lot of progress, but it introduced bugs and breaked benchmarks. Study it
@@ -161,5 +159,7 @@ The GOAL is completed when the following benchmarks run in full compiled mode:
 Which can be evidenced by them all taking much less time to evaluate, compared
 to the interpreted mode (at least a ~10x speedup on each is demanded). Also, all
 tests must still pass, and all benchmarks must still return the same result.
+
+IMPORTANT: do NOT push a commit if it breaks ANY test or benchmark.
 
 Now, work towards completing the GOAL.
