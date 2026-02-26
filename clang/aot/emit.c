@@ -9,6 +9,7 @@ fn char *table_get(u32 id);
 
 // Controls whether emitted AOT code should include interaction counting calls.
 static int AOT_EMIT_ITRS = 1;
+static u32 AOT_EMIT_DEOPT_SITE = 0;
 
 // Returns 1 when this AOT build needs interaction counting.
 fn int aot_emit_counting(const AotBuildCfg *cfg) {
@@ -182,17 +183,18 @@ fn void aot_emit_env_head(FILE *f, u32 dep) {
   }
 }
 
-// Emits one ALO expression for static `loc` under current lexical depth.
-fn void aot_emit_alo_expr(FILE *f, u64 loc, u32 dep) {
+// Emits one ALO expression + one deopt counter site for static `loc`.
+fn void aot_emit_alo_expr(FILE *f, u64 loc, u32 dep, u32 reason) {
+  u32 site = AOT_EMIT_DEOPT_SITE++;
   fprintf(f, "aot_fallback_alo(%lluULL, %u, ", (unsigned long long)loc, dep);
   aot_emit_env_head(f, dep);
-  fprintf(f, ")");
+  fprintf(f, ", %u, %u)", reason, site);
 }
 
 // Emits one deopt return for current location + lexical env.
-fn void aot_emit_ret_fallback_loc(FILE *f, u64 loc, u32 dep, const char *pad) {
+fn void aot_emit_ret_fallback_loc(FILE *f, u64 loc, u32 dep, u32 reason, const char *pad) {
   fprintf(f, "%sreturn ", pad);
-  aot_emit_alo_expr(f, loc, dep);
+  aot_emit_alo_expr(f, loc, dep, reason);
   fprintf(f, ";\n");
 }
 
@@ -236,7 +238,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_tmp(app_n, sizeof(app_n), "app", tmp);
 
         fprintf(f, "%sif ((*s_pos - base) >= AOT_ARG_CAP) {\n", pad);
-        aot_emit_ret_fallback_loc(f, loc, dep, pad1);
+        aot_emit_ret_fallback_loc(f, loc, dep, AOT_DEOPT_HEAD_APP_ARG_CAP, pad1);
         fprintf(f, "%s}\n", pad);
 
         aot_emit_node(f, arg_loc, dep, arg_n, 0, pad, tmp);
@@ -260,7 +262,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_ret_head(f, loc, dep, pad1, tmp);
         fprintf(f, "%s}\n", pad);
         if (dep >= AOT_ENV_CAP) {
-          aot_emit_ret_fallback_loc(f, loc, dep, pad);
+          aot_emit_ret_fallback_loc(f, loc, dep, AOT_DEOPT_HEAD_LAM_ENV_CAP, pad);
           return;
         }
         fprintf(f, "%sTerm %s = stack[*s_pos - 1];\n", pad, frm);
@@ -284,7 +286,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
 
       case DUP: {
         if (dep >= AOT_ENV_CAP) {
-          aot_emit_ret_fallback_loc(f, loc, dep, pad);
+          aot_emit_ret_fallback_loc(f, loc, dep, AOT_DEOPT_HEAD_DUP_ENV_CAP, pad);
           return;
         }
 
@@ -426,7 +428,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         fprintf(f, "%s}\n", pad1);
         fprintf(f, "%s} else {\n", pad);
         fprintf(f, "%s%s = term_new_op2(%u, %s, ", pad1, out_n, opr, lhs);
-        aot_emit_alo_expr(f, arg + 1, dep);
+        aot_emit_alo_expr(f, arg + 1, dep, AOT_DEOPT_EXPR_OP2_RHS_CAPTURE);
         fprintf(f, ");\n");
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%sreturn %s;\n", pad, out_n);
@@ -463,7 +465,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       u64 lvl = term_val(term);
       if (lvl == 0 || lvl > dep) {
         fprintf(f, "%sTerm %s = ", pad, out);
-        aot_emit_alo_expr(f, loc, dep);
+        aot_emit_alo_expr(f, loc, dep, AOT_DEOPT_EXPR_VAR_LEVEL_OOB);
         fprintf(f, ";\n");
         return;
       }
@@ -475,7 +477,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       u64 lvl = term_val(term);
       if (lvl == 0 || lvl > dep) {
         fprintf(f, "%sTerm %s = ", pad, out);
-        aot_emit_alo_expr(f, loc, dep);
+        aot_emit_alo_expr(f, loc, dep, AOT_DEOPT_EXPR_DP_LEVEL_OOB);
         fprintf(f, ";\n");
         return;
       }
@@ -499,7 +501,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       u64 lvl = term_val(term);
       if (lvl == 0 || lvl > dep) {
         fprintf(f, "%sTerm %s = ", pad, out);
-        aot_emit_alo_expr(f, loc, dep);
+        aot_emit_alo_expr(f, loc, dep, AOT_DEOPT_EXPR_DP_LEVEL_OOB);
         fprintf(f, ";\n");
         return;
       }
@@ -521,15 +523,21 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
     case APP: {
       u64 app_loc = term_val(term);
       Term fun = heap_read(app_loc + 0);
-      if (term_tag(fun) != LAM || dep >= AOT_ENV_CAP) {
+      if (term_tag(fun) != LAM) {
         fprintf(f, "%sTerm %s = ", pad, out);
-        aot_emit_alo_expr(f, loc, dep);
+        aot_emit_alo_expr(f, loc, dep, AOT_DEOPT_EXPR_APP_UNSUPPORTED_FUN);
+        fprintf(f, ";\n");
+        return;
+      }
+      if (dep >= AOT_ENV_CAP) {
+        fprintf(f, "%sTerm %s = ", pad, out);
+        aot_emit_alo_expr(f, loc, dep, AOT_DEOPT_EXPR_APP_ENV_CAP);
         fprintf(f, ";\n");
         return;
       }
 
       fprintf(f, "%sTerm x%u = ", pad, dep);
-      aot_emit_alo_expr(f, app_loc + 1, dep);
+      aot_emit_alo_expr(f, app_loc + 1, dep, AOT_DEOPT_EXPR_APP_ARG_CAPTURE);
       fprintf(f, ";\n");
       fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
       fprintf(f, "%sheap_set(e%u + 0, term_sub_set(x%u, 1));\n", pad, dep, dep);
@@ -546,7 +554,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       u64 dup_loc = term_val(term);
       if (dep >= AOT_ENV_CAP) {
         fprintf(f, "%sTerm %s = ", pad, out);
-        aot_emit_alo_expr(f, loc, dep);
+        aot_emit_alo_expr(f, loc, dep, AOT_DEOPT_EXPR_DUP_ENV_CAP);
         fprintf(f, ";\n");
         return;
       }
@@ -575,7 +583,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
     }
     default: {
       fprintf(f, "%sTerm %s = ", pad, out);
-      aot_emit_alo_expr(f, loc, dep);
+      aot_emit_alo_expr(f, loc, dep, AOT_DEOPT_EXPR_UNSUPPORTED_TAG);
       fprintf(f, ";\n");
       return;
     }
@@ -603,7 +611,9 @@ fn void aot_emit_def(FILE *f, u32 id) {
   fprintf(f, "// Compiled function for @%s (id %u).\n", name, id);
   fprintf(f, "static Term %s(Term *stack, u32 *s_pos, u32 base) {\n", fun_name);
   fprintf(f, "  if (aot_call_depth() >= AOT_MAX_DEPTH) {\n");
-  fprintf(f, "    return aot_fallback_alo(%lluULL, 0, 0ULL);\n", (unsigned long long)root);
+  fprintf(f, "    return ");
+  aot_emit_alo_expr(f, root, 0, AOT_DEOPT_CALL_DEPTH_CAP);
+  fprintf(f, ";\n");
   fprintf(f, "  }\n");
   fprintf(f, "\n");
   {
@@ -705,6 +715,7 @@ fn void aot_emit_entry_main(FILE *f, const AotBuildCfg *cfg) {
 // Emits the full standalone AOT C program.
 fn void aot_emit_to_file(FILE *f, const char *runtime_path, const char *src_path, const char *src_text, const AotBuildCfg *cfg) {
   AOT_EMIT_ITRS = aot_emit_counting(cfg);
+  AOT_EMIT_DEOPT_SITE = 0;
 
   fprintf(f, "// Auto-generated by HVM AOT.\n");
   fprintf(f, "// This file is standalone: compile with `clang -O2 -o <out> <file.c>`.\n");

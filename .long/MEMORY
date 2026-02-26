@@ -1,49 +1,63 @@
-Round 3 (2026-02-26)
+Round 4 (2026-02-26)
 
 What changed this round
-- Files changed: `clang/aot/_.c`.
-- `aot_force_dup` was upgraded from single-step to bounded multi-step DP forcing:
-  - new limit: `#define AOT_FORCE_DUP_FUEL 32`;
-  - loop continues while the current term is `DP0/DP1` and fuel remains;
-  - each step uses the same conservative DUP dispatch set as before (`NAM/BJV/BJ0/BJ1`, `LAM`, `SUP`, `DRY/MAT/SWI/USE/INC`, `ERA/ANY/PRI/NUM`, `C00..C16`);
-  - no full `wnf()` call is used.
-- Fixed a high-severity `heap_take` restore bug:
-  - SUB fast-path now restores the taken cell with `heap_set_rel(loc, cell)` before returning/continuing with payload;
-  - unknown-payload fallback now also restores with `heap_set_rel` (was relaxed `heap_set`).
+- Files changed: `clang/aot/_.c`, `clang/aot/emit.c`, `clang/runtime/eval_main.c`.
+- Added dynamic AOT deopt instrumentation with reason + site IDs.
+- `aot_fallback_alo` now records `reason` and `site`:
+  - old: `aot_fallback_alo(tm_loc, len, ls_loc)`
+  - new: `aot_fallback_alo(tm_loc, len, ls_loc, reason, site)`
+- Emitter now assigns one monotonic deopt site ID per emitted fallback call and passes a reason enum.
+- Added runtime counters in `clang/aot/_.c`:
+  - per-reason hit counts,
+  - per-site hit counts,
+  - per-site last reason,
+  - overflow counter when site ID exceeds cap (`AOT_DEOPT_SITE_CAP=65536`).
+- Added gated reporting (`HVM_AOT_DEOPT` env var):
+  - when enabled, prints deopt totals/reasons/top sites to `stderr` at end of `runtime_eval_main`.
 
-Why this shape
-- Multi-thread safety: `heap_take` does atomic exchange to 0 when `THREAD_COUNT > 1`; any early return without restore can leave a permanent zero hole/spin risk.
-- Performance boundary: bounded DUP-only forcing resolves common DP chains without the pathological over-evaluation seen when calling full `wnf`.
-- Semantic boundary remains conservative:
-  - if forcing reaches non-DP, return it;
-  - if payload is unknown/non-dispatchable, restore and return current DP unchanged;
-  - if fuel exhausts, return current term as-is.
-
-Important failed attempts (still avoid)
-1) Custom DP mini-evaluator with frame-like recursion:
-- Triggered `RUNTIME_ERROR: cannot apply a constructor` on benchmark-style runs (`gab_deriv`, `gen_easy --as-c`), despite tests passing.
-2) `aot_force_dup = wnf(dp)`:
-- Correctness recovered but `gen_easy --as-c` became extremely slow / appeared hung.
-
-Operational notes
-- Deterministic `--as-c` temp binary path (`hvm4-aot-as-c.main.bin`) still collides across concurrent runs; run benchmark repros serially.
+Reason taxonomy currently emitted
+- `HEAD_APP_ARG_CAP`
+- `HEAD_LAM_ENV_CAP`
+- `HEAD_DUP_ENV_CAP`
+- `EXPR_VAR_LEVEL_OOB`
+- `EXPR_DP_LEVEL_OOB`
+- `EXPR_APP_UNSUPPORTED_FUN`
+- `EXPR_APP_ENV_CAP`
+- `EXPR_APP_ARG_CAPTURE`
+- `EXPR_DUP_ENV_CAP`
+- `EXPR_OP2_RHS_CAPTURE`
+- `EXPR_UNSUPPORTED_TAG`
+- `CALL_DEPTH_CAP`
 
 Validation on final state
 - Rebuilt: `cd clang && clang -O2 -o main main.c`.
 - Full suite: `./test/_all_.sh` passes (interpreted + AOT).
-- Bench parity checks:
-  - `../bench/bench/gab_deriv/main.hvm`: hvmi == hvmc output.
-  - `../bench/bench/gen_easy/main.hvm -C1`: hvmi == hvmc output.
-  - `../bench/bench/gab_tak/main.hvm`: hvmi == hvmc output.
-- Coverage probe:
-  - `./clang/main ../bench/bench/gab_tak/main.hvm --to-c | grep -c aot_fallback_alo` => `90` static fallback sites.
-- Quick local wall-time sample (includes `--as-c` compile overhead, so not a pure runtime metric):
-  - `gab_tak` hvmi ~0.01s; hvmc `--as-c` ~1.13s.
+- Bench parity checks pass (hvmi == hvmc `--as-c`):
+  - `../bench/bench/gab_deriv/main.hvm`
+  - `../bench/bench/gen_easy/main.hvm -C1`
+  - `../bench/bench/gab_tak/main.hvm`
+  - `../bench/bench/gab_takl/main.hvm`
+- Static fallback site count (unchanged shape):
+  - `./clang/main ../bench/bench/gab_tak/main.hvm --to-c | rg -c "aot_fallback_alo\("` => `90`.
 
-Current state
-- Strict `SWI/MAT` DP handling is now both safer (thread-aware restoration) and deeper (bounded multi-step).
-- Major benchmark gap remains: too much execution still deopts to ALO; fallback sites in generated code are still abundant.
+New empirical data (dynamic, with `HVM_AOT_DEOPT=1`)
+- `gab_tak --as-c`:
+  - total deopts: `5544`
+  - reasons: `EXPR_UNSUPPORTED_TAG=5434`, `HEAD_APP_ARG_CAP=103`, `EXPR_APP_UNSUPPORTED_FUN=7`
+  - hottest site: `site[12]=5196`, mapped to MAT strict check fallback (`tag < C00 || tag > C16`).
+- `gab_takl --as-c`:
+  - total deopts: `16678507`
+  - reasons: `EXPR_UNSUPPORTED_TAG=16614897`, `HEAD_APP_ARG_CAP=63592`, `EXPR_APP_UNSUPPORTED_FUN=18`
+  - hottest site: `site[24]=16502527`, same MAT strict check fallback shape.
+
+Key insight
+- The dominant remaining runtime loss is not DP dispatch itself; it is strict MAT/SWI paths that reach non-constructor scrutinee tags and then deopt via `aot_emit_ret_head` -> expression-mode `MAT` fallback (`EXPR_UNSUPPORTED_TAG`).
+- This confirms priority should move from DP-only forcing to a bounded strict-whnf strategy for non-constructor scrutinees (likely ALO/APP/SUP chain handling), with hard guards for correctness.
+
+Operational notes
+- Deterministic `--as-c` temp binary path (`hvm4-aot-as-c.main.bin`) still collides across concurrent runs; keep `--as-c` benchmark probes serial.
+- Deopt report is opt-in; no stdout behavior change when `HVM_AOT_DEOPT` is unset.
 
 Next likely step
-- Add deopt/fallback instrumentation (reason counters + hot call counts) so work can target real runtime fallback frequency, not just static fallback site counts.
-- Use one failing benchmark (`gab_tak`/`gab_takl`) and generated C inspection to prioritize the exact node shapes that eject from compiled mode earliest.
+- Add bounded strict scrutinee forcing beyond DP (`ALO`/`APP` first), but only by reusing existing runtime interaction helpers and fuel guards.
+- Add a dedicated deopt reason for strict-match scrutinee-tag mismatch in head mode so this hotspot no longer hides behind generic `EXPR_UNSUPPORTED_TAG`.

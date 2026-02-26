@@ -1,30 +1,37 @@
-1) Which deopt metric should guide optimization work: static fallback sites or dynamic fallback hits?
+1) Strict-match forcing scope: which extra interactions are considered semantically safe to run in compiled mode before deopting?
 
 Context:
-- The generated C for `gab_tak` currently contains many static fallback points (`--to-c | grep -c aot_fallback_alo` gives 90 sites).
-- But that count does not tell which ones are actually hot at runtime.
-- We need to prioritize changes that move benchmark runtime to compiled mode (admission asks for large speedups), not just reduce generated fallback branches that may be cold.
+- I added dynamic deopt counters keyed by reason+site.
+- On `gab_tak` and `gab_takl`, the dominant reason is now clear: `EXPR_UNSUPPORTED_TAG` from strict `MAT` checks where scrutinee tag is not `C00..C16`.
+- Hottest examples in generated C are sites like:
+  - `if (tag_3 < C00 || tag_3 > C16) { Term head_10 = aot_fallback_alo(..., 10, 24); return head_10; }`
+- Current strict forcing only special-cases `DP0/DP1` via `aot_force_dup`; it does not force ALO/APP/SUP frontiers before MAT/SWI checks.
 
 Question:
-- For HVM AOT tuning, what metric do you consider the best target:
-  1) dynamic count of executed `aot_fallback_alo` calls (possibly bucketed by reason),
-  2) dynamic share of interactions spent in compiled code vs interpreter code,
-  3) another metric you trust more?
-- If you have a preferred instrumentation style (where to hook counters, how to normalize across runs), please specify.
+- For strict case-tree compilation, what is the preferred next safe subset to force in compiled mode before deopting?
+  1) ALO expansion only,
+  2) ALO + APP-LAM one-step,
+  3) ALO + APP-LAM + REF-call,
+  4) include SUP distribution too,
+  5) another subset.
+- If possible, please rank by correctness risk vs expected benchmark impact.
 
 Why this matters:
-- Without a canonical metric, it is easy to over-optimize cold patterns and miss the true deopt hotspot that blocks benchmark speedups.
+- The counters show this is now the dominant blocker; picking the wrong forcing subset risks repeating prior “cannot apply constructor/number” regressions.
 
-2) Priority pattern request: which specific case-tree shape is known to dominate deopts on target benchmarks?
+2) `AOT_ARG_CAP` policy: should we increase cap or redesign stack pressure in compiled head APP chains?
 
 Context:
-- We already compile through some previously-missing pieces (DUP in more places, expr APP-LAM LET-shapes, strict DP forcing).
-- Tests/parity are stable, but benchmark-level speedups are still far from target.
-- This suggests the dominant fallback path is elsewhere in the emitted case-tree spine.
+- Dynamic deopts also show non-trivial `HEAD_APP_ARG_CAP` hits (`gab_tak`: 103, `gab_takl`: 63592).
+- Current cap is fixed at 16 (`AOT_ARG_CAP`), and generated APP-heavy recursive paths can exceed it.
+- Increasing the cap may reduce deopts but can hide deeper codegen shape issues and increase stack/memory pressure.
 
 Question:
-- From your experience with these benchmark programs, which one pattern should we prioritize next for compile-through because it most frequently causes early full-body deopt?
-- Example candidates: head-position LET before match, strict match on SUP frontier, non-tail REF/app chain shape, constructor-field forcing pattern, etc.
+- Do you prefer:
+  1) keep `AOT_ARG_CAP=16` and optimize APP-chain emission/consumption shape,
+  2) raise the cap (if so, recommended value),
+  3) dynamic cap strategy (e.g., soft cap then fallback),
+  4) another approach?
 
 Why this matters:
-- A concrete “highest ROI” pattern from domain knowledge can save multiple blind rounds of instrumentation and trial patches.
+- If cap policy is wrong, we may overfit hot benchmarks with fragile constants instead of fixing the structural deopt source.

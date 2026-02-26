@@ -38,6 +38,8 @@ static HvmAotFn AOT_FNS[BOOK_CAP] = {0};
 #define AOT_ENV_CAP   16
 #define AOT_MAX_DEPTH 4096
 #define AOT_FORCE_DUP_FUEL 32
+#define AOT_DEOPT_SITE_CAP (1u << 16)
+#define AOT_DEOPT_TOP_K    16
 
 // Thread-local compiled-call depth for recursion cutoff.
 static _Thread_local u32 AOT_CALL_DEPTH = 0;
@@ -59,8 +61,153 @@ fn void aot_itrs_add(u64 amount) {
 // Fallback
 // --------
 
+typedef enum {
+  AOT_DEOPT_HEAD_APP_ARG_CAP = 0,
+  AOT_DEOPT_HEAD_LAM_ENV_CAP,
+  AOT_DEOPT_HEAD_DUP_ENV_CAP,
+  AOT_DEOPT_EXPR_VAR_LEVEL_OOB,
+  AOT_DEOPT_EXPR_DP_LEVEL_OOB,
+  AOT_DEOPT_EXPR_APP_UNSUPPORTED_FUN,
+  AOT_DEOPT_EXPR_APP_ENV_CAP,
+  AOT_DEOPT_EXPR_APP_ARG_CAPTURE,
+  AOT_DEOPT_EXPR_DUP_ENV_CAP,
+  AOT_DEOPT_EXPR_OP2_RHS_CAPTURE,
+  AOT_DEOPT_EXPR_UNSUPPORTED_TAG,
+  AOT_DEOPT_CALL_DEPTH_CAP,
+  AOT_DEOPT_REASON_COUNT,
+} AotDeoptReason;
+
+static int AOT_DEOPT_ENABLED = -1;
+static u64 AOT_DEOPT_REASON_COUNTS[AOT_DEOPT_REASON_COUNT] = {0};
+static u64 AOT_DEOPT_SITE_COUNTS[AOT_DEOPT_SITE_CAP] = {0};
+static u8  AOT_DEOPT_SITE_REASONS[AOT_DEOPT_SITE_CAP] = {0};
+static u64 AOT_DEOPT_SITE_OVERFLOW = 0;
+
+// Returns one human-readable name for a deopt reason.
+fn const char *aot_deopt_reason_name(u32 reason) {
+  static const char *NAMES[AOT_DEOPT_REASON_COUNT] = {
+    "HEAD_APP_ARG_CAP",
+    "HEAD_LAM_ENV_CAP",
+    "HEAD_DUP_ENV_CAP",
+    "EXPR_VAR_LEVEL_OOB",
+    "EXPR_DP_LEVEL_OOB",
+    "EXPR_APP_UNSUPPORTED_FUN",
+    "EXPR_APP_ENV_CAP",
+    "EXPR_APP_ARG_CAPTURE",
+    "EXPR_DUP_ENV_CAP",
+    "EXPR_OP2_RHS_CAPTURE",
+    "EXPR_UNSUPPORTED_TAG",
+    "CALL_DEPTH_CAP",
+  };
+  if (reason >= AOT_DEOPT_REASON_COUNT) {
+    return "UNKNOWN";
+  }
+  return NAMES[reason];
+}
+
+// Returns 1 when deopt tracing is enabled via HVM_AOT_DEOPT.
+fn int aot_deopt_enabled(void) {
+  int enabled = __atomic_load_n(&AOT_DEOPT_ENABLED, __ATOMIC_RELAXED);
+  if (enabled >= 0) {
+    return enabled;
+  }
+
+  const char *env = getenv("HVM_AOT_DEOPT");
+  enabled = env != NULL && env[0] != '\0' && strcmp(env, "0") != 0;
+  __atomic_store_n(&AOT_DEOPT_ENABLED, enabled, __ATOMIC_RELAXED);
+  return enabled;
+}
+
+// Records one dynamic deopt hit by reason and emission site.
+fn void aot_deopt_hit(u32 reason, u32 site) {
+  if (!aot_deopt_enabled()) {
+    return;
+  }
+
+  if (reason < AOT_DEOPT_REASON_COUNT) {
+    __atomic_fetch_add(&AOT_DEOPT_REASON_COUNTS[reason], 1, __ATOMIC_RELAXED);
+  }
+
+  if (site < AOT_DEOPT_SITE_CAP) {
+    __atomic_fetch_add(&AOT_DEOPT_SITE_COUNTS[site], 1, __ATOMIC_RELAXED);
+    if (reason < AOT_DEOPT_REASON_COUNT) {
+      __atomic_store_n(&AOT_DEOPT_SITE_REASONS[site], (u8)reason, __ATOMIC_RELAXED);
+    }
+  } else {
+    __atomic_fetch_add(&AOT_DEOPT_SITE_OVERFLOW, 1, __ATOMIC_RELAXED);
+  }
+}
+
+// Inserts one (site,hits) pair into descending top-k buffers.
+fn void aot_deopt_top_insert(u32 site, u64 hits, u32 *top_sites, u64 *top_hits) {
+  for (u32 i = 0; i < AOT_DEOPT_TOP_K; i++) {
+    if (hits <= top_hits[i]) {
+      continue;
+    }
+    for (u32 j = AOT_DEOPT_TOP_K - 1; j > i; j--) {
+      top_hits[j]  = top_hits[j - 1];
+      top_sites[j] = top_sites[j - 1];
+    }
+    top_hits[i]  = hits;
+    top_sites[i] = site;
+    return;
+  }
+}
+
+// Prints deopt counters when tracing is enabled.
+fn void aot_deopt_dump(FILE *f) {
+  if (!aot_deopt_enabled()) {
+    return;
+  }
+
+  u64 total = 0;
+  for (u32 reason = 0; reason < AOT_DEOPT_REASON_COUNT; reason++) {
+    total += __atomic_load_n(&AOT_DEOPT_REASON_COUNTS[reason], __ATOMIC_RELAXED);
+  }
+
+  fprintf(f, "AOT_DEOPT total=%llu\n", (unsigned long long)total);
+  if (total == 0) {
+    return;
+  }
+
+  for (u32 reason = 0; reason < AOT_DEOPT_REASON_COUNT; reason++) {
+    u64 count = __atomic_load_n(&AOT_DEOPT_REASON_COUNTS[reason], __ATOMIC_RELAXED);
+    if (count == 0) {
+      continue;
+    }
+    fprintf(f, "AOT_DEOPT reason[%u]=%s hits=%llu\n", reason, aot_deopt_reason_name(reason), (unsigned long long)count);
+  }
+
+  u32 top_sites[AOT_DEOPT_TOP_K] = {0};
+  u64 top_hits[AOT_DEOPT_TOP_K] = {0};
+  for (u32 site = 0; site < AOT_DEOPT_SITE_CAP; site++) {
+    u64 hits = __atomic_load_n(&AOT_DEOPT_SITE_COUNTS[site], __ATOMIC_RELAXED);
+    if (hits == 0) {
+      continue;
+    }
+    aot_deopt_top_insert(site, hits, top_sites, top_hits);
+  }
+
+  if (top_hits[0] != 0) {
+    fprintf(f, "AOT_DEOPT top_sites:\n");
+    for (u32 i = 0; i < AOT_DEOPT_TOP_K; i++) {
+      if (top_hits[i] == 0) {
+        break;
+      }
+      u32 reason = __atomic_load_n(&AOT_DEOPT_SITE_REASONS[top_sites[i]], __ATOMIC_RELAXED);
+      fprintf(f, "AOT_DEOPT site[%u] hits=%llu reason=%s\n", top_sites[i], (unsigned long long)top_hits[i], aot_deopt_reason_name(reason));
+    }
+  }
+
+  u64 overflow = __atomic_load_n(&AOT_DEOPT_SITE_OVERFLOW, __ATOMIC_RELAXED);
+  if (overflow != 0) {
+    fprintf(f, "AOT_DEOPT site_overflow=%llu cap=%u\n", (unsigned long long)overflow, AOT_DEOPT_SITE_CAP);
+  }
+}
+
 // Rebuilds an ALO node from a live lexical environment bind-list head.
-fn Term aot_fallback_alo(u64 tm_loc, u16 len, u64 ls_loc) {
+fn Term aot_fallback_alo(u64 tm_loc, u16 len, u64 ls_loc, u32 reason, u32 site) {
+  aot_deopt_hit(reason, site);
   return term_new_alo(ls_loc, len, tm_loc);
 }
 
