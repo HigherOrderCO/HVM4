@@ -1,73 +1,73 @@
-Round 9 (2026-02-26)
+Round 10 (2026-02-26)
 
 What changed this round (landed)
 - Landed code changes in:
-  - `clang/aot/emit.c`
-- Two targeted AOT reductions:
-  1) OP2 strict forcing upgraded from DP-only to full strict helper:
-     - In head `OP2`, both strict operands now call `aot_force_strict(term, *s_pos)`
-       (lhs always; rhs only in lhs==NUM branch).
-     - This lets compiled OP2 WHNF-force `APP/ALO/REF` (plus bounded DP forcing)
-       before deciding numeric fast-path vs residual OP2.
-  2) Expression APP special-case for static REF fun:
-     - `head=0` APP now recognizes `fun_tag == REF` and emits
-       `term_new_app(heap_read(fun_loc), captured_arg)` directly.
-     - This avoids whole-node `EXPR_APP_UNSUPPORTED_FUN` fallback for the common
-       `@f(arg)` shape while preserving laziness of the argument via captured ALO.
+  - `clang/aot/_.c`
+- Two runtime-side improvements:
+  1) Added depth accounting/guard to `aot_try_call`:
+     - New limit `AOT_TRY_CALL_MAX_DEPTH=1024`.
+     - `aot_try_call` now checks depth cap and increments/decrements `AOT_CALL_DEPTH`
+       around direct compiled calls from `wnf` REF dispatch.
+     - This closes a latent safety hole where `aot_try_call` previously bypassed
+       depth tracking used by `aot_call_ref`.
+  2) Split fallback telemetry into true deopts vs intentional residualization:
+     - New residual counters for reasons/sites/overflow.
+     - `aot_deopt_reason_is_residual()` classifies:
+       - `EXPR_APP_ARG_CAPTURE`
+       - `EXPR_OP2_RHS_CAPTURE`
+     - `aot_deopt_dump()` now prints both streams:
+       - `AOT_DEOPT ...` (hard bailouts/mismatches)
+       - `AOT_RESID ...` (planned lazy captures)
+     - Top-site reporting and reason breakdown preserved for both streams.
 
-Why
-- Post-round-8 deopt hotspots were:
-  - `EXPR_APP_UNSUPPORTED_FUN`
-  - `EXPR_OP2_RHS_CAPTURE`
-- On `gab_tak`/`gab_takl`, both came from the same strict OP2 frontier where lhs
-  was an APP with REF head (`@len(_) + 1` pattern). The new APP(REF,...) emit path
-  removes the unsupported-fun fallback there; stricter OP2 forcing resolves many
-  APP/REF lhs terms to NUM and avoids RHS-capture fallback.
+Important failed attempt (reverted before landing)
+- I temporarily re-enabled compiled REF calls inside `aot_force_whnf_local`
+  (removed local `AOT_TRY_CALL_ENABLED=0` gate), using only depth bounds.
+- Result: deopt explosion on strict MAT mismatch sites:
+  - `gab_tak`: deopt total jumped to `2840`
+  - `gab_takl`: deopt total jumped to `8,349,770`
+  - dominant reason: `EXPR_UNSUPPORTED_TAG` at `HEAD_MAT_NON_CTR` strict sites.
+- Although correctness stayed intact, telemetry quality regressed badly and this is not
+  a stable path yet. I restored the force-local gate.
 
 Validation
 - Rebuild passes:
   - `cd clang && clang -O2 -o main main.c`
 - Full suite passes:
   - `./test/_all_.sh` (interpreted + AOT)
-- Regression check still good:
-  - `./clang/main test/match_recursive_arg.hvm --as-c -C` => `#Z{}`
 - Parity (hvmi == hvmc `--as-c`) passes on:
   - `../bench/bench/gab_deriv/main.hvm`
   - `../bench/bench/gen_easy/main.hvm -C1`
   - `../bench/bench/gab_tak/main.hvm`
   - `../bench/bench/gab_takl/main.hvm`
-- Deopt snapshots (`HVM_AOT_DEOPT=1`, serial `--as-c`):
-  - `gab_tak`: total `2`
-    - `EXPR_APP_UNSUPPORTED_FUN=1`
-    - `EXPR_APP_ARG_CAPTURE=1`
-  - `gab_takl`: total `2`
-    - `EXPR_APP_UNSUPPORTED_FUN=1`
-    - `EXPR_APP_ARG_CAPTURE=1`
-- Prior round comparison:
-  - `gab_tak`: `113` -> `2`
-  - `gab_takl`: `519` -> `2`
-  - both former dominant reasons collapsed.
+- Deopt/resid snapshots (`HVM_AOT_DEOPT=1`, serial `--as-c`):
+  - `gab_tak`:
+    - `AOT_DEOPT total=1` (`EXPR_APP_UNSUPPORTED_FUN=1`)
+    - `AOT_RESID total=1` (`EXPR_APP_ARG_CAPTURE=1`)
+  - `gab_takl`:
+    - `AOT_DEOPT total=1` (`EXPR_APP_UNSUPPORTED_FUN=1`)
+    - `AOT_RESID total=1` (`EXPR_APP_ARG_CAPTURE=1`)
 
 Quick perf snapshot (single-run `-s -C`)
-- `gab_tak`: hvmi ~0.002s, hvmc ~0.001s
-- `gab_takl`: hvmi ~1.768s, hvmc ~1.670s
-- Not admission-grade yet, but direction improved and hvmc is now ahead on these probes.
+- `gab_tak`: hvmi ~0.001s, hvmc ~0.001s
+- `gab_takl`: hvmi ~1.971s, hvmc ~1.840s
+- Still far from admission target; this round mainly improved observability/safety.
 
 Operational notes
-- `--as-c` artifact path remains deterministic (`/tmp/hvm4-aot-as-c.main.{c,bin}` style);
-  keep deopt/parity probes serial.
-- Do not compare parity with `-s`; stats lines include time/heap and differ naturally.
+- `--as-c` artifact path remains deterministic; keep parity/deopt probes serial.
+- Force-local compiled REF re-entry remains disabled for now; depth-only re-enable
+  is not sufficient with current strict MAT handling.
 
 Lessons
-- Tight strict forcing in true strict contexts (OP2 operands, match scrutinees) is
-  high-value and safe when mismatch/writeback contracts are preserved.
-- Eliminating whole-expression ALO fallback for safe structural cases (APP with static REF)
-  can remove large deopt pressure without violating laziness on arguments.
+- Deopt counters were mixing two different phenomena (bailout vs planned laziness).
+  Splitting them makes hotspot triage reliable again.
+- Re-enabling compiled calls inside local WHNF force requires an explicit semantic
+  contract for strict mismatch continuation, not just depth limits.
 
 Next likely steps
-- Track the remaining singleton `EXPR_APP_UNSUPPORTED_FUN` sites (now easy to inspect)
-  and classify whether they should become safe structured emits.
-- Add residualization telemetry separate from deopt telemetry, so expected ALO captures
-  (like `EXPR_APP_ARG_CAPTURE`) don’t hide true bailout causes.
-- Revisit force-local REF policy with a bounded compiled-call contract (depth/fuel), but
-  keep the current recursion-safe behavior until that contract is implemented and proven.
+- Investigate the remaining singleton `EXPR_APP_UNSUPPORTED_FUN` site (now isolated as
+  the only true deopt in `gab_tak*`) and classify safe emission rule(s).
+- Keep force-local REF policy conservative until a bounded contract/trampoline design
+  is specified and proven on `match_recursive_arg`-style recursion.
+- Run `HVM_AOT_DEOPT=1` across broader admission benches using the new split stream to
+  identify top true deopts (not residual captures).

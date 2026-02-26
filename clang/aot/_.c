@@ -38,6 +38,7 @@ static HvmAotFn AOT_FNS[BOOK_CAP] = {0};
 #define AOT_ARG_CAP   64
 #define AOT_ENV_CAP   16
 #define AOT_MAX_DEPTH 4096
+#define AOT_TRY_CALL_MAX_DEPTH 1024
 #define AOT_FORCE_DUP_FUEL 32
 #define AOT_DEOPT_SITE_CAP (1u << 16)
 #define AOT_DEOPT_TOP_K    16
@@ -88,12 +89,15 @@ typedef enum {
 
 static int AOT_DEOPT_ENABLED = -1;
 static u64 AOT_DEOPT_REASON_COUNTS[AOT_DEOPT_REASON_COUNT] = {0};
+static u64 AOT_RESID_REASON_COUNTS[AOT_DEOPT_REASON_COUNT] = {0};
 static u64 AOT_DEOPT_SITE_COUNTS[AOT_DEOPT_SITE_CAP] = {0};
+static u64 AOT_RESID_SITE_COUNTS[AOT_DEOPT_SITE_CAP] = {0};
 static u8  AOT_DEOPT_SITE_REASONS[AOT_DEOPT_SITE_CAP] = {0};
 static u8  AOT_DEOPT_SITE_KINDS[AOT_DEOPT_SITE_CAP] = {0};
 static u64 AOT_DEOPT_SITE_LOCS[AOT_DEOPT_SITE_CAP] = {0};
 static u32 AOT_DEOPT_SITE_AUX[AOT_DEOPT_SITE_CAP] = {0};
 static u64 AOT_DEOPT_SITE_OVERFLOW = 0;
+static u64 AOT_RESID_SITE_OVERFLOW = 0;
 
 // Returns one human-readable name for a deopt reason.
 fn const char *aot_deopt_reason_name(u32 reason) {
@@ -130,6 +134,11 @@ fn const char *aot_deopt_site_kind_name(u32 kind) {
   return NAMES[kind];
 }
 
+// Returns 1 when one reason is intentional residualization, not a hard bailout.
+fn int aot_deopt_reason_is_residual(u32 reason) {
+  return reason == AOT_DEOPT_EXPR_APP_ARG_CAPTURE || reason == AOT_DEOPT_EXPR_OP2_RHS_CAPTURE;
+}
+
 // Returns 1 when deopt tracing is enabled via HVM_AOT_DEOPT.
 fn int aot_deopt_enabled(void) {
   int enabled = __atomic_load_n(&AOT_DEOPT_ENABLED, __ATOMIC_RELAXED);
@@ -143,23 +152,37 @@ fn int aot_deopt_enabled(void) {
   return enabled;
 }
 
-// Records one dynamic deopt hit by reason and emission site.
+// Records one runtime fallback event by reason and emission site.
 fn void aot_deopt_hit(u32 reason, u32 site) {
   if (!aot_deopt_enabled()) {
     return;
   }
 
+  int residual = aot_deopt_reason_is_residual(reason);
+
   if (reason < AOT_DEOPT_REASON_COUNT) {
-    __atomic_fetch_add(&AOT_DEOPT_REASON_COUNTS[reason], 1, __ATOMIC_RELAXED);
+    if (residual) {
+      __atomic_fetch_add(&AOT_RESID_REASON_COUNTS[reason], 1, __ATOMIC_RELAXED);
+    } else {
+      __atomic_fetch_add(&AOT_DEOPT_REASON_COUNTS[reason], 1, __ATOMIC_RELAXED);
+    }
   }
 
   if (site < AOT_DEOPT_SITE_CAP) {
-    __atomic_fetch_add(&AOT_DEOPT_SITE_COUNTS[site], 1, __ATOMIC_RELAXED);
+    if (residual) {
+      __atomic_fetch_add(&AOT_RESID_SITE_COUNTS[site], 1, __ATOMIC_RELAXED);
+    } else {
+      __atomic_fetch_add(&AOT_DEOPT_SITE_COUNTS[site], 1, __ATOMIC_RELAXED);
+    }
     if (reason < AOT_DEOPT_REASON_COUNT) {
       __atomic_store_n(&AOT_DEOPT_SITE_REASONS[site], (u8)reason, __ATOMIC_RELAXED);
     }
   } else {
-    __atomic_fetch_add(&AOT_DEOPT_SITE_OVERFLOW, 1, __ATOMIC_RELAXED);
+    if (residual) {
+      __atomic_fetch_add(&AOT_RESID_SITE_OVERFLOW, 1, __ATOMIC_RELAXED);
+    } else {
+      __atomic_fetch_add(&AOT_DEOPT_SITE_OVERFLOW, 1, __ATOMIC_RELAXED);
+    }
   }
 }
 
@@ -191,70 +214,94 @@ fn void aot_deopt_top_insert(u32 site, u64 hits, u32 *top_sites, u64 *top_hits) 
   }
 }
 
-// Prints deopt counters when tracing is enabled.
-fn void aot_deopt_dump(FILE *f) {
-  if (!aot_deopt_enabled()) {
-    return;
-  }
-
+// Sums one reason-counter vector.
+fn u64 aot_deopt_reason_total(const u64 *counts) {
   u64 total = 0;
   for (u32 reason = 0; reason < AOT_DEOPT_REASON_COUNT; reason++) {
-    total += __atomic_load_n(&AOT_DEOPT_REASON_COUNTS[reason], __ATOMIC_RELAXED);
+    total += __atomic_load_n(&counts[reason], __ATOMIC_RELAXED);
   }
+  return total;
+}
 
-  fprintf(f, "AOT_DEOPT total=%llu\n", (unsigned long long)total);
-  if (total == 0) {
-    return;
-  }
-
+// Prints reason counters for one telemetry stream.
+fn void aot_deopt_dump_reasons(FILE *f, const char *prefix, const u64 *counts) {
   for (u32 reason = 0; reason < AOT_DEOPT_REASON_COUNT; reason++) {
-    u64 count = __atomic_load_n(&AOT_DEOPT_REASON_COUNTS[reason], __ATOMIC_RELAXED);
+    u64 count = __atomic_load_n(&counts[reason], __ATOMIC_RELAXED);
     if (count == 0) {
       continue;
     }
-    fprintf(f, "AOT_DEOPT reason[%u]=%s hits=%llu\n", reason, aot_deopt_reason_name(reason), (unsigned long long)count);
+    fprintf(f, "%s reason[%u]=%s hits=%llu\n", prefix, reason, aot_deopt_reason_name(reason), (unsigned long long)count);
   }
+}
 
+// Prints top emission sites for one telemetry stream.
+fn void aot_deopt_dump_top_sites(FILE *f, const char *prefix, const u64 *site_counts) {
   u32 top_sites[AOT_DEOPT_TOP_K] = {0};
   u64 top_hits[AOT_DEOPT_TOP_K] = {0};
   for (u32 site = 0; site < AOT_DEOPT_SITE_CAP; site++) {
-    u64 hits = __atomic_load_n(&AOT_DEOPT_SITE_COUNTS[site], __ATOMIC_RELAXED);
+    u64 hits = __atomic_load_n(&site_counts[site], __ATOMIC_RELAXED);
     if (hits == 0) {
       continue;
     }
     aot_deopt_top_insert(site, hits, top_sites, top_hits);
   }
 
-  if (top_hits[0] != 0) {
-    fprintf(f, "AOT_DEOPT top_sites:\n");
-    for (u32 i = 0; i < AOT_DEOPT_TOP_K; i++) {
-      if (top_hits[i] == 0) {
-        break;
-      }
-      u32 site   = top_sites[i];
-      u32 reason = __atomic_load_n(&AOT_DEOPT_SITE_REASONS[site], __ATOMIC_RELAXED);
-      u32 kind   = __atomic_load_n(&AOT_DEOPT_SITE_KINDS[site], __ATOMIC_RELAXED);
-      u64 loc    = __atomic_load_n(&AOT_DEOPT_SITE_LOCS[site], __ATOMIC_RELAXED);
-      u32 aux    = __atomic_load_n(&AOT_DEOPT_SITE_AUX[site], __ATOMIC_RELAXED);
+  if (top_hits[0] == 0) {
+    return;
+  }
 
-      fprintf(f, "AOT_DEOPT site[%u] hits=%llu reason=%s", site, (unsigned long long)top_hits[i], aot_deopt_reason_name(reason));
-      if (kind != AOT_DEOPT_SITE_KIND_NONE || loc != 0 || aux != 0) {
-        fprintf(f, " kind=%s loc=%llu", aot_deopt_site_kind_name(kind), (unsigned long long)loc);
-        if (kind == AOT_DEOPT_SITE_KIND_HEAD_SWI_NON_NUM) {
-          fprintf(f, " expect_num=%u", aux);
-        } else if (kind == AOT_DEOPT_SITE_KIND_HEAD_MAT_NON_CTR) {
-          fprintf(f, " expect_ctr_ext=%u", aux);
-        } else if (aux != 0) {
-          fprintf(f, " aux=%u", aux);
-        }
+  fprintf(f, "%s top_sites:\n", prefix);
+  for (u32 i = 0; i < AOT_DEOPT_TOP_K; i++) {
+    if (top_hits[i] == 0) {
+      break;
+    }
+    u32 site   = top_sites[i];
+    u32 reason = __atomic_load_n(&AOT_DEOPT_SITE_REASONS[site], __ATOMIC_RELAXED);
+    u32 kind   = __atomic_load_n(&AOT_DEOPT_SITE_KINDS[site], __ATOMIC_RELAXED);
+    u64 loc    = __atomic_load_n(&AOT_DEOPT_SITE_LOCS[site], __ATOMIC_RELAXED);
+    u32 aux    = __atomic_load_n(&AOT_DEOPT_SITE_AUX[site], __ATOMIC_RELAXED);
+
+    fprintf(f, "%s site[%u] hits=%llu reason=%s", prefix, site, (unsigned long long)top_hits[i], aot_deopt_reason_name(reason));
+    if (kind != AOT_DEOPT_SITE_KIND_NONE || loc != 0 || aux != 0) {
+      fprintf(f, " kind=%s loc=%llu", aot_deopt_site_kind_name(kind), (unsigned long long)loc);
+      if (kind == AOT_DEOPT_SITE_KIND_HEAD_SWI_NON_NUM) {
+        fprintf(f, " expect_num=%u", aux);
+      } else if (kind == AOT_DEOPT_SITE_KIND_HEAD_MAT_NON_CTR) {
+        fprintf(f, " expect_ctr_ext=%u", aux);
+      } else if (aux != 0) {
+        fprintf(f, " aux=%u", aux);
       }
-      fprintf(f, "\n");
+    }
+    fprintf(f, "\n");
+  }
+}
+
+// Prints deopt counters when tracing is enabled.
+fn void aot_deopt_dump(FILE *f) {
+  if (!aot_deopt_enabled()) {
+    return;
+  }
+
+  u64 deopt_total = aot_deopt_reason_total(AOT_DEOPT_REASON_COUNTS);
+  fprintf(f, "AOT_DEOPT total=%llu\n", (unsigned long long)deopt_total);
+  if (deopt_total != 0) {
+    aot_deopt_dump_reasons(f, "AOT_DEOPT", AOT_DEOPT_REASON_COUNTS);
+    aot_deopt_dump_top_sites(f, "AOT_DEOPT", AOT_DEOPT_SITE_COUNTS);
+    u64 overflow = __atomic_load_n(&AOT_DEOPT_SITE_OVERFLOW, __ATOMIC_RELAXED);
+    if (overflow != 0) {
+      fprintf(f, "AOT_DEOPT site_overflow=%llu cap=%u\n", (unsigned long long)overflow, AOT_DEOPT_SITE_CAP);
     }
   }
 
-  u64 overflow = __atomic_load_n(&AOT_DEOPT_SITE_OVERFLOW, __ATOMIC_RELAXED);
-  if (overflow != 0) {
-    fprintf(f, "AOT_DEOPT site_overflow=%llu cap=%u\n", (unsigned long long)overflow, AOT_DEOPT_SITE_CAP);
+  u64 resid_total = aot_deopt_reason_total(AOT_RESID_REASON_COUNTS);
+  fprintf(f, "AOT_RESID total=%llu\n", (unsigned long long)resid_total);
+  if (resid_total != 0) {
+    aot_deopt_dump_reasons(f, "AOT_RESID", AOT_RESID_REASON_COUNTS);
+    aot_deopt_dump_top_sites(f, "AOT_RESID", AOT_RESID_SITE_COUNTS);
+    u64 overflow = __atomic_load_n(&AOT_RESID_SITE_OVERFLOW, __ATOMIC_RELAXED);
+    if (overflow != 0) {
+      fprintf(f, "AOT_RESID site_overflow=%llu cap=%u\n", (unsigned long long)overflow, AOT_DEOPT_SITE_CAP);
+    }
   }
 }
 
@@ -424,6 +471,10 @@ fn int aot_try_call(u32 id, Term *stack, u32 *s_pos, u32 base, Term *out) {
     return 0;
   }
 
+  if (AOT_CALL_DEPTH >= AOT_TRY_CALL_MAX_DEPTH || AOT_CALL_DEPTH >= AOT_MAX_DEPTH) {
+    return 0;
+  }
+
   if (STEPS_ITRS_LIM != 0) {
     return 0;
   }
@@ -437,7 +488,9 @@ fn int aot_try_call(u32 id, Term *stack, u32 *s_pos, u32 base, Term *out) {
     return 0;
   }
 
+  AOT_CALL_DEPTH++;
   *out = fun(stack, s_pos, base);
+  AOT_CALL_DEPTH--;
   return 1;
 }
 

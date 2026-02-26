@@ -1,25 +1,35 @@
-1) Strict-force REF policy: what is the canonical bounded compiled-call contract?
+1) Strict local forcing + compiled REF re-entry: what exact contract should we implement?
 
 Context:
-- Round 8 introduced strict local WHNF forcing (`aot_force_whnf_local`) for strict heads.
-- Unbounded compiled REF re-entry caused stack overflow on `test/match_recursive_arg`.
-- Current fix disables `aot_try_call` during local forcing (`AOT_TRY_CALL_ENABLED=0` in force mode), which is safe and passing.
-- Round 9 kept that safety gate and improved strict OP2 forcing, but force-local REF is still interpreter-only.
+- Current stable behavior: `aot_force_whnf_local` disables `aot_try_call` while forcing,
+  so REF expansion in local strict forcing runs via interpreter path; this avoids recursion
+  hazards and passes all tests.
+- This round I tried a bounded variant: keep compiled calls enabled in local force, add
+  depth accounting to `aot_try_call` (`AOT_TRY_CALL_MAX_DEPTH=1024`, increment/decrement).
+- Result was correctness-preserving but operationally bad: strict MAT mismatch deopts
+  exploded (`gab_tak` 2840, `gab_takl` 8,349,770; dominant `EXPR_UNSUPPORTED_TAG`
+  at `HEAD_MAT_NON_CTR` sites). I reverted that part.
 
 Precise question:
-- In strict local forcing mode, should compiled REF calls be:
-  1) always disabled (current),
-  2) allowed under explicit depth/fuel bounds,
-  3) handled by a different trampoline mechanism?
-- Please specify the exact intended invariant and one concrete pseudo-flow for recursive case-trees (`mat_self`-like) so we can implement it without C-stack blowups.
+- For strict local forcing, should compiled REF calls be:
+  1) always disabled (current conservative policy),
+  2) enabled only under additional shape constraints (which exact constraints?), or
+  3) enabled with a different execution model (e.g., trampoline)?
+- Please provide one concrete expected flow for a recursive case-tree where scrutinee
+  forcing crosses REF boundaries, including what value must be returned to mismatch/default
+  branches at each step.
 
-2) Telemetry contract: should expected expression captures count as deopts?
+2) Remaining singleton true deopt: what APP-fun shapes are safe to compile next?
 
 Context:
-- Round 9 collapsed `gab_tak`/`gab_takl` deopts from 113/519 to 2/2.
-- Remaining hits are `EXPR_APP_ARG_CAPTURE`, which correspond to intentional lazy capture of APP arguments via ALO in expression mode.
-- These are not necessarily runtime mismatches; they are often planned residualization steps.
+- After recent emitter work and telemetry split, `gab_tak` and `gab_takl` now show:
+  - `AOT_DEOPT total=1`: only `EXPR_APP_UNSUPPORTED_FUN`
+  - `AOT_RESID total=1`: `EXPR_APP_ARG_CAPTURE`
+- The APP(REF,arg) expression case is already emitted directly; the remaining unsupported
+  APP site is a different fun-tag shape.
 
 Precise question:
-- Should planned captures/residualization (like APP argument capture) remain in deopt counters, or be tracked in a separate residualization metric?
-- If separate, what categories are most useful for guiding compiler redesign (e.g., APP arg capture, OP2 delayed rhs, generic expression ALO, etc.)?
+- Which non-LAM APP fun tags should be considered safe for direct compiled emission in
+  expression mode (without violating laziness/linearity)?
+- If the intended direction is an apply-whitelist, what minimal tag set should be first
+  (`LAM`, `SUP`, `ERA`, `INC`, `MAT`?), and which must stay fallback-only for now?
