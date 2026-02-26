@@ -1,33 +1,17 @@
-Round 4 (2026-02-26)
+Round 5 (2026-02-26)
 
 What changed this round
-- Files changed: `clang/aot/_.c`, `clang/aot/emit.c`, `clang/runtime/eval_main.c`.
-- Added dynamic AOT deopt instrumentation with reason + site IDs.
-- `aot_fallback_alo` now records `reason` and `site`:
-  - old: `aot_fallback_alo(tm_loc, len, ls_loc)`
-  - new: `aot_fallback_alo(tm_loc, len, ls_loc, reason, site)`
-- Emitter now assigns one monotonic deopt site ID per emitted fallback call and passes a reason enum.
-- Added runtime counters in `clang/aot/_.c`:
-  - per-reason hit counts,
-  - per-site hit counts,
-  - per-site last reason,
-  - overflow counter when site ID exceeds cap (`AOT_DEOPT_SITE_CAP=65536`).
-- Added gated reporting (`HVM_AOT_DEOPT` env var):
-  - when enabled, prints deopt totals/reasons/top sites to `stderr` at end of `runtime_eval_main`.
+- Final code change: `clang/aot/emit.c` only.
+- Added inline DUP forcing in compiled strict `OP2` paths:
+  - after emitting lhs (`arg+0`), if lhs is `DP0/DP1`, emit `lhs = aot_force_dup(lhs)`;
+  - in the `lhs == NUM` branch, after emitting rhs (`arg+1`), if rhs is `DP0/DP1`, emit `rhs = aot_force_dup(rhs)`.
+- This follows expert guidance A1: when strict local WNF touches env-bound DP vars, try inline DUP interactions first instead of dropping to interpreter behavior.
 
-Reason taxonomy currently emitted
-- `HEAD_APP_ARG_CAP`
-- `HEAD_LAM_ENV_CAP`
-- `HEAD_DUP_ENV_CAP`
-- `EXPR_VAR_LEVEL_OOB`
-- `EXPR_DP_LEVEL_OOB`
-- `EXPR_APP_UNSUPPORTED_FUN`
-- `EXPR_APP_ENV_CAP`
-- `EXPR_APP_ARG_CAPTURE`
-- `EXPR_DUP_ENV_CAP`
-- `EXPR_OP2_RHS_CAPTURE`
-- `EXPR_UNSUPPORTED_TAG`
-- `CALL_DEPTH_CAP`
+Attempted but reverted (important)
+- I implemented a broader strict helper in `clang/aot/_.c` (`aot_force_strict`) that forced `DP` + opened `ALO` and wired it into head `SWI/MAT/OP2`.
+- This was UNSAFE: AOT tests regressed immediately (`collapse_supgen_mul`, `enum_primes`, `factorial`, `fib*`), including segfaults and `cannot apply a number` runtime errors.
+- Root lesson: naively opening ALO at strict sites breaks invariants; broad strict forcing should not be reintroduced without a much tighter correctness model.
+- Reverted all of that, restored previous `SWI/MAT` behavior, kept only OP2 DP forcing.
 
 Validation on final state
 - Rebuilt: `cd clang && clang -O2 -o main main.c`.
@@ -37,27 +21,23 @@ Validation on final state
   - `../bench/bench/gen_easy/main.hvm -C1`
   - `../bench/bench/gab_tak/main.hvm`
   - `../bench/bench/gab_takl/main.hvm`
-- Static fallback site count (unchanged shape):
-  - `./clang/main ../bench/bench/gab_tak/main.hvm --to-c | rg -c "aot_fallback_alo\("` => `90`.
 
-New empirical data (dynamic, with `HVM_AOT_DEOPT=1`)
-- `gab_tak --as-c`:
-  - total deopts: `5544`
-  - reasons: `EXPR_UNSUPPORTED_TAG=5434`, `HEAD_APP_ARG_CAP=103`, `EXPR_APP_UNSUPPORTED_FUN=7`
-  - hottest site: `site[12]=5196`, mapped to MAT strict check fallback (`tag < C00 || tag > C16`).
-- `gab_takl --as-c`:
-  - total deopts: `16678507`
-  - reasons: `EXPR_UNSUPPORTED_TAG=16614897`, `HEAD_APP_ARG_CAP=63592`, `EXPR_APP_UNSUPPORTED_FUN=18`
-  - hottest site: `site[24]=16502527`, same MAT strict check fallback shape.
+Deopt counters (unchanged hotspot)
+- `HVM_AOT_DEOPT=1` still reports:
+  - `gab_tak`: total `5544`, dominant `EXPR_UNSUPPORTED_TAG=5434`, hottest `site[12]=5196`.
+  - `gab_takl`: total `16678507`, dominant `EXPR_UNSUPPORTED_TAG=16614897`, hottest `site[24]=16502527`.
+- Conclusion: this round’s OP2-DP improvement is correctness-safe and local, but does not target the tak/takl dominant strict-MAT hotspot.
 
-Key insight
-- The dominant remaining runtime loss is not DP dispatch itself; it is strict MAT/SWI paths that reach non-constructor scrutinee tags and then deopt via `aot_emit_ret_head` -> expression-mode `MAT` fallback (`EXPR_UNSUPPORTED_TAG`).
-- This confirms priority should move from DP-only forcing to a bounded strict-whnf strategy for non-constructor scrutinees (likely ALO/APP/SUP chain handling), with hard guards for correctness.
+Concrete evidence of new emission
+- `./clang/main test/dup_fresh.hvm --to-c` now emits DP forcing in OP2:
+  - `lhs_1 = aot_force_dup(lhs_1);`
+  - `rhs_2 = aot_force_dup(rhs_2);`
+- `HVM_AOT_DEOPT=1 ./clang/main test/dup_fresh.hvm --as-c` => `AOT_DEOPT total=0`.
 
 Operational notes
-- Deterministic `--as-c` temp binary path (`hvm4-aot-as-c.main.bin`) still collides across concurrent runs; keep `--as-c` benchmark probes serial.
-- Deopt report is opt-in; no stdout behavior change when `HVM_AOT_DEOPT` is unset.
+- `--as-c` temp binary path remains deterministic (`hvm4-aot-as-c.main.bin`): keep probes serial.
 
 Next likely step
-- Add bounded strict scrutinee forcing beyond DP (`ALO`/`APP` first), but only by reusing existing runtime interaction helpers and fuel guards.
-- Add a dedicated deopt reason for strict-match scrutinee-tag mismatch in head mode so this hotspot no longer hides behind generic `EXPR_UNSUPPORTED_TAG`.
+- Keep strict forcing DP-focused unless a precisely scoped safe ALO/APP-LAM rule is proven.
+- Add stricter observability for strict-match deopts (dedicated reason/site metadata for head MAT/SWI tag-mismatch path) before another forcing attempt.
+- Revisit `AOT_ARG_CAP` policy after strict-match hotspot is instrumented more explicitly.

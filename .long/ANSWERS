@@ -1,41 +1,32 @@
-# A1: Yes, focus on inline DUP interactions in compiled mode
+# A1: ALO should NEVER block a fast path. This is a fundamental misunderstanding.
 
-Yes, this is the right next step. Here's the reasoning (from Taelin, verbatim):
+ALO is ALWAYS a reducible term. wnf() of an ALO always unrolls it. There should
+be absolutely NO situation where an ALO blocks an inline fast-path interaction.
 
-Consider:
+If your compiled code hits an ALO where it expects a constructor or number, the
+answer is simple: reduce it. ALO is just a lazy reference -- expand it. This is
+not optional or a "forcing strategy choice". It's mandatory. An ALO in a strict
+position must always be unrolled before checking tags.
 
-  foo = λx. ! X &L = x; X₀ + X₁
+What COULD legitimately block a fast path is an actual unsupported interaction,
+like:
 
-What do we want that to compile to? Probably:
+  lam{...}(&L{a,b})  -- i.e., APP-MAT-SUP
 
-  Term foo() {
-    Term x = ... pop app from the stack ...
-    ... here, I suppose we add X <- dup(&L,x) to the env (is that how it is doing?) ...
-    ... now, what to do here? ...
-    ... if there is a fast path for OP2, we should check if wnf(X₀) is a NUM, then check if wnf(X₁) is a NUM
-    ... so, my understanding is that, the way it implemented DUP's, at the point we take wnf(X₀), it would
-    ... fallback to ALO's (since we can't call wnf() of something in the environment! is that right? if so,
-    ... I'd say that, yes, whenever it attempts to do a "local wnf", if the target is a local-env-bound DP,
-    ... and if that local-env-bound DP holds a NUM or CTR (perhaps futurely even LAM's etc.?), it SHOULD do
-    ... an inline DUP-XYZ interaction. this will copy the NUM or the head of the CTR into two registers,
-    ... say, X0 and X1. now, since these are now new registers, then, the OP2 compiler may check their tags,
-    ... so that it moves to the fast path if they're NUM's. so we'd have something like:
+That's a SUP hitting a pattern match, which requires interaction-net-level
+superposition distribution. We do NOT optimize for that, and deopting there is
+correct.
 
-    Dups X  = inline_dup(1, x); // 1 = "we will wnf this", so, we DO an inline dup if x is a NUM, CTR, etc.
-    Term X0 = new_num(X.dp0);
-    Term X1 = new_num(X.dp1);
-    if (get_tag(X0) == NUM && get_tag(X1) == NUM) {
-      return ... direct addition ...
-    }
-    ... otherwise, fall back ...
+But deopting on ALO is a bug, not a design choice. Fix it.
 
-The details may be wrong, but the reasoning is solid. The key idea: when compiled
-code hits a DP variable from the env, and it needs to reduce it (e.g. because
-an OP2 or SWI needs its value), it should try to do an inline DUP interaction
-right there if the value is a NUM, CTR, etc. -- rather than falling back to the
-interpreter. This keeps us in compiled mode through DUP-heavy hot paths.
+# A2: AOT_ARG_CAP is your code, your decision
 
-# A2: Yes, the APP-LAM expression-mode approach is correct
+AOT_ARG_CAP and AOT_ENV_CAP were introduced by you (a past AI iteration) in
+commit 6427086. They are not part of the original codebase. You own this code
+fully.
 
-The approach of capturing arg as an ALO in the env (essentially treating
-expression-position APP-LAM as a let binding) is exactly right. Keep it.
+Do not ask me about constants you introduced. You are in charge of deciding
+whether to raise the cap, remove it, or restructure the emission. Use your
+understanding of the generated C code and the benchmark deopt counters to make
+that call. If the cap is causing deopts on hot paths, fix it however you see
+fit.

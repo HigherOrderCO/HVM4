@@ -1,37 +1,35 @@
-1) Strict-match forcing scope: which extra interactions are considered semantically safe to run in compiled mode before deopting?
+1) Strict MAT/SWI forcing subset after failed ALO attempt
 
 Context:
-- I added dynamic deopt counters keyed by reason+site.
-- On `gab_tak` and `gab_takl`, the dominant reason is now clear: `EXPR_UNSUPPORTED_TAG` from strict `MAT` checks where scrutinee tag is not `C00..C16`.
-- Hottest examples in generated C are sites like:
-  - `if (tag_3 < C00 || tag_3 > C16) { Term head_10 = aot_fallback_alo(..., 10, 24); return head_10; }`
-- Current strict forcing only special-cases `DP0/DP1` via `aot_force_dup`; it does not force ALO/APP/SUP frontiers before MAT/SWI checks.
+- Current dominant deopt in `gab_tak` / `gab_takl` is still strict-match tag mismatch fallback (`EXPR_UNSUPPORTED_TAG` at MAT checks).
+- I attempted a bounded helper that forced strict scrutinees by handling `DP` plus opening `ALO` (using `wnf_alo_*`) before MAT/SWI checks.
+- That change caused severe AOT regressions (wrong results + segfaults in `collapse_supgen_mul`, `enum_primes`, `factorial`, `fib*`) and was reverted.
+- Final safe state now keeps only DP forcing (`aot_force_dup`) and OP2-local DP forcing.
 
 Question:
-- For strict case-tree compilation, what is the preferred next safe subset to force in compiled mode before deopting?
-  1) ALO expansion only,
-  2) ALO + APP-LAM one-step,
-  3) ALO + APP-LAM + REF-call,
-  4) include SUP distribution too,
-  5) another subset.
-- If possible, please rank by correctness risk vs expected benchmark impact.
+- For strict match in compiled mode, what exact next forcing subset is semantically safe?
+  1) DP-only (status quo),
+  2) DP + very specific ALO case(s) only,
+  3) DP + APP-LAM only when fun is statically proven LAM,
+  4) another narrowly-scoped rule.
+- Please provide one concrete "safe first" rule with a disallowed list, so I can implement without repeating regressions.
 
 Why this matters:
-- The counters show this is now the dominant blocker; picking the wrong forcing subset risks repeating prior “cannot apply constructor/number” regressions.
+- We need to reduce the strict-match deopt hotspot, but broad forcing is demonstrably unsafe.
 
-2) `AOT_ARG_CAP` policy: should we increase cap or redesign stack pressure in compiled head APP chains?
+2) `AOT_ARG_CAP` policy for compiled head APP chains
 
 Context:
-- Dynamic deopts also show non-trivial `HEAD_APP_ARG_CAP` hits (`gab_tak`: 103, `gab_takl`: 63592).
-- Current cap is fixed at 16 (`AOT_ARG_CAP`), and generated APP-heavy recursive paths can exceed it.
-- Increasing the cap may reduce deopts but can hide deeper codegen shape issues and increase stack/memory pressure.
+- Deopt counters still show `HEAD_APP_ARG_CAP` hits (`gab_tak`: 103, `gab_takl`: 63592).
+- Current cap is fixed at 16.
+- Raising cap could cut deopts quickly but may paper over structural issues.
 
 Question:
-- Do you prefer:
-  1) keep `AOT_ARG_CAP=16` and optimize APP-chain emission/consumption shape,
-  2) raise the cap (if so, recommended value),
-  3) dynamic cap strategy (e.g., soft cap then fallback),
-  4) another approach?
+- Preferred policy now:
+  1) keep 16 and focus only on structural compilation fixes,
+  2) raise cap now (if yes, recommended value),
+  3) use a dynamic strategy tied to runtime stack bounds,
+  4) another policy.
 
 Why this matters:
-- If cap policy is wrong, we may overfit hot benchmarks with fragile constants instead of fixing the structural deopt source.
+- This is the second-largest remaining deopt bucket on tak/takl once strict-match mismatch dominates.

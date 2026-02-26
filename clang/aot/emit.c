@@ -413,12 +413,18 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_tmp(out_n, sizeof(out_n), "out", tmp);
 
         aot_emit_node(f, arg + 0, dep, lhs, 0, pad, tmp);
+        fprintf(f, "%sif (term_tag(%s) == DP0 || term_tag(%s) == DP1) {\n", pad, lhs, lhs);
+        fprintf(f, "%s%s = aot_force_dup(%s);\n", pad1, lhs, lhs);
+        fprintf(f, "%s}\n", pad);
 
         fprintf(f, "%sTerm %s;\n", pad, out_n);
         fprintf(f, "%sif (term_tag(%s) == ERA) {\n", pad, lhs);
         fprintf(f, "%s%s = wnf_op2_era();\n", pad1, out_n);
         fprintf(f, "%s} else if (term_tag(%s) == NUM) {\n", pad, lhs);
         aot_emit_node(f, arg + 1, dep, rhs, 0, pad1, tmp);
+        fprintf(f, "%sif (term_tag(%s) == DP0 || term_tag(%s) == DP1) {\n", pad1, rhs, rhs);
+        fprintf(f, "%s%s = aot_force_dup(%s);\n", pad2, rhs, rhs);
+        fprintf(f, "%s}\n", pad1);
         fprintf(f, "%sif (term_tag(%s) == ERA) {\n", pad1, rhs);
         fprintf(f, "%s%s = wnf_op2_num_era();\n", pad2, out_n);
         fprintf(f, "%s} else if (term_tag(%s) == NUM) {\n", pad1, rhs);
