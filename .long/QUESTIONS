@@ -1,14 +1,16 @@
-1) Next-step boundary for DUP hot-path compilation
+1) Semantic boundary for strict DP forcing beyond one step
 
 Context:
-- This round switched AOT to live DUP binder cells (`eN`) and removed the old static-only DUP gate.
-- Semantics are now preserved through deopt: pending vs substituted DUP state survives into `aot_fallback_alo(...)`.
-- Full tests pass, including many DUP/autodup regressions.
-- But performance is still limited because strict contexts often materialize `DP0/DP1` terms and rely on regular `wnf` to execute DUP interactions later.
+- Current AOT now keeps live DUP state in env cells (`eN`) and can preserve pending/substituted state across deopt.
+- I added a conservative strict-scrutinee hook (`aot_force_dup`) used by emitted `SWI/MAT` code.
+- The safe final version only performs one DP interaction step when the DUP payload is already whnf-like; otherwise it restores the cell and returns the original DP term so normal deopt behavior is preserved.
+- Two broader attempts failed:
+  - a full custom DP enter/apply loop (mirroring `wnf` DP frames) caused `RUNTIME_ERROR: cannot apply a constructor` on `gab_deriv/gen_easy --as-c`;
+  - forcing with `wnf(dp_term)` avoided that crash but caused severe slowdown/hangs on `gen_easy --as-c`.
 
 Question:
-- For the next step, do you want me to compile forced DP interactions directly in emitted C (mirroring `wnf` DP-frame dispatch over whnf tag: DUP-NAM/LAM/SUP/NOD), or is it acceptable to keep using runtime `wnf` for that boundary while we expand coverage elsewhere first?
+- For the next design, should strict compiled code be allowed to iterate multiple DP interactions in-place (e.g., follow `DUP-SUP`/`DUP-NOD` chains until reaching `NUM/Cxx`), but *hard-stop* and deopt as soon as the intermediate term leaves a whnf-like tag set?
 
-Why this matters:
-- Direct DP interaction compilation is the likely path to major speedups on DUP-heavy case trees, but it is the highest semantic-risk area.
-- I can either prioritize correctness-conservative incremental coverage (current style) or commit to the larger DP interaction inlining pass now.
+Why I’m asking:
+- This seems like the middle ground between correctness and speed: more than one conservative step (needed for real DUP-heavy trees), but still avoiding full `wnf` forcing and avoiding non-local behavior.
+- I want confirmation that this boundary is semantically acceptable before implementing a new mini-dispatch loop with explicit guards/fallbacks.

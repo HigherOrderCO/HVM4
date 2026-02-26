@@ -1,50 +1,52 @@
-Round 1 (2026-02-26)
+Round 2 (2026-02-26)
 
-What changed
+What changed this round
 - Files changed: `clang/aot/_.c`, `clang/aot/emit.c`.
-- Replaced fallback env capture model (`const Term args[]`) with live bind-list heads:
-  - `aot_fallback_alo(tm_loc, len, ls_loc)` now directly returns `term_new_alo(ls_loc, len, tm_loc)`.
-  - No per-fallback re-encoding of binders from plain `xN` terms.
-- Emitter now tracks lexical env as real bind nodes (`eN`) in compiled code.
-  - LAM binders (`head` LAM and expr APP-LAM path) allocate `eN=[SUB(xN), prev]`.
-  - DUP binders always compile (removed static-only guard), still capped by `AOT_ENV_CAP`.
-  - DUP binder cell policy:
-    - if `aot_is_copy_free(xN)`: store `SUB(xN)` (resolved immediately),
-    - else: store raw `xN` (pending DUP cell).
-- DP/BJ variable emission now observes live DUP state via `eN`:
-  - read `cell = heap_read(eN + 0)`;
-  - if `cell` has SUB bit: use substituted payload;
-  - else emit `DP0/DP1` term with same label and loc=`eN`.
-- Fallback expressions now use current env head (`e{dep-1}`) and preserve pending vs substituted DUP state.
-- Removed now-unneeded static copy-free recursion helpers from emitter.
+- Added a runtime helper for strict AOT scrutinees:
+  - `aot_force_dup(term)` now performs a conservative single DP interaction step.
+  - It only engages when `term` is `DP0/DP1`.
+  - It `heap_take`s the DUP cell and:
+    - if SUB bit is set: returns substituted payload (`term_sub_set(cell,0)`),
+    - if payload tag is already whnf-like and DUP-dispatchable (`NAM/BJV/BJ0/BJ1`, `LAM`, `SUP`, `DRY/MAT/SWI/USE/INC`, `ERA/ANY/PRI/NUM`, `C00..C16`): applies `wnf_dup_*` once,
+    - otherwise restores the cell (`heap_set(loc, cell)`) and returns the original DP term unchanged.
+- Emitter changes:
+  - In head-mode `SWI` and `MAT`, after reading strict APP arg, generated code now does:
+    - `if tag(arg) is DP0/DP1 -> arg = aot_force_dup(arg)`
+    - then existing numeric/constructor dispatch checks run.
+  - No OP2 forcing in final version (removed after perf regression).
 
-Semantic notes
-- This mirrors `wnf` linked DUP behavior better: DUP state is represented as a mutable cell, not only as a captured value.
-- Sharing is preserved between compiled terms and deopted residual ALO terms because both reference the same live env-chain nodes.
-- DUP introduction no longer increments interaction count in the emitter path.
+Why this shape
+- Goal is to keep DUP-heavy strict scrutinees in compiled mode when safe, without broad semantic risk.
+- This approach preserves deopt behavior for unknown/non-whnf DUP payloads by restoring the cell and returning original DP; compiled path can still bail exactly like before.
+- It reuses canonical `wnf_dup_*` functions for actual interactions, so semantics stay tied to interpreter rules.
 
-Critical pitfalls found
-- Deterministic `--as-c` temp path collides across parallel runs; this caused misleading diagnostics during debugging.
-  - Always run AOT checks sequentially; kill stale `test/_all_.sh` runs before targeted `--as-c` repros.
-- After emitter edits, stale `clang/main` can make debugging look inconsistent; always rebuild before interpreting generated C.
-- Codegen scope bug: declaring `Term <out>` inside both branches of emitted `if` made `<out>` undefined after the block.
-  - Fix pattern: declare once before `if`, assign in branches.
+Important failed attempts (do not repeat blindly)
+1) Full custom DP mini-evaluator in `aot_force_dup` (stack + enter/apply loop):
+- Attempted to mirror `wnf` DP-frame semantics directly, including SUP/NOD recursion.
+- Passed test suite, but benchmark checks (`gab_deriv`, `gen_easy --as-c`) hit `RUNTIME_ERROR: cannot apply a constructor`.
+- Conclusion: subtle semantic mismatch remained; not safe yet.
 
-Validation done
+2) `aot_force_dup = wnf(term)` for DP terms:
+- Correctness recovered (no constructor error), but caused pathological slowdown / apparent hangs on `gen_easy --as-c` (minutes vs sub-second baseline).
+- Conclusion: full wnf forcing at this boundary over-evaluates and kills hot-path behavior.
+
+Operational notes
+- Deterministic `--as-c` temp path (`hvm4-aot-as-c.main.bin`) collides across concurrent runs; always serialize benchmark repros and kill stale runs.
+- If a long `--as-c` run appears stuck, check `ps` for lingering `hvm4-aot-as-c.main.bin` and kill parent+child.
+
+Validation done on final state
 - Rebuilt: `cd clang && clang -O2 -o main main.c`.
-- Full suite: `./test/_all_.sh` passed (interpreted + AOT).
-- Bench parity checks:
-  - `../bench/bench/gab_deriv/main.hvm`: hvmi vs hvmc outputs match.
-  - `../bench/bench/gen_easy/main.hvm -C1`: hvmi vs hvmc outputs match.
+- Full suite: `./test/_all_.sh` passes (interpreted + AOT).
+- Bench parity:
+  - `../bench/bench/gab_deriv/main.hvm`: hvmi vs hvmc result text matches exactly.
+  - `../bench/bench/gen_easy/main.hvm -C1`: hvmi vs hvmc result text matches exactly.
+- Quick timings (one local run, noisy):
+  - `gab_deriv --as-c` completed normally (~1.5s in this run).
+  - `gen_easy -C1 --as-c` completed normally (~0.24s in this run).
 
 Current state
-- AOT no longer bails out at DUP just because value is non-static/non-copy-free.
-- Compiled mode now carries dynamic DUP binder state through env cells and deopts without losing that state.
-- This is foundational correctness plumbing; it increases compiled coverage across DUP-heavy case trees.
-
-Remaining limitations
-- Many strict contexts still eventually delegate DUP interactions to normal runtime reduction when a `DP0/DP1` term is forced.
-- Large speedups likely require compiling more of the DP interaction frontier directly (not only preserving state through deopt).
+- Strict `SWI/MAT` no longer instantly deopt on every DP scrutinee; they attempt one safe DUP interaction first.
+- AOT still does not fully inline forced DP frontier; this is a conservative step that improves coverage without reintroducing known breakage.
 
 Next likely step
-- Add compiled handling for forced DP interactions in strict/head contexts (mirror `wnf` DP-frame dispatch: DUP-NAM/LAM/SUP/NOD), reusing runtime helpers where safe, to reduce wnf fallback pressure on DUP-heavy hot paths.
+- Build a formally constrained DP-force loop for strict contexts that can handle multi-step DUP forcing (especially SUP/NOD chains) without calling full `wnf`, but with explicit invariants and fallback points when payload leaves whnf-like space.

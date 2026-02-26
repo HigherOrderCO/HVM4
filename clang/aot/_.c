@@ -22,6 +22,11 @@ typedef struct {
   RuntimeFfiLoad ffi[RUNTIME_FFI_MAX];
 } AotBuildCfg;
 
+fn Term wnf_dup_nam(u32 lab, u64 loc, u8 side, Term nam);
+fn Term wnf_dup_lam(u32 lab, u64 loc, u8 side, Term lam);
+fn Term wnf_dup_sup(u32 lab, u64 loc, u8 side, Term sup);
+fn Term wnf_dup_nod(u32 lab, u64 loc, u8 side, Term term);
+
 // Runtime
 // -------
 
@@ -76,6 +81,56 @@ fn int aot_is_copy_free(Term term) {
     return 1;
   }
   return 0;
+}
+
+// Tries one conservative DP interaction step for a strict AOT scrutinee.
+// Unknown payloads are restored and returned unchanged.
+fn Term aot_force_dup(Term term) {
+  u8 tm_tag = term_tag(term);
+  if (tm_tag != DP0 && tm_tag != DP1) {
+    return term;
+  }
+
+  u8  side = tm_tag == DP0 ? 0 : 1;
+  u64 loc  = term_val(term);
+  u32 lab  = term_ext(term);
+  Term cell = heap_take(loc);
+
+  if (term_sub_get(cell)) {
+    return term_sub_set(cell, 0);
+  }
+
+  switch (term_tag(cell)) {
+    case NAM:
+    case BJV:
+    case BJ0:
+    case BJ1: {
+      return wnf_dup_nam(lab, loc, side, cell);
+    }
+    case LAM: {
+      return wnf_dup_lam(lab, loc, side, cell);
+    }
+    case SUP: {
+      return wnf_dup_sup(lab, loc, side, cell);
+    }
+    case DRY:
+    case MAT:
+    case SWI:
+    case USE:
+    case INC:
+    case ERA:
+    case ANY:
+    case PRI:
+    case NUM:
+    case C00 ... C16: {
+      return wnf_dup_nod(lab, loc, side, cell);
+    }
+    default: {
+      // Unknown/non-WNF payloads are left untouched so compiled code can deopt.
+      heap_set(loc, cell);
+      return term;
+    }
+  }
 }
 
 // Calls
