@@ -1,52 +1,49 @@
-Round 2 (2026-02-26)
+Round 3 (2026-02-26)
 
 What changed this round
-- Files changed: `clang/aot/_.c`, `clang/aot/emit.c`.
-- Added a runtime helper for strict AOT scrutinees:
-  - `aot_force_dup(term)` now performs a conservative single DP interaction step.
-  - It only engages when `term` is `DP0/DP1`.
-  - It `heap_take`s the DUP cell and:
-    - if SUB bit is set: returns substituted payload (`term_sub_set(cell,0)`),
-    - if payload tag is already whnf-like and DUP-dispatchable (`NAM/BJV/BJ0/BJ1`, `LAM`, `SUP`, `DRY/MAT/SWI/USE/INC`, `ERA/ANY/PRI/NUM`, `C00..C16`): applies `wnf_dup_*` once,
-    - otherwise restores the cell (`heap_set(loc, cell)`) and returns the original DP term unchanged.
-- Emitter changes:
-  - In head-mode `SWI` and `MAT`, after reading strict APP arg, generated code now does:
-    - `if tag(arg) is DP0/DP1 -> arg = aot_force_dup(arg)`
-    - then existing numeric/constructor dispatch checks run.
-  - No OP2 forcing in final version (removed after perf regression).
+- Files changed: `clang/aot/_.c`.
+- `aot_force_dup` was upgraded from single-step to bounded multi-step DP forcing:
+  - new limit: `#define AOT_FORCE_DUP_FUEL 32`;
+  - loop continues while the current term is `DP0/DP1` and fuel remains;
+  - each step uses the same conservative DUP dispatch set as before (`NAM/BJV/BJ0/BJ1`, `LAM`, `SUP`, `DRY/MAT/SWI/USE/INC`, `ERA/ANY/PRI/NUM`, `C00..C16`);
+  - no full `wnf()` call is used.
+- Fixed a high-severity `heap_take` restore bug:
+  - SUB fast-path now restores the taken cell with `heap_set_rel(loc, cell)` before returning/continuing with payload;
+  - unknown-payload fallback now also restores with `heap_set_rel` (was relaxed `heap_set`).
 
 Why this shape
-- Goal is to keep DUP-heavy strict scrutinees in compiled mode when safe, without broad semantic risk.
-- This approach preserves deopt behavior for unknown/non-whnf DUP payloads by restoring the cell and returning original DP; compiled path can still bail exactly like before.
-- It reuses canonical `wnf_dup_*` functions for actual interactions, so semantics stay tied to interpreter rules.
+- Multi-thread safety: `heap_take` does atomic exchange to 0 when `THREAD_COUNT > 1`; any early return without restore can leave a permanent zero hole/spin risk.
+- Performance boundary: bounded DUP-only forcing resolves common DP chains without the pathological over-evaluation seen when calling full `wnf`.
+- Semantic boundary remains conservative:
+  - if forcing reaches non-DP, return it;
+  - if payload is unknown/non-dispatchable, restore and return current DP unchanged;
+  - if fuel exhausts, return current term as-is.
 
-Important failed attempts (do not repeat blindly)
-1) Full custom DP mini-evaluator in `aot_force_dup` (stack + enter/apply loop):
-- Attempted to mirror `wnf` DP-frame semantics directly, including SUP/NOD recursion.
-- Passed test suite, but benchmark checks (`gab_deriv`, `gen_easy --as-c`) hit `RUNTIME_ERROR: cannot apply a constructor`.
-- Conclusion: subtle semantic mismatch remained; not safe yet.
-
-2) `aot_force_dup = wnf(term)` for DP terms:
-- Correctness recovered (no constructor error), but caused pathological slowdown / apparent hangs on `gen_easy --as-c` (minutes vs sub-second baseline).
-- Conclusion: full wnf forcing at this boundary over-evaluates and kills hot-path behavior.
+Important failed attempts (still avoid)
+1) Custom DP mini-evaluator with frame-like recursion:
+- Triggered `RUNTIME_ERROR: cannot apply a constructor` on benchmark-style runs (`gab_deriv`, `gen_easy --as-c`), despite tests passing.
+2) `aot_force_dup = wnf(dp)`:
+- Correctness recovered but `gen_easy --as-c` became extremely slow / appeared hung.
 
 Operational notes
-- Deterministic `--as-c` temp path (`hvm4-aot-as-c.main.bin`) collides across concurrent runs; always serialize benchmark repros and kill stale runs.
-- If a long `--as-c` run appears stuck, check `ps` for lingering `hvm4-aot-as-c.main.bin` and kill parent+child.
+- Deterministic `--as-c` temp binary path (`hvm4-aot-as-c.main.bin`) still collides across concurrent runs; run benchmark repros serially.
 
-Validation done on final state
+Validation on final state
 - Rebuilt: `cd clang && clang -O2 -o main main.c`.
 - Full suite: `./test/_all_.sh` passes (interpreted + AOT).
-- Bench parity:
-  - `../bench/bench/gab_deriv/main.hvm`: hvmi vs hvmc result text matches exactly.
-  - `../bench/bench/gen_easy/main.hvm -C1`: hvmi vs hvmc result text matches exactly.
-- Quick timings (one local run, noisy):
-  - `gab_deriv --as-c` completed normally (~1.5s in this run).
-  - `gen_easy -C1 --as-c` completed normally (~0.24s in this run).
+- Bench parity checks:
+  - `../bench/bench/gab_deriv/main.hvm`: hvmi == hvmc output.
+  - `../bench/bench/gen_easy/main.hvm -C1`: hvmi == hvmc output.
+  - `../bench/bench/gab_tak/main.hvm`: hvmi == hvmc output.
+- Coverage probe:
+  - `./clang/main ../bench/bench/gab_tak/main.hvm --to-c | grep -c aot_fallback_alo` => `90` static fallback sites.
+- Quick local wall-time sample (includes `--as-c` compile overhead, so not a pure runtime metric):
+  - `gab_tak` hvmi ~0.01s; hvmc `--as-c` ~1.13s.
 
 Current state
-- Strict `SWI/MAT` no longer instantly deopt on every DP scrutinee; they attempt one safe DUP interaction first.
-- AOT still does not fully inline forced DP frontier; this is a conservative step that improves coverage without reintroducing known breakage.
+- Strict `SWI/MAT` DP handling is now both safer (thread-aware restoration) and deeper (bounded multi-step).
+- Major benchmark gap remains: too much execution still deopts to ALO; fallback sites in generated code are still abundant.
 
 Next likely step
-- Build a formally constrained DP-force loop for strict contexts that can handle multi-step DUP forcing (especially SUP/NOD chains) without calling full `wnf`, but with explicit invariants and fallback points when payload leaves whnf-like space.
+- Add deopt/fallback instrumentation (reason counters + hot call counts) so work can target real runtime fallback frequency, not just static fallback site counts.
+- Use one failing benchmark (`gab_tak`/`gab_takl`) and generated C inspection to prioritize the exact node shapes that eject from compiled mode earliest.

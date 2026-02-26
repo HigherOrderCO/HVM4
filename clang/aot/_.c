@@ -37,6 +37,7 @@ static HvmAotFn AOT_FNS[BOOK_CAP] = {0};
 #define AOT_ARG_CAP   16
 #define AOT_ENV_CAP   16
 #define AOT_MAX_DEPTH 4096
+#define AOT_FORCE_DUP_FUEL 32
 
 // Thread-local compiled-call depth for recursion cutoff.
 static _Thread_local u32 AOT_CALL_DEPTH = 0;
@@ -83,54 +84,67 @@ fn int aot_is_copy_free(Term term) {
   return 0;
 }
 
-// Tries one conservative DP interaction step for a strict AOT scrutinee.
+// Tries bounded conservative DP forcing for a strict AOT scrutinee.
 // Unknown payloads are restored and returned unchanged.
 fn Term aot_force_dup(Term term) {
-  u8 tm_tag = term_tag(term);
-  if (tm_tag != DP0 && tm_tag != DP1) {
-    return term;
-  }
-
-  u8  side = tm_tag == DP0 ? 0 : 1;
-  u64 loc  = term_val(term);
-  u32 lab  = term_ext(term);
-  Term cell = heap_take(loc);
-
-  if (term_sub_get(cell)) {
-    return term_sub_set(cell, 0);
-  }
-
-  switch (term_tag(cell)) {
-    case NAM:
-    case BJV:
-    case BJ0:
-    case BJ1: {
-      return wnf_dup_nam(lab, loc, side, cell);
-    }
-    case LAM: {
-      return wnf_dup_lam(lab, loc, side, cell);
-    }
-    case SUP: {
-      return wnf_dup_sup(lab, loc, side, cell);
-    }
-    case DRY:
-    case MAT:
-    case SWI:
-    case USE:
-    case INC:
-    case ERA:
-    case ANY:
-    case PRI:
-    case NUM:
-    case C00 ... C16: {
-      return wnf_dup_nod(lab, loc, side, cell);
-    }
-    default: {
-      // Unknown/non-WNF payloads are left untouched so compiled code can deopt.
-      heap_set(loc, cell);
+  for (u32 fuel = AOT_FORCE_DUP_FUEL; fuel > 0; --fuel) {
+    u8 tm_tag = term_tag(term);
+    if (tm_tag != DP0 && tm_tag != DP1) {
       return term;
     }
+
+    u8  side = tm_tag == DP0 ? 0 : 1;
+    u64 loc  = term_val(term);
+    u32 lab  = term_ext(term);
+    Term cell = heap_take(loc);
+
+    if (term_sub_get(cell)) {
+      Term val = term_sub_set(cell, 0);
+      heap_set_rel(loc, cell);
+      term = val;
+      continue;
+    }
+
+    Term next;
+    switch (term_tag(cell)) {
+      case NAM:
+      case BJV:
+      case BJ0:
+      case BJ1: {
+        next = wnf_dup_nam(lab, loc, side, cell);
+        break;
+      }
+      case LAM: {
+        next = wnf_dup_lam(lab, loc, side, cell);
+        break;
+      }
+      case SUP: {
+        next = wnf_dup_sup(lab, loc, side, cell);
+        break;
+      }
+      case DRY:
+      case MAT:
+      case SWI:
+      case USE:
+      case INC:
+      case ERA:
+      case ANY:
+      case PRI:
+      case NUM:
+      case C00 ... C16: {
+        next = wnf_dup_nod(lab, loc, side, cell);
+        break;
+      }
+      default: {
+        // Unknown/non-WNF payloads are left untouched so compiled code can deopt.
+        heap_set_rel(loc, cell);
+        return term;
+      }
+    }
+
+    term = next;
   }
+  return term;
 }
 
 // Calls

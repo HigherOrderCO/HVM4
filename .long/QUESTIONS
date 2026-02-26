@@ -1,16 +1,30 @@
-1) Semantic boundary for strict DP forcing beyond one step
+1) Which deopt metric should guide optimization work: static fallback sites or dynamic fallback hits?
 
 Context:
-- Current AOT now keeps live DUP state in env cells (`eN`) and can preserve pending/substituted state across deopt.
-- I added a conservative strict-scrutinee hook (`aot_force_dup`) used by emitted `SWI/MAT` code.
-- The safe final version only performs one DP interaction step when the DUP payload is already whnf-like; otherwise it restores the cell and returns the original DP term so normal deopt behavior is preserved.
-- Two broader attempts failed:
-  - a full custom DP enter/apply loop (mirroring `wnf` DP frames) caused `RUNTIME_ERROR: cannot apply a constructor` on `gab_deriv/gen_easy --as-c`;
-  - forcing with `wnf(dp_term)` avoided that crash but caused severe slowdown/hangs on `gen_easy --as-c`.
+- The generated C for `gab_tak` currently contains many static fallback points (`--to-c | grep -c aot_fallback_alo` gives 90 sites).
+- But that count does not tell which ones are actually hot at runtime.
+- We need to prioritize changes that move benchmark runtime to compiled mode (admission asks for large speedups), not just reduce generated fallback branches that may be cold.
 
 Question:
-- For the next design, should strict compiled code be allowed to iterate multiple DP interactions in-place (e.g., follow `DUP-SUP`/`DUP-NOD` chains until reaching `NUM/Cxx`), but *hard-stop* and deopt as soon as the intermediate term leaves a whnf-like tag set?
+- For HVM AOT tuning, what metric do you consider the best target:
+  1) dynamic count of executed `aot_fallback_alo` calls (possibly bucketed by reason),
+  2) dynamic share of interactions spent in compiled code vs interpreter code,
+  3) another metric you trust more?
+- If you have a preferred instrumentation style (where to hook counters, how to normalize across runs), please specify.
 
-Why I’m asking:
-- This seems like the middle ground between correctness and speed: more than one conservative step (needed for real DUP-heavy trees), but still avoiding full `wnf` forcing and avoiding non-local behavior.
-- I want confirmation that this boundary is semantically acceptable before implementing a new mini-dispatch loop with explicit guards/fallbacks.
+Why this matters:
+- Without a canonical metric, it is easy to over-optimize cold patterns and miss the true deopt hotspot that blocks benchmark speedups.
+
+2) Priority pattern request: which specific case-tree shape is known to dominate deopts on target benchmarks?
+
+Context:
+- We already compile through some previously-missing pieces (DUP in more places, expr APP-LAM LET-shapes, strict DP forcing).
+- Tests/parity are stable, but benchmark-level speedups are still far from target.
+- This suggests the dominant fallback path is elsewhere in the emitted case-tree spine.
+
+Question:
+- From your experience with these benchmark programs, which one pattern should we prioritize next for compile-through because it most frequently causes early full-body deopt?
+- Example candidates: head-position LET before match, strict match on SUP frontier, non-tail REF/app chain shape, constructor-field forcing pattern, etc.
+
+Why this matters:
+- A concrete “highest ROI” pattern from domain knowledge can save multiple blind rounds of instrumentation and trial patches.
