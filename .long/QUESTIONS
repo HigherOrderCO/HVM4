@@ -1,0 +1,22 @@
+1) For DUP fast-path policy, is this conservative rule acceptable, or do you want dynamic-value DUP support now?
+
+Context code (current conservative fast-path):
+```c
+// clang/aot/emit.c
+if (!aot_emit_is_static_copy_free(dup_loc + 0)) {
+  aot_emit_ret_fallback_loc(f, loc, dep, pad);
+  return;
+}
+Term xN = <dup value>;
+aot_emit_node(... dup body ...);
+```
+
+This means terms like the following still deopt:
+```hvm
+@main = λx. !X&L=x; @f(X₀, X₁)
+```
+Because `x` is dynamic, not statically copy-free.
+
+Question:
+- Should I proceed to implement full dynamic DUP support in AOT by carrying DUP-binder state through fallbacks (pending dup cell vs substituted var), even if that is a larger refactor touching fallback env encoding and binder metadata?
+- Or do you prefer keeping DUP conservative for now and focus first on other hot-path gaps?

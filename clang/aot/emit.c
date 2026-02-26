@@ -204,6 +204,37 @@ fn void aot_emit_ret_fallback_loc(FILE *f, u64 loc, u32 dep, const char *pad) {
   fprintf(f, ";\n");
 }
 
+// Returns 1 when one static subtree is a copy-free constructor/number tree.
+fn int aot_emit_is_static_copy_free_rec(u64 loc, u32 fuel) {
+  if (fuel == 0) {
+    return 0;
+  }
+
+  Term term = heap_read(loc);
+  u8 tag = term_tag(term);
+
+  if (tag == NUM || tag == C00) {
+    return 1;
+  }
+  if (tag < C01 || tag > C16) {
+    return 0;
+  }
+
+  u32 ari = term_arity(term);
+  u64 base = term_val(term);
+  for (u32 i = 0; i < ari; i++) {
+    if (!aot_emit_is_static_copy_free_rec(base + i, fuel - 1)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+// Returns 1 when one static subtree is a copy-free constructor/number tree.
+fn int aot_emit_is_static_copy_free(u64 loc) {
+  return aot_emit_is_static_copy_free_rec(loc, 1024);
+}
+
 // Emits one recursive node.
 // - `head=1`: consumes APP frames from `stack/*s_pos` and returns from F_<def>.
 // - `head=0`: materializes one lazy expression into local `Term <out>`.
@@ -280,6 +311,27 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         fprintf(f, "%sTerm x%u = heap_read(%s + 1);\n", pad, dep, app);
         aot_emit_itrs_inc(f, pad);
         aot_emit_node(f, term_val(term), dep + 1, out, 1, pad, tmp);
+        return;
+      }
+
+      case DUP: {
+        if (dep >= AOT_ENV_CAP) {
+          aot_emit_ret_fallback_loc(f, loc, dep, pad);
+          return;
+        }
+
+        u64 dup_loc = term_val(term);
+        if (!aot_emit_is_static_copy_free(dup_loc + 0)) {
+          aot_emit_ret_fallback_loc(f, loc, dep, pad);
+          return;
+        }
+        char val_n[32];
+        aot_emit_tmp(val_n, sizeof(val_n), "val", tmp);
+
+        aot_emit_node(f, dup_loc + 0, dep, val_n, 0, pad, tmp);
+        fprintf(f, "%sTerm x%u = %s;\n", pad, dep, val_n);
+        aot_emit_itrs_inc(f, pad);
+        aot_emit_node(f, dup_loc + 1, dep + 1, out, 1, pad, tmp);
         return;
       }
 
@@ -440,6 +492,27 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         return;
       }
       fprintf(f, "%sTerm %s = x%u;\n", pad, out, (u32)(lvl - 1));
+      return;
+    }
+    case DUP: {
+      u64 dup_loc = term_val(term);
+      if (dep >= AOT_ENV_CAP || !aot_emit_is_static_copy_free(dup_loc + 0)) {
+        fprintf(f, "%sTerm %s = ", pad, out);
+        aot_emit_alo_expr(f, loc, dep);
+        fprintf(f, ";\n");
+        return;
+      }
+
+      char val_n[32];
+      char bod_n[32];
+      aot_emit_tmp(val_n, sizeof(val_n), "val", tmp);
+      aot_emit_tmp(bod_n, sizeof(bod_n), "bod", tmp);
+
+      aot_emit_node(f, dup_loc + 0, dep, val_n, 0, pad, tmp);
+      fprintf(f, "%sTerm x%u = %s;\n", pad, dep, val_n);
+      aot_emit_itrs_inc(f, pad);
+      aot_emit_node(f, dup_loc + 1, dep + 1, bod_n, 0, pad, tmp);
+      fprintf(f, "%sTerm %s = %s;\n", pad, out, bod_n);
       return;
     }
     default: {
