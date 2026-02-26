@@ -1,43 +1,61 @@
-Round 6 (2026-02-26)
+Round 7 (2026-02-26)
 
-What changed this round (final)
-- Final code change: `clang/aot/_.c` only.
-- Raised `AOT_ARG_CAP` from `16` to `64`.
-- No emitter/runtime semantic changes landed beyond that cap update.
+What changed this round (landed)
+- Landed code changes in:
+  - `clang/aot/_.c`
+  - `clang/aot/emit.c`
+- Added strict-site deopt metadata plumbing (source-mapped by static term loc):
+  - New `AotDeoptSiteKind` enum:
+    - `AOT_DEOPT_SITE_KIND_HEAD_SWI_NON_NUM`
+    - `AOT_DEOPT_SITE_KIND_HEAD_MAT_NON_CTR`
+  - New runtime metadata arrays keyed by deopt site id:
+    - kind, static loc, aux (expected case ext).
+  - New runtime API: `aot_deopt_site_define(site, kind, loc, aux)`.
+  - `aot_deopt_dump(stderr)` top-sites now prints metadata when present:
+    - `kind=... loc=... expect_num=...` or `expect_ctr_ext=...`.
+- Emitter now stores per-site metadata while assigning site ids and emits:
+  - `aot_register_deopt_sites_generated()` in generated C,
+  - called from generated `main()` before eval.
+- Head strict mismatch emission change:
+  - In compiled head `SWI`: `arg` non-NUM now returns direct fallback with metadata kind `HEAD_SWI_NON_NUM`.
+  - In compiled head `MAT`: scrutinee non-CTR-tag now returns direct fallback with metadata kind `HEAD_MAT_NON_CTR`.
+  - Reason stays `AOT_DEOPT_EXPR_UNSUPPORTED_TAG` for continuity of existing counters.
 
-Large experiment attempted, then fully reverted
-- I attempted strict `MAT/SWI` scrutinee forcing in compiled code:
-  - first with `aot_force_whnf()` calling `wnf()` directly,
-  - then with `WNF_S_POS` sync,
-  - then with APP-frame scrutinee writeback,
-  - then with bounded ALO-only forcing via `wnf_alo_*`.
-- All those variants caused AOT regressions (segfaults, `cannot apply a number`, wrong outputs, huge malformed terms in `enum_primes`, hangs/kills).
-- Everything from that forcing experiment was reverted.
-- Key lesson: strict-site forcing is very sensitive to stack/frame invariants; do not reintroduce without an explicit semantic model for APP-frame ownership and reentrancy boundaries.
+Why this was done
+- `EXPR_UNSUPPORTED_TAG` remained dominant and opaque in `gab_tak`/`gab_takl`.
+- We need exact hotspot attribution (strict site kind + static loc + expected class/ext) before retrying any strict forcing redesign.
 
-Validation on final state
-- Rebuilt: `cd clang && clang -O2 -o main main.c`.
+Validation
+- Rebuild: `cd clang && clang -O2 -o main main.c` passes.
 - Full suite: `./test/_all_.sh` passes (interpreted + AOT).
-- Bench parity checks pass (hvmi == hvmc `--as-c`):
+- Parity (hvmi == hvmc `--as-c`) passes on:
   - `../bench/bench/gab_deriv/main.hvm`
   - `../bench/bench/gen_easy/main.hvm -C1`
   - `../bench/bench/gab_tak/main.hvm`
   - `../bench/bench/gab_takl/main.hvm`
-
-Deopt counters after `AOT_ARG_CAP=64`
-- `HVM_AOT_DEOPT=1 ./clang/main ../bench/bench/gab_tak/main.hvm --as-c -S`
-  - total `5544`
-  - `EXPR_UNSUPPORTED_TAG=5434` (dominant)
-  - `HEAD_APP_ARG_CAP=15`
-- `HVM_AOT_DEOPT=1 ./clang/main ../bench/bench/gab_takl/main.hvm --as-c -S`
-  - total `16678507`
-  - `EXPR_UNSUPPORTED_TAG=16614897` (dominant)
-  - `HEAD_APP_ARG_CAP=48958`
-- Hotspot remains strict-match mismatch (`EXPR_UNSUPPORTED_TAG`), but cap-hit bucket is now constrained and non-dominant.
+- Deopt probe snapshots (serial `--as-c` runs):
+  - `gab_tak`:
+    - total `5544`
+    - `HEAD_APP_ARG_CAP=15`
+    - `EXPR_UNSUPPORTED_TAG=5434`
+    - top strict sites now explicit, e.g.:
+      - `site[12] ... kind=HEAD_MAT_NON_CTR loc=22 expect_ctr_ext=0`
+  - `gab_takl`:
+    - total `16678507`
+    - `HEAD_APP_ARG_CAP=48958`
+    - `EXPR_UNSUPPORTED_TAG=16614897`
+    - dominant hotspot now source-mapped, e.g.:
+      - `site[24] ... kind=HEAD_MAT_NON_CTR loc=45 expect_ctr_ext=10`
 
 Operational notes
-- `--as-c` temp binary remains deterministic (`hvm4-aot-as-c.main.bin`): keep probe runs serial.
+- `--as-c` temp artifacts remain deterministic (`hvm4-aot-as-c.main.c/.bin`); probe runs must be serial.
+- I accidentally ran two `--as-c` probes in parallel once and got unusable duplicate output; reran serially.
+
+Key lesson
+- Add observability before forcing semantics changes. This metadata layer is low-risk and gives precise targeting for the next safe strict forcing iteration.
 
 Next likely step
-- Add explicit strict-site deopt reason/source mapping for head `MAT/SWI` mismatch path (site -> kind/expected class/static loc) before any new forcing.
-- Pursue a formally safe strict forcing rule only after clarifying whether mismatch/default branches must consume forced scrutinee vs original thunk in APP-frame terms.
+- Use the new strict-site metadata to implement a formally safe mismatch forcing contract for head `MAT/SWI`:
+  - decide and codify APP-frame scrutinee ownership on mismatch/default,
+  - then apply bounded forcing only where contract is proven,
+  - keep deopt counters to validate reduced `EXPR_UNSUPPORTED_TAG` without regressions.

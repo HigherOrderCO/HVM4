@@ -1,18 +1,21 @@
-1) Strict MAT/SWI mismatch semantics with forced scrutinee (APP-frame consistency)
+1) Strict mismatch contract after scrutinee forcing in compiled head MAT/SWI (APP-frame ownership)
 
 Context:
-- Current dominant deopt remains head strict-match mismatch (`EXPR_UNSUPPORTED_TAG`) on `gab_tak`/`gab_takl`.
-- I tried forcing strict scrutinees in compiled `MAT/SWI` before tag checks.
-- This exposed a subtle invariant: mismatch/default branches reuse the existing APP frame (they do not pop it), so after forcing `arg` there is a question whether the frame must hold the forced WHNF value or the original thunk.
-- In interpreter terms, `APP-MAT-CTR-MIS` / `APP-MAT-NUM-MIS` produce `(default_branch forced_scrutinee_whnf)`.
-- In compiled code, using original thunk vs forced WHNF in that frame appears to affect correctness and may be tied to prior regressions.
+- Dominant deopt in AOT remains strict mismatch (`EXPR_UNSUPPORTED_TAG`).
+- I added strict-site metadata and can now pinpoint hotspots, e.g. in `gab_takl`:
+  - `site[24] kind=HEAD_MAT_NON_CTR loc=45 expect_ctr_ext=10`
+- We previously tried strict forcing experiments and hit regressions (segfaults, wrong outputs, hangs), likely due to violating frame/state invariants.
+- The critical ambiguity is mismatch/default continuation semantics once we force scrutinee to WHNF for tag inspection.
 
-Question:
-- For compiled strict `MAT/SWI`, after we force a scrutinee to WHNF for tag inspection, what is the required semantic contract for mismatch/default continuation?
-  1) always pass forced WHNF scrutinee,
-  2) always preserve original thunk,
-  3) conditional rule (if so, exact condition).
-- Please answer with one concrete rule + one minimal pseudo-example so I can codify this invariant and avoid further unsafe forcing attempts.
+Precise question:
+- In compiled head `MAT/SWI`, if we force scrutinee before checking tag and it mismatches the strict case, what exact value must be propagated in continuation semantics?
+  1) Always forced WHNF scrutinee,
+  2) Always original thunk from APP frame,
+  3) Conditional rule (please specify exact condition).
 
 Why this matters:
-- This is currently the blocker for implementing strict-site forcing safely; without this rule we keep hitting hard-to-debug graph corruption/regressions.
+- This rule determines whether compiled mismatch path must rewrite the current APP frame argument slot (or equivalent) before continuing/deopting.
+- Without this contract, any renewed strict forcing is unsafe and we will likely reintroduce prior correctness bugs.
+
+Request:
+- Please provide one concrete rule and a minimal interaction-style example (before/after term shape) that disambiguates the required behavior.

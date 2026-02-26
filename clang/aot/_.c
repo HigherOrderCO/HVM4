@@ -77,10 +77,20 @@ typedef enum {
   AOT_DEOPT_REASON_COUNT,
 } AotDeoptReason;
 
+typedef enum {
+  AOT_DEOPT_SITE_KIND_NONE = 0,
+  AOT_DEOPT_SITE_KIND_HEAD_SWI_NON_NUM,
+  AOT_DEOPT_SITE_KIND_HEAD_MAT_NON_CTR,
+  AOT_DEOPT_SITE_KIND_COUNT,
+} AotDeoptSiteKind;
+
 static int AOT_DEOPT_ENABLED = -1;
 static u64 AOT_DEOPT_REASON_COUNTS[AOT_DEOPT_REASON_COUNT] = {0};
 static u64 AOT_DEOPT_SITE_COUNTS[AOT_DEOPT_SITE_CAP] = {0};
 static u8  AOT_DEOPT_SITE_REASONS[AOT_DEOPT_SITE_CAP] = {0};
+static u8  AOT_DEOPT_SITE_KINDS[AOT_DEOPT_SITE_CAP] = {0};
+static u64 AOT_DEOPT_SITE_LOCS[AOT_DEOPT_SITE_CAP] = {0};
+static u32 AOT_DEOPT_SITE_AUX[AOT_DEOPT_SITE_CAP] = {0};
 static u64 AOT_DEOPT_SITE_OVERFLOW = 0;
 
 // Returns one human-readable name for a deopt reason.
@@ -103,6 +113,19 @@ fn const char *aot_deopt_reason_name(u32 reason) {
     return "UNKNOWN";
   }
   return NAMES[reason];
+}
+
+// Returns one human-readable name for deopt site metadata kind.
+fn const char *aot_deopt_site_kind_name(u32 kind) {
+  static const char *NAMES[AOT_DEOPT_SITE_KIND_COUNT] = {
+    "NONE",
+    "HEAD_SWI_NON_NUM",
+    "HEAD_MAT_NON_CTR",
+  };
+  if (kind >= AOT_DEOPT_SITE_KIND_COUNT) {
+    return "UNKNOWN";
+  }
+  return NAMES[kind];
 }
 
 // Returns 1 when deopt tracing is enabled via HVM_AOT_DEOPT.
@@ -136,6 +159,18 @@ fn void aot_deopt_hit(u32 reason, u32 site) {
   } else {
     __atomic_fetch_add(&AOT_DEOPT_SITE_OVERFLOW, 1, __ATOMIC_RELAXED);
   }
+}
+
+// Registers static metadata for one emitted deopt site.
+fn void aot_deopt_site_define(u32 site, u32 kind, u64 loc, u32 aux) {
+  if (site >= AOT_DEOPT_SITE_CAP) {
+    return;
+  }
+  if (kind < AOT_DEOPT_SITE_KIND_COUNT) {
+    __atomic_store_n(&AOT_DEOPT_SITE_KINDS[site], (u8)kind, __ATOMIC_RELAXED);
+  }
+  __atomic_store_n(&AOT_DEOPT_SITE_LOCS[site], loc, __ATOMIC_RELAXED);
+  __atomic_store_n(&AOT_DEOPT_SITE_AUX[site], aux, __ATOMIC_RELAXED);
 }
 
 // Inserts one (site,hits) pair into descending top-k buffers.
@@ -194,8 +229,24 @@ fn void aot_deopt_dump(FILE *f) {
       if (top_hits[i] == 0) {
         break;
       }
-      u32 reason = __atomic_load_n(&AOT_DEOPT_SITE_REASONS[top_sites[i]], __ATOMIC_RELAXED);
-      fprintf(f, "AOT_DEOPT site[%u] hits=%llu reason=%s\n", top_sites[i], (unsigned long long)top_hits[i], aot_deopt_reason_name(reason));
+      u32 site   = top_sites[i];
+      u32 reason = __atomic_load_n(&AOT_DEOPT_SITE_REASONS[site], __ATOMIC_RELAXED);
+      u32 kind   = __atomic_load_n(&AOT_DEOPT_SITE_KINDS[site], __ATOMIC_RELAXED);
+      u64 loc    = __atomic_load_n(&AOT_DEOPT_SITE_LOCS[site], __ATOMIC_RELAXED);
+      u32 aux    = __atomic_load_n(&AOT_DEOPT_SITE_AUX[site], __ATOMIC_RELAXED);
+
+      fprintf(f, "AOT_DEOPT site[%u] hits=%llu reason=%s", site, (unsigned long long)top_hits[i], aot_deopt_reason_name(reason));
+      if (kind != AOT_DEOPT_SITE_KIND_NONE || loc != 0 || aux != 0) {
+        fprintf(f, " kind=%s loc=%llu", aot_deopt_site_kind_name(kind), (unsigned long long)loc);
+        if (kind == AOT_DEOPT_SITE_KIND_HEAD_SWI_NON_NUM) {
+          fprintf(f, " expect_num=%u", aux);
+        } else if (kind == AOT_DEOPT_SITE_KIND_HEAD_MAT_NON_CTR) {
+          fprintf(f, " expect_ctr_ext=%u", aux);
+        } else if (aux != 0) {
+          fprintf(f, " aux=%u", aux);
+        }
+      }
+      fprintf(f, "\n");
     }
   }
 

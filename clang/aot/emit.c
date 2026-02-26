@@ -10,6 +10,9 @@ fn char *table_get(u32 id);
 // Controls whether emitted AOT code should include interaction counting calls.
 static int AOT_EMIT_ITRS = 1;
 static u32 AOT_EMIT_DEOPT_SITE = 0;
+static u8  AOT_EMIT_DEOPT_KIND[AOT_DEOPT_SITE_CAP] = {0};
+static u64 AOT_EMIT_DEOPT_LOC[AOT_DEOPT_SITE_CAP] = {0};
+static u32 AOT_EMIT_DEOPT_AUX[AOT_DEOPT_SITE_CAP] = {0};
 
 // Returns 1 when this AOT build needs interaction counting.
 fn int aot_emit_counting(const AotBuildCfg *cfg) {
@@ -183,18 +186,41 @@ fn void aot_emit_env_head(FILE *f, u32 dep) {
   }
 }
 
+// Stores one static metadata entry for one emitted deopt site.
+fn void aot_emit_deopt_site_note(u32 site, u32 kind, u64 loc, u32 aux) {
+  if (site >= AOT_DEOPT_SITE_CAP) {
+    return;
+  }
+  AOT_EMIT_DEOPT_KIND[site] = (u8)kind;
+  AOT_EMIT_DEOPT_LOC[site]  = loc;
+  AOT_EMIT_DEOPT_AUX[site]  = aux;
+}
+
 // Emits one ALO expression + one deopt counter site for static `loc`.
-fn void aot_emit_alo_expr(FILE *f, u64 loc, u32 dep, u32 reason) {
+fn void aot_emit_alo_expr_meta(FILE *f, u64 loc, u32 dep, u32 reason, u32 kind, u32 aux) {
   u32 site = AOT_EMIT_DEOPT_SITE++;
+  aot_emit_deopt_site_note(site, kind, loc, aux);
   fprintf(f, "aot_fallback_alo(%lluULL, %u, ", (unsigned long long)loc, dep);
   aot_emit_env_head(f, dep);
   fprintf(f, ", %u, %u)", reason, site);
+}
+
+// Emits one default ALO expression without extra site metadata.
+fn void aot_emit_alo_expr(FILE *f, u64 loc, u32 dep, u32 reason) {
+  aot_emit_alo_expr_meta(f, loc, dep, reason, AOT_DEOPT_SITE_KIND_NONE, 0);
 }
 
 // Emits one deopt return for current location + lexical env.
 fn void aot_emit_ret_fallback_loc(FILE *f, u64 loc, u32 dep, u32 reason, const char *pad) {
   fprintf(f, "%sreturn ", pad);
   aot_emit_alo_expr(f, loc, dep, reason);
+  fprintf(f, ";\n");
+}
+
+// Emits one deopt return with explicit strict-site metadata.
+fn void aot_emit_ret_fallback_loc_meta(FILE *f, u64 loc, u32 dep, u32 reason, u32 kind, u32 aux, const char *pad) {
+  fprintf(f, "%sreturn ", pad);
+  aot_emit_alo_expr_meta(f, loc, dep, reason, kind, aux);
   fprintf(f, ";\n");
 }
 
@@ -333,7 +359,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         fprintf(f, "%s%s = aot_force_dup(%s);\n", pad1, arg, arg);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%sif (term_tag(%s) != NUM) {\n", pad, arg);
-        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        aot_emit_ret_fallback_loc_meta(f, loc, dep, AOT_DEOPT_EXPR_UNSUPPORTED_TAG, AOT_DEOPT_SITE_KIND_HEAD_SWI_NON_NUM, term_ext(term), pad1);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%sif (term_val(%s) == %uULL) {\n", pad, arg, term_ext(term));
         fprintf(f, "%s(*s_pos)--;\n", pad1);
@@ -379,7 +405,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%su8 %s = term_tag(%s);\n", pad, tag_n, arg);
         fprintf(f, "%sif (%s < C00 || %s > C16) {\n", pad, tag_n, tag_n);
-        aot_emit_ret_head(f, loc, dep, pad1, tmp);
+        aot_emit_ret_fallback_loc_meta(f, loc, dep, AOT_DEOPT_EXPR_UNSUPPORTED_TAG, AOT_DEOPT_SITE_KIND_HEAD_MAT_NON_CTR, term_ext(term), pad1);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%sif (term_ext(%s) == %u) {\n", pad, arg, term_ext(term));
         fprintf(f, "%s(*s_pos)--;\n", pad1);
@@ -655,6 +681,29 @@ fn void aot_emit_register(FILE *f) {
   fprintf(f, "}\n\n");
 }
 
+// Emits registration for source-mapped strict deopt sites.
+fn void aot_emit_register_deopt_sites(FILE *f) {
+  u32 len = AOT_EMIT_DEOPT_SITE;
+  if (len > AOT_DEOPT_SITE_CAP) {
+    len = AOT_DEOPT_SITE_CAP;
+  }
+
+  fprintf(f, "// Registers strict-site metadata for deopt counters.\n");
+  fprintf(f, "static void aot_register_deopt_sites_generated(void) {\n");
+  for (u32 site = 0; site < len; site++) {
+    u32 kind = AOT_EMIT_DEOPT_KIND[site];
+    if (kind == AOT_DEOPT_SITE_KIND_NONE) {
+      continue;
+    }
+    fprintf(f, "  aot_deopt_site_define(%u, %u, %lluULL, %u);\n",
+      site,
+      kind,
+      (unsigned long long)AOT_EMIT_DEOPT_LOC[site],
+      AOT_EMIT_DEOPT_AUX[site]);
+  }
+  fprintf(f, "}\n\n");
+}
+
 // Emits the static FFI-load table used by standalone AOT programs.
 fn void aot_emit_ffi_table(FILE *f, const AotBuildCfg *cfg) {
   u32 ffi_len = cfg ? cfg->ffi_len : 0;
@@ -702,6 +751,7 @@ fn void aot_emit_entry_main(FILE *f, const AotBuildCfg *cfg) {
   fprintf(f, "  }\n");
   fprintf(f, "\n");
   fprintf(f, "  aot_register_generated();\n");
+  fprintf(f, "  aot_register_deopt_sites_generated();\n");
   fprintf(f, "  RuntimeEvalCfg eval = {\n");
   fprintf(f, "    .do_collapse = %d,\n", eval_cfg.do_collapse);
   fprintf(f, "    .collapse_limit = %d,\n", eval_cfg.collapse_limit);
@@ -722,6 +772,9 @@ fn void aot_emit_entry_main(FILE *f, const AotBuildCfg *cfg) {
 fn void aot_emit_to_file(FILE *f, const char *runtime_path, const char *src_path, const char *src_text, const AotBuildCfg *cfg) {
   AOT_EMIT_ITRS = aot_emit_counting(cfg);
   AOT_EMIT_DEOPT_SITE = 0;
+  memset(AOT_EMIT_DEOPT_KIND, 0, sizeof(AOT_EMIT_DEOPT_KIND));
+  memset(AOT_EMIT_DEOPT_LOC, 0, sizeof(AOT_EMIT_DEOPT_LOC));
+  memset(AOT_EMIT_DEOPT_AUX, 0, sizeof(AOT_EMIT_DEOPT_AUX));
 
   fprintf(f, "// Auto-generated by HVM AOT.\n");
   fprintf(f, "// This file is standalone: compile with `clang -O2 -o <out> <file.c>`.\n");
@@ -748,6 +801,7 @@ fn void aot_emit_to_file(FILE *f, const char *runtime_path, const char *src_path
   }
 
   aot_emit_register(f);
+  aot_emit_register_deopt_sites(f);
   aot_emit_entry_main(f, cfg);
 }
 
