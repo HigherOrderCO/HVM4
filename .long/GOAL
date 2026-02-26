@@ -1,0 +1,165 @@
+GOAL: Improve, optimize and extend HVM's AOT compiler. 
+======================================================
+
+HVM has an AOT compiler (./clang/aot/), that converts user-defined functions
+into faster, native C procedures. It works is by *emulating* HVM's interpreter
+against a statically known top-level definition; technically, acting as a
+*partial application* of the interpreter against the compiled function. For
+example, consider the mul2 definition:
+
+mul2 = λ{0:0;1+:λp.mul2(p-1)}
+main = mul2(123)
+
+On interpreted mode, 'mul2(123)' *expands* mul2 lazily via ALO (allocation) nodes,
+allowing the program above to unfold as:
+
+<λ{0:0;1+:λp.mul2(p-1)}>(123)
+<λp.mul2(p-1)>(123)
+λp.<mul2(p-1)>(123)
+<mul2(p-1)|p←123>
+<mul2(p-1)|p←123>
+<mul2|p←123>(<p-1|p←123>)
+mul2(123-1)
+
+Where <p> is an ALO node pointing to a static, immutable top-level definition
+Term AST. This somewhat efficient, since ALO expands lazily, and we never have
+to allocate unreached branches. Yet, it is still wasteful, because we *know* the
+shape of mul2 statically, so, reading it and compiling intermediate
+sub-expressions over and over is not efficient. Instead, we could have just
+compiled it to a native C function that doesn't allocate anything at all:
+
+Term mul2() {
+  // perform an inline APP-SWI-U32 interaction
+  Term x = ... pop app arg from the stack ...
+  switch (term_tag(x)) {
+    case U32: {
+      switch (term_val(x)) {
+        case 0: {
+          ...
+        }
+        default: {
+          // perform an inline APP-LAM interaction
+          Term p = ... pop app arg from the stack ...
+          ...
+        }
+      }
+    }
+  }
+}
+
+That function just pops applications from the top-level stack, and consumes
+them, performing "inline interactions", and returning only the final result. To
+be more specific, every top-level definition that formatted as a "case-tree" -
+that is, a tree of λ's and λ-matches, with possibly interleaved local
+definitions (LET's) and duplications (DUP's), with each branch head ("tail
+position") being an expression composed of applications, operations and
+recursive calls, SHOULD be compiled to the equivalent C native function, bailing
+out only when interaction net specific interactions (ex: pattern-matching when
+the argument of the top stack frame APP is a SUP node, or when the top stack
+frame is a DUP instead of an APP, and similar C-incompatible cases).
+
+Now, while this idea is sound, the implementation is still very lackluster.
+Most of the code is STILL running on interpreted ALO fallbacks, instead of
+properly going through HOT paths. This is evident from the benchmarks:
+
++--------------+-------------+-------------+
+| benchmark    |    hvmi     |    hvmc     |
++--------------+-------------+-------------+
+| bignat_mul   |   1.565892s |   1.652525s |
+| cnot_04      |   0.024805s |   0.082247s |
+| cnot_16      |   0.028848s |   0.094131s |
+| cnot_24      |   1.249406s |   1.457540s |
+| collatz      |     TIMEOUT |     TIMEOUT |
+| edit_dist    |   1.582906s |   1.745439s |
+| gab_boyer    |   1.488060s |   1.489207s |
+| gab_deriv    |   1.510860s |   1.780837s |
+| gab_tak      |   0.029224s |   0.085373s |
+| gab_takl     |   1.755080s |   1.931637s |
+| gen_easy     |   0.237862s |   0.289988s |
+| gen_hard     |     TIMEOUT |     TIMEOUT |
+| gen_mul4k    |   1.355235s |   1.444730s |
+| graph_color  |     TIMEOUT |     TIMEOUT |
+| huffman      |   1.762610s |   1.869296s |
+| lambda_eval  |   1.676202s |   1.856088s |
+| mat_mul      |   1.585469s |   1.780599s |
+| nqueens      |   1.485036s |   1.712027s |
+| prime_sieve  |   1.355702s |   1.398508s |
+| queue_bank   |   0.745647s |   0.773584s |
+| ray_sphere   |   1.598270s |   1.753360s |
+| seq_pingpong |   1.471877s |   1.490475s |
+| sort_merge   |   1.516936s |   0.864962s |
+| sort_quick   |   1.643071s |   1.796579s |
+| spin_tree    |     TIMEOUT |     TIMEOUT |
+| tree_fold    |   0.810934s |   0.906734s |
+| trie_bitwise |   1.785426s |   1.850693s |
+| u32_fib      |    TIMEOUT* |   1.279875s |
++--------------+-------------+-------------+
+* manual run: u32_fib takes 5.5s on interpreted mode
+
+As you can see, other than u32_fib, most benchmarks show no difference. If the
+compiler worked as intended, most of these benchmarks, which ARE formatted as
+case-trees, shouldn't need to go through the interpreter at all, and, naturally,
+would run much faster.
+
+We know some cases where the compiler bails out to ALO's too early. Example:
+
+foo = λx. !X&L=x; λ{...stuff...}
+
+In the term above, the presentce of a DUP node between the λ and the λ-match
+causes the compiler to skip fast mode, and just use an ALO for the whole body,
+skipping the hot path entirely. LET's are represented as (λname.(...))(123)
+or (λ{λname....})(123), which cause fallbacks too.
+
+Your main goal is to *fundamentally redesig* HVM4's compiler to ensure that the
+case-tree subset is properly compiled to efficient C functions, including
+lambdas, pattern-matching, constructors, applications, operators, recursive
+calls, and anything else needed to make the benchmarks above, and similar,
+compute in full compiled C mode, as generically as possible.
+
+To do so, do NOT resort to quick fixes and patches. Instead, UNDERSTAND how
+interaction nets work fundamentally, reason about WHICH interactions can be
+represented efficiently in native C and WHICH should fallback to ALO's, and
+use THAT knowledge to redesign the compiler.
+
+You can find the current benchmarks in:
+
+../bench/bench (.hvm files inside that dir)
+
+You can run them via:
+
+~/t/dev/bench/bench.ts --timeout 3 hvmi hvmc
+
+(Don't forget to rebuild and ensure the global `hvm` points to ./clang/main!)
+
+IMPORTANT: do NOT push a commit if it breaks any of the tests or benchmarks.
+
+NOTE: the following commit:
+7834b787c42f0f6e1844eee4339a497e9357b62a
+Made a lot of progress, but it introduced bugs and breaked benchmarks. Study it
+as an inspiration, since there is a lot of valuable insight in its code.
+
+ADMISSION CRITERIA:
+
+The GOAL is completed when the following benchmarks run in full compiled mode:
+- bignat_mul
+- edit_dist
+- gab_tak
+- gab_takl
+- graph_color
+- huffman
+- lambda_eval
+- mat_mul
+- nqueens
+- prime_sieve
+- queue_bank
+- ray_sphere
+- sort_merge
+- sort_quick
+- tree_fold
+- trie_bitwise
+- u32_fib
+Which can be evidenced by them all taking much less time to evaluate, compared
+to the interpreted mode (at least a ~10x speedup on each is demanded). Also, all
+tests must still pass, and all benchmarks must still return the same result.
+
+Now, work towards completing the GOAL.
