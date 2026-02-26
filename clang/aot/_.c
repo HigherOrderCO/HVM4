@@ -53,24 +53,9 @@ fn void aot_itrs_add(u64 amount) {
 // Fallback
 // --------
 
-// Rebuilds an ALO node from captured APP-LAM arguments.
-fn Term aot_fallback_alo(u64 tm_loc, u16 len, const Term *args) {
-  if (len == 0) {
-    return term_new(0, ALO, 0, tm_loc);
-  }
-
-  u64 ls_loc = 0;
-  for (u16 i = 0; i < len; i++) {
-    u64 bind = heap_alloc(2);
-    heap_set(bind + 0, term_sub_set(args[i], 1));
-    heap_set(bind + 1, term_new(0, NUM, 0, ls_loc));
-    ls_loc = bind;
-  }
-
-  u64 alo_loc = heap_alloc(1);
-  u64 alo_val = ((ls_loc & ALO_LS_MASK) << ALO_TM_BITS) | (tm_loc & ALO_TM_MASK);
-  heap_set(alo_loc, alo_val);
-  return term_new(0, ALO, len, alo_loc);
+// Rebuilds an ALO node from a live lexical environment bind-list head.
+fn Term aot_fallback_alo(u64 tm_loc, u16 len, u64 ls_loc) {
+  return term_new_alo(ls_loc, len, tm_loc);
 }
 
 // Reapplies arguments [from, argc) to a head term.

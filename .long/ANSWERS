@@ -1,0 +1,22 @@
+# A1: Yes, focus on DUPs.
+
+Understand DUPs fundamentally and implement, from first principles, whatever
+machinery is needed to ensure DUPs don't interrupt fast mode. Stick to wnf() as
+the reference interpreter and semantics — do NOT invent anything that detours
+from it. The commit mentioned in GOAL attempted this and may have valuable
+insights.
+
+You're free to focus 100% on this. I highly recommend spending your time
+accumulating domain knowledge and only making edits when you're 100% certain
+you have the correct fundamental structure. Measure twice, cut once.
+
+Also: rewrite things from scratch as soon as you believe doing so would result
+in a better version. Do NOT patch a worse foundation if you have a better one
+in mind. Rewrites are a VERY good use of your time.
+
+# A2: Static APP-LAM should absolutely be inlinable.
+
+When the function is a static lambda, treating it as a let is observationally
+equivalent. If that's not the case, something weird is going on and it's most
+likely a misimplementation. So yes, this is aligned — but make sure the
+implementation is actually correct and not doing something unexpected.

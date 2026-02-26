@@ -1,46 +1,50 @@
 Round 1 (2026-02-26)
 
 What changed
-- File changed: clang/aot/emit.c.
-- Kept the conservative DUP fast-path from earlier in this round:
-  - compile through DUP only when DUP value is statically copy-free (NUM/C00/C01..C16 tree).
-  - helpers: aot_emit_is_static_copy_free_rec(loc, fuel), aot_emit_is_static_copy_free(loc).
-  - recursion fuel is capped at 1024 (fail-closed).
-- Added a new conservative expression-mode APP-LAM path:
-  - in non-head emission, if tag is APP and static function is LAM and dep < AOT_ENV_CAP,
-    compile APP-LAM directly instead of deopting whole APP.
-  - binder is captured lazily as ALO (Term xN = aot_fallback_alo(arg_loc, env)) to preserve
-    lazy semantics and avoid forcing the argument.
-  - count one interaction via aot_emit_itrs_inc(), then continue emitting lam body at dep+1.
-  - all other non-head APP shapes still fallback to ALO exactly as before.
+- Files changed: `clang/aot/_.c`, `clang/aot/emit.c`.
+- Replaced fallback env capture model (`const Term args[]`) with live bind-list heads:
+  - `aot_fallback_alo(tm_loc, len, ls_loc)` now directly returns `term_new_alo(ls_loc, len, tm_loc)`.
+  - No per-fallback re-encoding of binders from plain `xN` terms.
+- Emitter now tracks lexical env as real bind nodes (`eN`) in compiled code.
+  - LAM binders (`head` LAM and expr APP-LAM path) allocate `eN=[SUB(xN), prev]`.
+  - DUP binders always compile (removed static-only guard), still capped by `AOT_ENV_CAP`.
+  - DUP binder cell policy:
+    - if `aot_is_copy_free(xN)`: store `SUB(xN)` (resolved immediately),
+    - else: store raw `xN` (pending DUP cell).
+- DP/BJ variable emission now observes live DUP state via `eN`:
+  - read `cell = heap_read(eN + 0)`;
+  - if `cell` has SUB bit: use substituted payload;
+  - else emit `DP0/DP1` term with same label and loc=`eN`.
+- Fallback expressions now use current env head (`e{dep-1}`) and preserve pending vs substituted DUP state.
+- Removed now-unneeded static copy-free recursion helpers from emitter.
 
-Important bug found and fixed
-- Without recursion fuel, compiling some benchmark files (example: ../bench/bench/gab_deriv/main.hvm with -o)
-  could segfault (exit 139) during AOT emission.
-- Root cause: unbounded recursion in static copy-free check.
-- Fix: add fuel and fail-closed when exhausted.
+Semantic notes
+- This mirrors `wnf` linked DUP behavior better: DUP state is represented as a mutable cell, not only as a captured value.
+- Sharing is preserved between compiled terms and deopted residual ALO terms because both reference the same live env-chain nodes.
+- DUP introduction no longer increments interaction count in the emitter path.
 
-Failed approaches this round (reverted)
-- Broader non-head APP/LAM and constructor passthrough attempts caused runtime regressions
-  (notably gen_easy could hit "RUNTIME_ERROR: cannot apply a number").
-- Current APP-LAM path intentionally keeps lazy ALO capture and very tight guards.
+Critical pitfalls found
+- Deterministic `--as-c` temp path collides across parallel runs; this caused misleading diagnostics during debugging.
+  - Always run AOT checks sequentially; kill stale `test/_all_.sh` runs before targeted `--as-c` repros.
+- After emitter edits, stale `clang/main` can make debugging look inconsistent; always rebuild before interpreting generated C.
+- Codegen scope bug: declaring `Term <out>` inside both branches of emitted `if` made `<out>` undefined after the block.
+  - Fix pattern: declare once before `if`, assign in branches.
 
 Validation done
-- Rebuilt: cd clang && clang -O2 -o main main.c
-- Full suite passed: ./test/_all_.sh
-- Bench sanity checks (manual output parity):
-  - gab_deriv: hvmi vs hvmc matched.
-  - gen_easy (-C1): hvmi vs hvmc matched.
-
-Useful operational notes
-- bench.ts adds -C1 for gen_* benchmarks.
-- Running multiple "--as-c" invocations in parallel collides on deterministic temp file paths; run sequentially.
+- Rebuilt: `cd clang && clang -O2 -o main main.c`.
+- Full suite: `./test/_all_.sh` passed (interpreted + AOT).
+- Bench parity checks:
+  - `../bench/bench/gab_deriv/main.hvm`: hvmi vs hvmc outputs match.
+  - `../bench/bench/gen_easy/main.hvm -C1`: hvmi vs hvmc outputs match.
 
 Current state
-- AOT now handles one more important case-tree shape: non-head static APP-LAM (LET-shaped administrative redexes)
-  without deopting the entire expression.
-- This is still conservative; broad speedups will likely require better dynamic DUP handling.
+- AOT no longer bails out at DUP just because value is non-static/non-copy-free.
+- Compiled mode now carries dynamic DUP binder state through env cells and deopts without losing that state.
+- This is foundational correctness plumbing; it increases compiled coverage across DUP-heavy case trees.
+
+Remaining limitations
+- Many strict contexts still eventually delegate DUP interactions to normal runtime reduction when a `DP0/DP1` term is forced.
+- Large speedups likely require compiling more of the DP interaction frontier directly (not only preserving state through deopt).
 
 Next likely step
-- Implement explicit dynamic DUP binder state in compiled environments/fallback capture
-  (pending dup cell vs substituted value), so non-static DUP-heavy code stays compiled safely.
+- Add compiled handling for forced DP interactions in strict/head contexts (mirror `wnf` DP-frame dispatch: DUP-NAM/LAM/SUP/NOD), reusing runtime helpers where safe, to reduce wnf fallback pressure on DUP-heavy hot paths.
