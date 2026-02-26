@@ -24,7 +24,7 @@ mul2(123-1)
 Where <p> is an ALO node pointing to a static, immutable top-level definition
 Term AST. This somewhat efficient, since ALO expands lazily, and we never have
 to allocate unreached branches. Yet, it is still wasteful, because we *know* the
-shape of mul2 statically, so, reading it and compiling intermediate
+shape of mul2 statically, so, reading it and allocating (ALO) intermediate
 sub-expressions over and over is not efficient. Instead, we could have just
 compiled it to a native C function that doesn't allocate anything at all:
 
