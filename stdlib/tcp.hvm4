@@ -37,7 +37,7 @@
   ! h  = @fst(w);
   λ{
     #Conn: @pure(h);
-    #Fail: λreason. λmsg.#ERR{msg};
+    #TcpFail: λreason. λmsg.#ERR{msg};
     &{}
   }(@snd(w))
 

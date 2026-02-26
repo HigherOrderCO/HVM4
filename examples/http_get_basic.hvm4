@@ -6,7 +6,7 @@
 @resp_to_status_body = λev.
   λ{
     #Resp:     λstatus. λheaders. λbody.@pure(#P{status, body});
-    #Fail:     λreason. λmsg.#ERR{msg};
+    #HttpFail: λreason. λmsg.#ERR{msg};
     #Canceled: #ERR{"http request canceled"};
     &{}
   }(ev)

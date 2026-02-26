@@ -31,8 +31,8 @@
     ! e  = @snd(wr);
     !&a  = acc;
     λ{
-      #BYT: λn.@stream_read_all_go(h, #BYT{n} <> a);
-      #Eof: @pure(#P{h, @list_rev(a)});
+      #StreamByte: λb.@stream_read_all_go(h, b <> a);
+      #StreamEof: @pure(#P{h, @list_rev(a)});
       &{}
     }(e)
   )

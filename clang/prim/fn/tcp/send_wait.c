@@ -111,7 +111,7 @@ fn Term tcp_send_wait_go_bytes(Term *args) {
 
 // %tcp_send_wait_go_io(tcp, bytes)
 // --------------------------------
-// #OK{#Rdy{#Tcp{id,seq+1},#Sent{n}|#Fail{reason,msg}}} | #ERR{String}
+// #OK{#Rdy{#Tcp{id,seq+1},#Sent{n}|#TcpFail{reason,msg}}} | #ERR{String}
 fn Term prim_fn_tcp_send_wait_go_io(Term *args) {
   u32 id  = 0;
   u32 seq = 0;

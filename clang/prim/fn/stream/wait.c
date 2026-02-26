@@ -55,7 +55,7 @@ fn Term stream_wait_go_strm(Term *args) {
 
 // %stream_wait_go_io(strm)
 // ------------------------
-// #OK{#Rdy{#Strm{id,seq+1},#BYT{n}|#Eof}} | #ERR{String}
+// #OK{#Rdy{#Strm{id,seq+1},#StreamByte{#BYT{n}}|#StreamEof{}}} | #ERR{String}
 fn Term prim_fn_stream_wait_go_io(Term *args) {
   u32 id  = 0;
   u32 seq = 0;

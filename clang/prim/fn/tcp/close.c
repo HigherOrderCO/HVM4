@@ -55,7 +55,7 @@ fn Term tcp_close_go_tcp(Term *args) {
 
 // %tcp_close_go_io(tcp)
 // ---------------------
-// #OK{#Rdy{#Tcp{id,seq+1},#Closed{}|#Fail{reason,msg}}} | #ERR{String}
+// #OK{#Rdy{#Tcp{id,seq+1},#Closed{}|#TcpFail{reason,msg}}} | #ERR{String}
 fn Term prim_fn_tcp_close_go_io(Term *args) {
   u32 id  = 0;
   u32 seq = 0;

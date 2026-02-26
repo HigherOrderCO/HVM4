@@ -17,6 +17,7 @@ static pthread_mutex_t TIMER_LOCK = PTHREAD_MUTEX_INITIALIZER;
 static u32 TIMER_NAM_TIME = 0;
 static u32 TIMER_NAM_PEND = 0;
 static u32 TIMER_NAM_RDY  = 0;
+static u32 TIMER_NAM_NONE = 0;
 
 fn Term wnf(Term term);
 
@@ -60,7 +61,9 @@ fn Term timer_new_pend(u32 id, u32 seq) {
 
 fn Term timer_new_rdy(u32 id, u32 seq) {
   Term time = timer_new_time(id, seq);
-  return term_new_ctr(TIMER_NAM_RDY, 1, &time);
+  Term none = term_new_ctr(TIMER_NAM_NONE, 0, NULL);
+  Term args[2] = {time, none};
+  return term_new_ctr(TIMER_NAM_RDY, 2, args);
 }
 
 fn u8 timer_parse_num(Term term, u32 *out) {
@@ -144,6 +147,7 @@ fn void prim_timer_init(void) {
   TIMER_NAM_TIME = table_find("Time", 4);
   TIMER_NAM_PEND = table_find("Pend", 4);
   TIMER_NAM_RDY  = table_find("Rdy", 3);
+  TIMER_NAM_NONE = table_find("None", 4);
 
   prim_timer_start_init();
   prim_timer_poll_init();

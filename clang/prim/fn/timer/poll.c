@@ -55,7 +55,7 @@ fn Term timer_poll_go_time(Term *args) {
 
 // %timer_poll_go_io(time)
 // -----------------------
-// #OK{#Pend{#Time{id,seq+1}}|#Rdy{#Time{id,seq+1}}} | #ERR{String}
+// #OK{#Pend{#Time{id,seq+1}}|#Rdy{#Time{id,seq+1},#None{}}} | #ERR{String}
 fn Term prim_fn_timer_poll_go_io(Term *args) {
   u32 id  = 0;
   u32 seq = 0;

@@ -55,7 +55,7 @@ fn Term timer_wait_go_time(Term *args) {
 
 // %timer_wait_go_io(time)
 // -----------------------
-// #OK{#Rdy{#Time{id,seq+1}}} | #ERR{String}
+// #OK{#Rdy{#Time{id,seq+1},#None{}}} | #ERR{String}
 fn Term prim_fn_timer_wait_go_io(Term *args) {
   u32 id  = 0;
   u32 seq = 0;

@@ -1476,14 +1476,14 @@ fn void prim_http_init(void) {
   HTTP_NAM_RDY       = table_find("Rdy", 3);
   HTTP_NAM_RESP      = table_find("Resp", 4);
   HTTP_NAM_HDR       = table_find("Hdr", 3);
-  HTTP_NAM_FAIL      = table_find("Fail", 4);
+  HTTP_NAM_FAIL      = table_find("HttpFail", 8);
   HTTP_NAM_CANCELED  = table_find("Canceled", 8);
 
-  HTTP_NAM_TIMEOUT        = table_find("Timeout", 7);
-  HTTP_NAM_DNS            = table_find("Dns", 3);
+  HTTP_NAM_TIMEOUT        = table_find("HttpTimeout", 11);
+  HTTP_NAM_DNS            = table_find("HttpDns", 7);
   HTTP_NAM_CONNECT        = table_find("Connect", 7);
   HTTP_NAM_TLS            = table_find("Tls", 3);
-  HTTP_NAM_PROTOCOL       = table_find("Protocol", 8);
+  HTTP_NAM_PROTOCOL       = table_find("HttpProtocol", 12);
   HTTP_NAM_CURL_EXIT      = table_find("CurlExit", 8);
   HTTP_NAM_CURL_SIGNAL    = table_find("CurlSignal", 10);
   HTTP_NAM_PARSE          = table_find("Parse", 5);

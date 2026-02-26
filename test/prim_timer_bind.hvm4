@@ -6,4 +6,4 @@
   }(r)
 
 @main = @bind(%timer_start(0), λh.%timer_wait(h))
-//!#OK{#Rdy{#Time{1,1}}}
+//!#OK{#Rdy{#Time{1,1},#None{}}}

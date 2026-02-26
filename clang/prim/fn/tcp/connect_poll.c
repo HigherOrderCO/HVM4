@@ -55,7 +55,7 @@ fn Term tcp_connect_poll_go_tcp(Term *args) {
 
 // %tcp_connect_poll_go_io(tcp)
 // ----------------------------
-// #OK{#Pend{#Tcp{id,seq+1}}|#Rdy{#Tcp{id,seq+1},#Conn{}|#Fail{reason,msg}}} | #ERR{String}
+// #OK{#Pend{#Tcp{id,seq+1}}|#Rdy{#Tcp{id,seq+1},#Conn{}|#TcpFail{reason,msg}}} | #ERR{String}
 fn Term prim_fn_tcp_connect_poll_go_io(Term *args) {
   u32 id  = 0;
   u32 seq = 0;

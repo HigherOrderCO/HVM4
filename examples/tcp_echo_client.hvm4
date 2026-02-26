@@ -6,8 +6,8 @@
 @decode_recv_evt = λev.
   λ{
     #Recv: λbs.@bytes_to_string(bs);
-    #Eof:  @pure("<eof>");
-    #Fail: λreason. λmsg.#ERR{msg};
+    #TcpEof:  @pure("<eof>");
+    #TcpFail: λreason. λmsg.#ERR{msg};
     &{}
   }(ev)
 

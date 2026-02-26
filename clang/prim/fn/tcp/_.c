@@ -680,17 +680,17 @@ fn void prim_tcp_init(void) {
   TCP_NAM_CONN   = table_find("Conn", 4);
   TCP_NAM_RECV   = table_find("Recv", 4);
   TCP_NAM_SENT   = table_find("Sent", 4);
-  TCP_NAM_EOF    = table_find("Eof", 3);
+  TCP_NAM_EOF    = table_find("TcpEof", 6);
   TCP_NAM_CLOSED = table_find("Closed", 6);
-  TCP_NAM_FAIL   = table_find("Fail", 4);
+  TCP_NAM_FAIL   = table_find("TcpFail", 7);
 
-  TCP_NAM_TIMEOUT       = table_find("Timeout", 7);
-  TCP_NAM_DNS           = table_find("Dns", 3);
+  TCP_NAM_TIMEOUT       = table_find("TcpTimeout", 10);
+  TCP_NAM_DNS           = table_find("TcpDns", 6);
   TCP_NAM_REFUSED       = table_find("Refused", 7);
   TCP_NAM_UNREACHABLE   = table_find("Unreachable", 11);
   TCP_NAM_RESET         = table_find("Reset", 5);
   TCP_NAM_BROKEN_PIPE   = table_find("BrokenPipe", 10);
-  TCP_NAM_PROTOCOL      = table_find("Protocol", 8);
+  TCP_NAM_PROTOCOL      = table_find("TcpProtocol", 11);
   TCP_NAM_NOT_CONNECTED = table_find("NotConnected", 12);
   TCP_NAM_SYS           = table_find("Sys", 3);
 

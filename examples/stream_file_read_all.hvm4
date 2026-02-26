@@ -7,8 +7,8 @@
   !&h  = @fst(w2);
   ! e  = @snd(w2);
   λ{
-    #BYT: λn.@stream_read_all(h, #BYT{n} <> acc);
-    #Eof: @pure(#P{h, @list_rev(acc)});
+    #StreamByte: λb.@stream_read_all(h, b <> acc);
+    #StreamEof: @pure(#P{h, @list_rev(acc)});
     &{}
   }(e)
 

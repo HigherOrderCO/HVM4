@@ -9,7 +9,7 @@
   %timer_poll(t)
 
 @timer_wait = λt.
-  @wait(%timer_wait(t), @decode_wait_h)
+  @map(@wait(%timer_wait(t), @decode_wait_he), @fst)
 
 @sleep_ms = λms.
   ! f0 = λ t0 ;

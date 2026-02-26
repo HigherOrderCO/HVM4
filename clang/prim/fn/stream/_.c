@@ -27,7 +27,8 @@ static pthread_mutex_t STREAM_LOCK = PTHREAD_MUTEX_INITIALIZER;
 static u32 STREAM_NAM_STRM = 0;
 static u32 STREAM_NAM_PEND = 0;
 static u32 STREAM_NAM_RDY  = 0;
-static u32 STREAM_NAM_EOF  = 0;
+static u32 STREAM_NAM_STREAM_BYTE = 0;
+static u32 STREAM_NAM_STREAM_EOF  = 0;
 
 fn Term wnf(Term term);
 
@@ -50,13 +51,10 @@ fn Term stream_new_pend(u32 id, u32 seq) {
   return term_new_ctr(STREAM_NAM_PEND, 1, &strm);
 }
 
-fn Term stream_new_byt(u32 byt) {
-  Term arg = term_new_num(byt);
-  return term_new_ctr(SYM_BYT, 1, &arg);
-}
-
-fn Term stream_new_eof(void) {
-  return term_new_ctr(STREAM_NAM_EOF, 0, NULL);
+fn Term stream_new_stream_byte(u32 byte) {
+  Term num = term_new_num(byte);
+  Term byt = term_new_ctr(SYM_BYT, 1, &num);
+  return term_new_ctr(STREAM_NAM_STREAM_BYTE, 1, &byt);
 }
 
 fn Term stream_new_rdy_payload(u32 id, u32 seq, Term payload) {
@@ -66,11 +64,12 @@ fn Term stream_new_rdy_payload(u32 id, u32 seq, Term payload) {
 }
 
 fn Term stream_new_rdy_byt(u32 id, u32 seq, u32 byt) {
-  return stream_new_rdy_payload(id, seq, stream_new_byt(byt));
+  return stream_new_rdy_payload(id, seq, stream_new_stream_byte(byt));
 }
 
 fn Term stream_new_rdy_eof(u32 id, u32 seq) {
-  return stream_new_rdy_payload(id, seq, stream_new_eof());
+  Term eof = term_new_ctr(STREAM_NAM_STREAM_EOF, 0, NULL);
+  return stream_new_rdy_payload(id, seq, eof);
 }
 
 fn u8 stream_parse_num(Term term, u32 *out) {
@@ -224,7 +223,8 @@ fn void prim_stream_init(void) {
   STREAM_NAM_STRM = table_find("Strm", 4);
   STREAM_NAM_PEND = table_find("Pend", 4);
   STREAM_NAM_RDY  = table_find("Rdy", 3);
-  STREAM_NAM_EOF  = table_find("Eof", 3);
+  STREAM_NAM_STREAM_BYTE = table_find("StreamByte", 10);
+  STREAM_NAM_STREAM_EOF  = table_find("StreamEof", 9);
 
   prim_stream_stdin_open_init();
   prim_stream_file_open_init();

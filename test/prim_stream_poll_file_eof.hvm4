@@ -1,4 +1,4 @@
 @main =
   !!x = %stream_file_open("/dev/null");
   %stream_poll(#Strm{1,0})
-//!#OK{#Rdy{#Strm{1,1},#Eof{}}}
+//!#OK{#Rdy{#Strm{1,1},#StreamEof{}}}

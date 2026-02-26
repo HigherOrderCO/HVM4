@@ -7,14 +7,18 @@
   !&h  = @fst(w2);
   ! e  = @snd(w2);
   λ{
-    #BYT: λn.
+    #StreamByte: λb.
       λ{
-        10:
-          @pure(#P{h, @list_rev(acc)});
-        λx.
-          @stream_read_line(h, #BYT{x} <> acc)
-      }(n);
-    #Eof:
+        #BYT: λn.
+          λ{
+            10:
+              @pure(#P{h, @list_rev(acc)});
+            λx.
+              @stream_read_line(h, #BYT{x} <> acc)
+          }(n);
+        &{}
+      }(b);
+    #StreamEof:
       @pure(#P{h, @list_rev(acc)});
     &{}
   }(e)

@@ -111,7 +111,7 @@ fn Term tcp_recv_poll_go_max(Term *args) {
 
 // %tcp_recv_poll_go_io(tcp, max_bytes)
 // ------------------------------------
-// #OK{#Pend{#Tcp{id,seq+1}}|#Rdy{#Tcp{id,seq+1},#Recv{bytes}|#Eof{}|#Fail{reason,msg}}} | #ERR{String}
+// #OK{#Pend{#Tcp{id,seq+1}}|#Rdy{#Tcp{id,seq+1},#Recv{bytes}|#TcpEof{}|#TcpFail{reason,msg}}} | #ERR{String}
 fn Term prim_fn_tcp_recv_poll_go_io(Term *args) {
   u32 id  = 0;
   u32 seq = 0;
