@@ -2,41 +2,45 @@ Round 1 (2026-02-26)
 
 What changed
 - File changed: clang/aot/emit.c.
-- Added a conservative DUP fast-path in the AOT emitter for both head mode and expression mode.
-- New rule: only compile through DUP when the DUP value subtree is statically copy-free (NUM/C00/constructor tree of those).
-- Added helper:
-  - aot_emit_is_static_copy_free_rec(loc, fuel)
-  - aot_emit_is_static_copy_free(loc)
-- Fuel limit is 1024 to avoid emitter recursion overflow.
+- Kept the conservative DUP fast-path from earlier in this round:
+  - compile through DUP only when DUP value is statically copy-free (NUM/C00/C01..C16 tree).
+  - helpers: aot_emit_is_static_copy_free_rec(loc, fuel), aot_emit_is_static_copy_free(loc).
+  - recursion fuel is capped at 1024 (fail-closed).
+- Added a new conservative expression-mode APP-LAM path:
+  - in non-head emission, if tag is APP and static function is LAM and dep < AOT_ENV_CAP,
+    compile APP-LAM directly instead of deopting whole APP.
+  - binder is captured lazily as ALO (Term xN = aot_fallback_alo(arg_loc, env)) to preserve
+    lazy semantics and avoid forcing the argument.
+  - count one interaction via aot_emit_itrs_inc(), then continue emitting lam body at dep+1.
+  - all other non-head APP shapes still fallback to ALO exactly as before.
 
 Important bug found and fixed
-- Without fuel, compiling some benchmark files (ex: ../bench/bench/gab_deriv/main.hvm with -o) could segfault (exit 139) during AOT emission.
+- Without recursion fuel, compiling some benchmark files (example: ../bench/bench/gab_deriv/main.hvm with -o)
+  could segfault (exit 139) during AOT emission.
 - Root cause: unbounded recursion in static copy-free check.
-- Fix: fuel parameter and fail-closed when exhausted.
+- Fix: add fuel and fail-closed when exhausted.
 
 Failed approaches this round (reverted)
-- Tried non-head APP-LAM inlining for LET-shaped terms.
-- Tried expression-mode static constructor passthrough (C01..C16 -> heap_read when copy-free).
-- These introduced benchmark/runtime regressions (notably gen_easy produced "RUNTIME_ERROR: cannot apply a number").
-- Both were removed to restore correctness.
+- Broader non-head APP/LAM and constructor passthrough attempts caused runtime regressions
+  (notably gen_easy could hit "RUNTIME_ERROR: cannot apply a number").
+- Current APP-LAM path intentionally keeps lazy ALO capture and very tight guards.
 
 Validation done
-- Rebuilt clang/main.
-- Full suite passed twice:
-  - ./test/_all_.sh
-- Bench sanity checks (manual, benchmark-style flags):
-  - gab_deriv: hvmi vs hvmc output matched.
-  - gen_easy (-C1): hvmi vs hvmc output matched.
-  - gen_hard (-C1): compiled binary runs and times out under short alarm (expected for small timeout).
-- During bench.ts run, early hvmc ERROR rows were traced to intermediate buggy emitter state; after rollback/fixes those manual reproductions no longer error.
+- Rebuilt: cd clang && clang -O2 -o main main.c
+- Full suite passed: ./test/_all_.sh
+- Bench sanity checks (manual output parity):
+  - gab_deriv: hvmi vs hvmc matched.
+  - gen_easy (-C1): hvmi vs hvmc matched.
 
 Useful operational notes
 - bench.ts adds -C1 for gen_* benchmarks.
 - Running multiple "--as-c" invocations in parallel collides on deterministic temp file paths; run sequentially.
 
 Current state
-- Conservative correctness-only DUP improvement is in place.
-- No broad AOT speedup yet from this patch; it is mostly enabling a safe subset and avoiding previous regressions.
+- AOT now handles one more important case-tree shape: non-head static APP-LAM (LET-shaped administrative redexes)
+  without deopting the entire expression.
+- This is still conservative; broad speedups will likely require better dynamic DUP handling.
 
 Next likely step
-- If we want meaningful DUP coverage, implement explicit DUP binder state in fallback environments (pending dup cell vs substituted var), instead of forcing fallback for non-static DUP values.
+- Implement explicit dynamic DUP binder state in compiled environments/fallback capture
+  (pending dup cell vs substituted value), so non-static DUP-heavy code stays compiled safely.

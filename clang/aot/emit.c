@@ -494,6 +494,23 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       fprintf(f, "%sTerm %s = x%u;\n", pad, out, (u32)(lvl - 1));
       return;
     }
+    case APP: {
+      u64 app_loc = term_val(term);
+      Term fun = heap_read(app_loc + 0);
+      if (term_tag(fun) != LAM || dep >= AOT_ENV_CAP) {
+        fprintf(f, "%sTerm %s = ", pad, out);
+        aot_emit_alo_expr(f, loc, dep);
+        fprintf(f, ";\n");
+        return;
+      }
+
+      fprintf(f, "%sTerm x%u = ", pad, dep);
+      aot_emit_alo_expr(f, app_loc + 1, dep);
+      fprintf(f, ";\n");
+      aot_emit_itrs_inc(f, pad);
+      aot_emit_node(f, term_val(fun), dep + 1, out, 0, pad, tmp);
+      return;
+    }
     case DUP: {
       u64 dup_loc = term_val(term);
       if (dep >= AOT_ENV_CAP || !aot_emit_is_static_copy_free(dup_loc + 0)) {

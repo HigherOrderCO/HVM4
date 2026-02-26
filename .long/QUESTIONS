@@ -1,22 +1,21 @@
-1) For DUP fast-path policy, is this conservative rule acceptable, or do you want dynamic-value DUP support now?
+1) Priority check: should I now focus on dynamic DUP binder-state support as the next major AOT step?
 
-Context code (current conservative fast-path):
-```c
-// clang/aot/emit.c
-if (!aot_emit_is_static_copy_free(dup_loc + 0)) {
-  aot_emit_ret_fallback_loc(f, loc, dep, pad);
-  return;
-}
-Term xN = <dup value>;
-aot_emit_node(... dup body ...);
-```
-
-This means terms like the following still deopt:
-```hvm
-@main = λx. !X&L=x; @f(X₀, X₁)
-```
-Because `x` is dynamic, not statically copy-free.
+Context:
+- Current AOT only compiles through DUP when DUP value is statically copy-free.
+- For dynamic DUP values (example: `@main = λx. !X&L=x; @f(X₀, X₁)`), emitter still deopts to ALO.
+- This is currently the main blocker to compiling many case-tree programs end-to-end.
 
 Question:
-- Should I proceed to implement full dynamic DUP support in AOT by carrying DUP-binder state through fallbacks (pending dup cell vs substituted var), even if that is a larger refactor touching fallback env encoding and binder metadata?
-- Or do you prefer keeping DUP conservative for now and focus first on other hot-path gaps?
+- Do you want the next change to be a larger refactor that carries DUP binder runtime state in compiled envs
+  (pending DUP cell vs substituted value) so dynamic DUP can remain in compiled mode?
+
+2) Semantics policy check for expression-mode APP-LAM (newly added this round)
+
+Context:
+- I added a conservative non-head APP-LAM path only when APP.fun is static LAM.
+- It captures argument lazily as ALO in the binder (`xN = aot_fallback_alo(arg_loc, env)`), then emits lam body.
+- Full tests pass and gab_deriv/gen_easy parity checks pass.
+
+Question:
+- Is this policy aligned with your intended compilation strategy for LET-shaped administrative redexes,
+  or do you prefer stricter deopt behavior in non-head mode unless APP is in the root/head chain?
