@@ -1,35 +1,29 @@
-1) Strict local forcing + compiled REF re-entry: what exact contract should we implement?
+1) How should we remove `HEAD_APP_ARG_CAP` semantically (not just raise it) in compiled head mode?
 
 Context:
-- Current stable behavior: `aot_force_whnf_local` disables `aot_try_call` while forcing,
-  so REF expansion in local strict forcing runs via interpreter path; this avoids recursion
-  hazards and passes all tests.
-- This round I tried a bounded variant: keep compiled calls enabled in local force, add
-  depth accounting to `aot_try_call` (`AOT_TRY_CALL_MAX_DEPTH=1024`, increment/decrement).
-- Result was correctness-preserving but operationally bad: strict MAT mismatch deopts
-  exploded (`gab_tak` 2840, `gab_takl` 8,349,770; dominant `EXPR_UNSUPPORTED_TAG`
-  at `HEAD_MAT_NON_CTR` sites). I reverted that part.
+- Current AOT still deopts heavily on `HEAD_APP_ARG_CAP` even after cap=64.
+- Latest `HVM_AOT_DEOPT=1` admission sweep (`--as-c -C`) shows this reason dominating many benches:
+  - `mat_mul`: deopt 9,722,755 (`HEAD_APP_ARG_CAP` dominant)
+  - `ray_sphere`: deopt 7,065,683 (`HEAD_APP_ARG_CAP` dominant)
+  - `edit_dist`: deopt 4,178,375 (`HEAD_APP_ARG_CAP` dominant)
+  - `nqueens`: deopt 4,058,698 (mixed, but large cap pressure)
+  - also significant in `huffman`, `queue_bank`, `sort_*`, `bignat_mul`.
+- Current model keeps a bounded local arg array for compiled head APP chains and bails when overflowed.
 
 Precise question:
-- For strict local forcing, should compiled REF calls be:
-  1) always disabled (current conservative policy),
-  2) enabled only under additional shape constraints (which exact constraints?), or
-  3) enabled with a different execution model (e.g., trampoline)?
-- Please provide one concrete expected flow for a recursive case-tree where scrutinee
-  forcing crosses REF boundaries, including what value must be returned to mismatch/default
-  branches at each step.
+- What is the intended long-term design for large APP spines in compiled mode?
+  - Option A: dynamic spill buffer / growable vector per call.
+  - Option B: consume args directly from runtime stack incrementally (no separate bounded capture array).
+  - Option C: hybrid with bounded hot array + overflow side structure.
+- Please provide the expected invariants (ordering, ownership, interaction count behavior, fallback boundaries), so implementation does not violate evaluator semantics.
 
-2) Remaining singleton true deopt: what APP-fun shapes are safe to compile next?
+2) For high-hit `EXPR_UNSUPPORTED_TAG` sites, which expression tags should be compiled next vs. intentionally left as fallback?
 
 Context:
-- After recent emitter work and telemetry split, `gab_tak` and `gab_takl` now show:
-  - `AOT_DEOPT total=1`: only `EXPR_APP_UNSUPPORTED_FUN`
-  - `AOT_RESID total=1`: `EXPR_APP_ARG_CAPTURE`
-- The APP(REF,arg) expression case is already emitted directly; the remaining unsupported
-  APP site is a different fun-tag shape.
+- This round removed `EXPR_APP_UNSUPPORTED_FUN`; `gab_tak*` now have `AOT_DEOPT total=0`.
+- Remaining true deopts now include scattered `EXPR_UNSUPPORTED_TAG` (e.g. `prime_sieve`, `trie_bitwise`, `graph_color`, `tree_fold`, and mixed sites in `nqueens`/`queue_bank`).
+- Some sites are strict metadata kinds (`HEAD_MAT_NON_CTR`), others plain expression unsupported sites.
 
 Precise question:
-- Which non-LAM APP fun tags should be considered safe for direct compiled emission in
-  expression mode (without violating laziness/linearity)?
-- If the intended direction is an apply-whitelist, what minimal tag set should be first
-  (`LAM`, `SUP`, `ERA`, `INC`, `MAT`?), and which must stay fallback-only for now?
+- Do we want to systematically expand expression-mode support for specific tags first (for example `LAM`, `MAT`, `SWI` as values in non-head contexts), or should some of these always remain ALO fallback by design?
+- If there is a preferred whitelist/priority order, please specify it so we can target the highest-value tags first without introducing unsound strictness.

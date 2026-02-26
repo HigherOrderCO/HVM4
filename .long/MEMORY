@@ -1,73 +1,56 @@
-Round 10 (2026-02-26)
+Round 11 (2026-02-26)
 
 What changed this round (landed)
-- Landed code changes in:
-  - `clang/aot/_.c`
-- Two runtime-side improvements:
-  1) Added depth accounting/guard to `aot_try_call`:
-     - New limit `AOT_TRY_CALL_MAX_DEPTH=1024`.
-     - `aot_try_call` now checks depth cap and increments/decrements `AOT_CALL_DEPTH`
-       around direct compiled calls from `wnf` REF dispatch.
-     - This closes a latent safety hole where `aot_try_call` previously bypassed
-       depth tracking used by `aot_call_ref`.
-  2) Split fallback telemetry into true deopts vs intentional residualization:
-     - New residual counters for reasons/sites/overflow.
-     - `aot_deopt_reason_is_residual()` classifies:
-       - `EXPR_APP_ARG_CAPTURE`
-       - `EXPR_OP2_RHS_CAPTURE`
-     - `aot_deopt_dump()` now prints both streams:
-       - `AOT_DEOPT ...` (hard bailouts/mismatches)
-       - `AOT_RESID ...` (planned lazy captures)
-     - Top-site reporting and reason breakdown preserved for both streams.
-
-Important failed attempt (reverted before landing)
-- I temporarily re-enabled compiled REF calls inside `aot_force_whnf_local`
-  (removed local `AOT_TRY_CALL_ENABLED=0` gate), using only depth bounds.
-- Result: deopt explosion on strict MAT mismatch sites:
-  - `gab_tak`: deopt total jumped to `2840`
-  - `gab_takl`: deopt total jumped to `8,349,770`
-  - dominant reason: `EXPR_UNSUPPORTED_TAG` at `HEAD_MAT_NON_CTR` strict sites.
-- Although correctness stayed intact, telemetry quality regressed badly and this is not
-  a stable path yet. I restored the force-local gate.
+- Landed code change in:
+  - `clang/aot/emit.c`
+- Removed expression-mode APP hard bailout for unsupported function tags.
+  - Previous behavior in `aot_emit_node(..., head=0)` for `APP`:
+    - `fun_tag == REF`: emit `term_new_app(heap_read(fun_loc), captured_arg)`
+    - `fun_tag != LAM && fun_tag != REF`: fallback whole APP as ALO with
+      `EXPR_APP_UNSUPPORTED_FUN`.
+  - New behavior:
+    - If `fun_tag != LAM`, emit the function subterm with `aot_emit_node(fun_loc, dep, ..., head=0)`, lazily capture only the argument (`EXPR_APP_ARG_CAPTURE`), and build `term_new_app(fun_term, captured_arg)`.
+    - Keep `LAM` fast-path beta inlining unchanged.
+- Effect: eliminates this deopt class for lazy expression APP construction while preserving laziness semantics.
 
 Validation
-- Rebuild passes:
+- Rebuilt:
   - `cd clang && clang -O2 -o main main.c`
 - Full suite passes:
   - `./test/_all_.sh` (interpreted + AOT)
-- Parity (hvmi == hvmc `--as-c`) passes on:
-  - `../bench/bench/gab_deriv/main.hvm`
-  - `../bench/bench/gen_easy/main.hvm -C1`
-  - `../bench/bench/gab_tak/main.hvm`
-  - `../bench/bench/gab_takl/main.hvm`
-- Deopt/resid snapshots (`HVM_AOT_DEOPT=1`, serial `--as-c`):
-  - `gab_tak`:
-    - `AOT_DEOPT total=1` (`EXPR_APP_UNSUPPORTED_FUN=1`)
-    - `AOT_RESID total=1` (`EXPR_APP_ARG_CAPTURE=1`)
-  - `gab_takl`:
-    - `AOT_DEOPT total=1` (`EXPR_APP_UNSUPPORTED_FUN=1`)
-    - `AOT_RESID total=1` (`EXPR_APP_ARG_CAPTURE=1`)
+- Admission bench deopt/resid sweep (serial `--as-c -C`, `HVM_AOT_DEOPT=1`, 40s cap via `perl` alarm wrapper):
+  - `bignat_mul`: deopt 10759, resid 43
+  - `edit_dist`: deopt 4178375, resid 22129
+  - `gab_tak`: deopt 0, resid 4
+  - `gab_takl`: deopt 0, resid 4
+  - `graph_color`: deopt 16, resid 60
+  - `huffman`: deopt 320640, resid 10240
+  - `lambda_eval`: deopt 1, resid 37
+  - `mat_mul`: deopt 9722755, resid 28912
+  - `nqueens`: deopt 4058698, resid 3052469
+  - `prime_sieve`: deopt 24432, resid 6
+  - `queue_bank`: deopt 411596, resid 2802
+  - `ray_sphere`: deopt 7065683, resid 5227
+  - `sort_merge`: deopt 40972, resid 31
+  - `sort_quick`: deopt 294948, resid 217
+  - `tree_fold`: deopt 2, resid 4
+  - `trie_bitwise`: deopt 47, resid 136
+  - `u32_fib`: deopt 0, resid 2
 
-Quick perf snapshot (single-run `-s -C`)
-- `gab_tak`: hvmi ~0.001s, hvmc ~0.001s
-- `gab_takl`: hvmi ~1.971s, hvmc ~1.840s
-- Still far from admission target; this round mainly improved observability/safety.
+Observed hotspot shifts
+- `gab_tak` / `gab_takl` now have zero true deopts (previous singleton `EXPR_APP_UNSUPPORTED_FUN` removed).
+- Biggest remaining true-deopt driver on many benches is still `HEAD_APP_ARG_CAP` (despite cap=64), often dominating totals.
+- Secondary blockers are scattered `EXPR_UNSUPPORTED_TAG` sites, including strict `HEAD_MAT_NON_CTR` in some traces.
 
 Operational notes
-- `--as-c` artifact path remains deterministic; keep parity/deopt probes serial.
-- Force-local compiled REF re-entry remains disabled for now; depth-only re-enable
-  is not sufficient with current strict MAT handling.
+- Environment lacks GNU `timeout`; use `perl -e 'alarm shift; exec @ARGV' <sec> ...` for bounded runs.
+- Deopt/resid stream split from prior round continues to be critical: makes true bailout prioritization obvious.
 
 Lessons
-- Deopt counters were mixing two different phenomena (bailout vs planned laziness).
-  Splitting them makes hotspot triage reliable again.
-- Re-enabling compiled calls inside local WHNF force requires an explicit semantic
-  contract for strict mismatch continuation, not just depth limits.
+- For expression mode APPs, structural residualization is generally the right default: build dynamic APP nodes directly and avoid whole-node ALO fallback unless net-level interaction constraints truly require it.
+- Isolating true deopts shows the next fundamental work is cap/remodeling (arg/env) rather than additional APP micro-fixes.
 
 Next likely steps
-- Investigate the remaining singleton `EXPR_APP_UNSUPPORTED_FUN` site (now isolated as
-  the only true deopt in `gab_tak*`) and classify safe emission rule(s).
-- Keep force-local REF policy conservative until a bounded contract/trampoline design
-  is specified and proven on `match_recursive_arg`-style recursion.
-- Run `HVM_AOT_DEOPT=1` across broader admission benches using the new split stream to
-  identify top true deopts (not residual captures).
+- Attack `HEAD_APP_ARG_CAP` as top blocker (likely redesign of argument handling rather than further cap bumps).
+- Triage highest `EXPR_UNSUPPORTED_TAG` sites from admission benches, prioritizing tags/sites with largest hit counts.
+- Keep strict local force REF policy conservative until mismatch continuation semantics are explicitly specified.

@@ -554,19 +554,16 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       u64 app_loc = term_val(term);
       Term fun = heap_read(app_loc + 0);
       u8 fun_tag = term_tag(fun);
-      if (fun_tag == REF) {
+      if (fun_tag != LAM) {
+        char fun_n[32];
         char arg_n[32];
+        aot_emit_tmp(fun_n, sizeof(fun_n), "fun", tmp);
         aot_emit_tmp(arg_n, sizeof(arg_n), "arg", tmp);
+        aot_emit_node(f, app_loc + 0, dep, fun_n, 0, pad, tmp);
         fprintf(f, "%sTerm %s = ", pad, arg_n);
         aot_emit_alo_expr(f, app_loc + 1, dep, AOT_DEOPT_EXPR_APP_ARG_CAPTURE);
         fprintf(f, ";\n");
-        fprintf(f, "%sTerm %s = term_new_app(heap_read(%lluULL), %s);\n", pad, out, (unsigned long long)(app_loc + 0), arg_n);
-        return;
-      }
-      if (fun_tag != LAM) {
-        fprintf(f, "%sTerm %s = ", pad, out);
-        aot_emit_alo_expr(f, loc, dep, AOT_DEOPT_EXPR_APP_UNSUPPORTED_FUN);
-        fprintf(f, ";\n");
+        fprintf(f, "%sTerm %s = term_new_app(%s, %s);\n", pad, out, fun_n, arg_n);
         return;
       }
       if (dep >= AOT_ENV_CAP) {
