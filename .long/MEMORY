@@ -1,74 +1,73 @@
-Round 8 (2026-02-26)
+Round 9 (2026-02-26)
 
 What changed this round (landed)
 - Landed code changes in:
-  - `clang/aot/_.c`
   - `clang/aot/emit.c`
-- Added conservative strict scrutinee forcing path for compiled head `SWI` / `MAT`:
-  - New runtime helpers:
-    - `aot_force_whnf_local(Term term, u32 stack_top)`
-    - `aot_force_strict(Term term, u32 stack_top)`
-    - `aot_can_force_strict_tag(u8 tag)`
-  - `aot_force_strict` behavior:
-    - first applies existing bounded `aot_force_dup` for `DP0/DP1`
-    - then WHNF-forces `APP/ALO/REF` via local `wnf` call when needed
-- Emitter changes for head strict checks:
-  - `SWI`/`MAT` now force scrutinee when tag is in `{DP0, DP1, APP, ALO, REF}`
-  - after forcing, writes back forced scrutinee to current APP arg slot with `heap_set_rel(app + 1, arg)`
-  - strict mismatch still deopts with same reason/site metadata plumbing from round 7
+- Two targeted AOT reductions:
+  1) OP2 strict forcing upgraded from DP-only to full strict helper:
+     - In head `OP2`, both strict operands now call `aot_force_strict(term, *s_pos)`
+       (lhs always; rhs only in lhs==NUM branch).
+     - This lets compiled OP2 WHNF-force `APP/ALO/REF` (plus bounded DP forcing)
+       before deciding numeric fast-path vs residual OP2.
+  2) Expression APP special-case for static REF fun:
+     - `head=0` APP now recognizes `fun_tag == REF` and emits
+       `term_new_app(heap_read(fun_loc), captured_arg)` directly.
+     - This avoids whole-node `EXPR_APP_UNSUPPORTED_FUN` fallback for the common
+       `@f(arg)` shape while preserving laziness of the argument via captured ALO.
 
-Critical bug hit + fix
-- Initial implementation segfaulted on `test/match_recursive_arg` (AOT only).
-- ASan trace showed deep recursive cycle:
-  - `aot_force_whnf_local -> wnf -> aot_try_call -> F_mat_self -> ...`
-  - stack overflow due forcing path re-entering compiled calls recursively.
-- Root cause:
-  - strict local forcing called `wnf`, and `wnf` REF path used `aot_try_call` (compiled re-entry), which is not depth-guarded.
-- Fix landed:
-  - Added thread-local gate `AOT_TRY_CALL_ENABLED` (default on).
-  - `aot_try_call` returns 0 when gate is off.
-  - `aot_force_whnf_local` now temporarily disables `aot_try_call` around `wnf(term)`, forcing REF handling through interpreter ALO expansion instead of recursive compiled re-entry.
-  - This preserves correctness and eliminates the stack-overflow regression.
-
-Human expert answer integrated
-- `.long/ANSWERS` now confirms strict mismatch contract unambiguously:
-  - After forcing scrutinee to WHNF, continuation must propagate the forced WHNF value (never original thunk).
-- Current writeback in strict emission aligns with this rule.
+Why
+- Post-round-8 deopt hotspots were:
+  - `EXPR_APP_UNSUPPORTED_FUN`
+  - `EXPR_OP2_RHS_CAPTURE`
+- On `gab_tak`/`gab_takl`, both came from the same strict OP2 frontier where lhs
+  was an APP with REF head (`@len(_) + 1` pattern). The new APP(REF,...) emit path
+  removes the unsupported-fun fallback there; stricter OP2 forcing resolves many
+  APP/REF lhs terms to NUM and avoids RHS-capture fallback.
 
 Validation
 - Rebuild passes:
   - `cd clang && clang -O2 -o main main.c`
 - Full suite passes:
   - `./test/_all_.sh` (interpreted + AOT)
-- Regression reproduction/fix proof:
-  - `./clang/main test/match_recursive_arg.hvm --as-c -C` now returns `#Z{}` (previously segfaulted).
+- Regression check still good:
+  - `./clang/main test/match_recursive_arg.hvm --as-c -C` => `#Z{}`
 - Parity (hvmi == hvmc `--as-c`) passes on:
   - `../bench/bench/gab_deriv/main.hvm`
   - `../bench/bench/gen_easy/main.hvm -C1`
   - `../bench/bench/gab_tak/main.hvm`
   - `../bench/bench/gab_takl/main.hvm`
-- Deopt snapshots (`HVM_AOT_DEOPT=1`, serial runs):
-  - `gab_tak`: total `113`
-    - `EXPR_APP_UNSUPPORTED_FUN=57`
-    - `EXPR_OP2_RHS_CAPTURE=56`
-  - `gab_takl`: total `519`
-    - `EXPR_APP_UNSUPPORTED_FUN=260`
-    - `EXPR_OP2_RHS_CAPTURE=259`
-- Comparison with prior round:
-  - dominant strict mismatch deopts (`EXPR_UNSUPPORTED_TAG`, millions in `gab_takl`) collapsed massively after strict forcing + writeback.
+- Deopt snapshots (`HVM_AOT_DEOPT=1`, serial `--as-c`):
+  - `gab_tak`: total `2`
+    - `EXPR_APP_UNSUPPORTED_FUN=1`
+    - `EXPR_APP_ARG_CAPTURE=1`
+  - `gab_takl`: total `2`
+    - `EXPR_APP_UNSUPPORTED_FUN=1`
+    - `EXPR_APP_ARG_CAPTURE=1`
+- Prior round comparison:
+  - `gab_tak`: `113` -> `2`
+  - `gab_takl`: `519` -> `2`
+  - both former dominant reasons collapsed.
+
+Quick perf snapshot (single-run `-s -C`)
+- `gab_tak`: hvmi ~0.002s, hvmc ~0.001s
+- `gab_takl`: hvmi ~1.768s, hvmc ~1.670s
+- Not admission-grade yet, but direction improved and hvmc is now ahead on these probes.
 
 Operational notes
-- `--as-c` temp artifacts remain deterministic under tmp root (`hvm4-aot-as-c.main.c/.bin`); probe runs must stay serial.
-- Avoid running multiple `--as-c` probes in parallel.
+- `--as-c` artifact path remains deterministic (`/tmp/hvm4-aot-as-c.main.{c,bin}` style);
+  keep deopt/parity probes serial.
+- Do not compare parity with `-s`; stats lines include time/heap and differ naturally.
 
-Key lessons
-- Forcing scrutinee WHNF is effective, but forcing must not recurse into compiled entrypoints unchecked.
-- Local-force mode must isolate stack segment *and* control REF dispatch path.
-- Source-mapped deopt metadata from round 7 was essential to verify this change reduced the intended hotspot.
+Lessons
+- Tight strict forcing in true strict contexts (OP2 operands, match scrutinees) is
+  high-value and safe when mismatch/writeback contracts are preserved.
+- Eliminating whole-expression ALO fallback for safe structural cases (APP with static REF)
+  can remove large deopt pressure without violating laziness on arguments.
 
 Next likely steps
-- Target new top reasons now exposed post-fix:
-  - `EXPR_APP_UNSUPPORTED_FUN`
-  - `EXPR_OP2_RHS_CAPTURE`
-- Consider a proper depth-governed `aot_try_call` path (or dedicated force-mode call policy) so strict forcing can regain compiled REF speed safely without recursive stack blowups.
-- Keep validating with `gab_takl` deopt counters after each forcing policy tweak.
+- Track the remaining singleton `EXPR_APP_UNSUPPORTED_FUN` sites (now easy to inspect)
+  and classify whether they should become safe structured emits.
+- Add residualization telemetry separate from deopt telemetry, so expected ALO captures
+  (like `EXPR_APP_ARG_CAPTURE`) don’t hide true bailout causes.
+- Revisit force-local REF policy with a bounded compiled-call contract (depth/fuel), but
+  keep the current recursion-safe behavior until that contract is implemented and proven.

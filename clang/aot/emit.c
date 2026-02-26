@@ -441,18 +441,14 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_tmp(out_n, sizeof(out_n), "out", tmp);
 
         aot_emit_node(f, arg + 0, dep, lhs, 0, pad, tmp);
-        fprintf(f, "%sif (term_tag(%s) == DP0 || term_tag(%s) == DP1) {\n", pad, lhs, lhs);
-        fprintf(f, "%s%s = aot_force_dup(%s);\n", pad1, lhs, lhs);
-        fprintf(f, "%s}\n", pad);
+        fprintf(f, "%s%s = aot_force_strict(%s, *s_pos);\n", pad, lhs, lhs);
 
         fprintf(f, "%sTerm %s;\n", pad, out_n);
         fprintf(f, "%sif (term_tag(%s) == ERA) {\n", pad, lhs);
         fprintf(f, "%s%s = wnf_op2_era();\n", pad1, out_n);
         fprintf(f, "%s} else if (term_tag(%s) == NUM) {\n", pad, lhs);
         aot_emit_node(f, arg + 1, dep, rhs, 0, pad1, tmp);
-        fprintf(f, "%sif (term_tag(%s) == DP0 || term_tag(%s) == DP1) {\n", pad1, rhs, rhs);
-        fprintf(f, "%s%s = aot_force_dup(%s);\n", pad2, rhs, rhs);
-        fprintf(f, "%s}\n", pad1);
+        fprintf(f, "%s%s = aot_force_strict(%s, *s_pos);\n", pad1, rhs, rhs);
         fprintf(f, "%sif (term_tag(%s) == ERA) {\n", pad1, rhs);
         fprintf(f, "%s%s = wnf_op2_num_era();\n", pad2, out_n);
         fprintf(f, "%s} else if (term_tag(%s) == NUM) {\n", pad1, rhs);
@@ -557,7 +553,17 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
     case APP: {
       u64 app_loc = term_val(term);
       Term fun = heap_read(app_loc + 0);
-      if (term_tag(fun) != LAM) {
+      u8 fun_tag = term_tag(fun);
+      if (fun_tag == REF) {
+        char arg_n[32];
+        aot_emit_tmp(arg_n, sizeof(arg_n), "arg", tmp);
+        fprintf(f, "%sTerm %s = ", pad, arg_n);
+        aot_emit_alo_expr(f, app_loc + 1, dep, AOT_DEOPT_EXPR_APP_ARG_CAPTURE);
+        fprintf(f, ";\n");
+        fprintf(f, "%sTerm %s = term_new_app(heap_read(%lluULL), %s);\n", pad, out, (unsigned long long)(app_loc + 0), arg_n);
+        return;
+      }
+      if (fun_tag != LAM) {
         fprintf(f, "%sTerm %s = ", pad, out);
         aot_emit_alo_expr(f, loc, dep, AOT_DEOPT_EXPR_APP_UNSUPPORTED_FUN);
         fprintf(f, ";\n");

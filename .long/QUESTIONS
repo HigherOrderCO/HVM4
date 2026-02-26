@@ -1,21 +1,25 @@
-1) Strict-force REF policy: should local WHNF forcing allow compiled REF calls under a depth budget, or always stay interpreter-only?
+1) Strict-force REF policy: what is the canonical bounded compiled-call contract?
 
 Context:
-- Round 8 added strict scrutinee forcing for head `MAT/SWI` (`DP0/DP1/APP/ALO/REF`) plus writeback of forced WHNF into APP arg slot.
-- Initial version crashed on `test/match_recursive_arg` with stack overflow because force-local `wnf(term)` re-entered compiled REF calls through `aot_try_call` recursively.
-- I fixed this by adding thread-local gate `AOT_TRY_CALL_ENABLED` and disabling `aot_try_call` during `aot_force_whnf_local`; this made tests/parity pass and dropped strict mismatch deopts drastically.
-- However, this also means strict forcing currently evaluates REF via interpreter/Alo path even when compiled code exists.
+- Round 8 introduced strict local WHNF forcing (`aot_force_whnf_local`) for strict heads.
+- Unbounded compiled REF re-entry caused stack overflow on `test/match_recursive_arg`.
+- Current fix disables `aot_try_call` during local forcing (`AOT_TRY_CALL_ENABLED=0` in force mode), which is safe and passing.
+- Round 9 kept that safety gate and improved strict OP2 forcing, but force-local REF is still interpreter-only.
 
 Precise question:
-- In strict local forcing mode, what is the preferred long-term policy?
-  1) Always disable compiled REF calls (current safe behavior),
-  2) Allow compiled REF calls but with explicit depth/call budget in `aot_try_call`,
-  3) Another rule (please specify exact condition/mechanism).
+- In strict local forcing mode, should compiled REF calls be:
+  1) always disabled (current),
+  2) allowed under explicit depth/fuel bounds,
+  3) handled by a different trampoline mechanism?
+- Please specify the exact intended invariant and one concrete pseudo-flow for recursive case-trees (`mat_self`-like) so we can implement it without C-stack blowups.
 
-Why this matters:
-- Option (1) is safest and currently correct, but may leave performance on the table.
-- Option (2) could improve forcing speed but risks reintroducing recursive C-stack blowups if not formally bounded.
-- I need the semantic/engineering contract to redesign this path without reintroducing prior crashes.
+2) Telemetry contract: should expected expression captures count as deopts?
 
-Request:
-- Please state the intended contract and one concrete pseudo-flow for recursive case-trees (like `mat_self`) showing how force-local REF calls should be bounded/handled.
+Context:
+- Round 9 collapsed `gab_tak`/`gab_takl` deopts from 113/519 to 2/2.
+- Remaining hits are `EXPR_APP_ARG_CAPTURE`, which correspond to intentional lazy capture of APP arguments via ALO in expression mode.
+- These are not necessarily runtime mismatches; they are often planned residualization steps.
+
+Precise question:
+- Should planned captures/residualization (like APP argument capture) remain in deopt counters, or be tracked in a separate residualization metric?
+- If separate, what categories are most useful for guiding compiler redesign (e.g., APP arg capture, OP2 delayed rhs, generic expression ALO, etc.)?
