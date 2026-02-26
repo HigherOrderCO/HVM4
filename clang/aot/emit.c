@@ -263,10 +263,6 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_tmp(arg_n, sizeof(arg_n), "arg", tmp);
         aot_emit_tmp(app_n, sizeof(app_n), "app", tmp);
 
-        fprintf(f, "%sif ((*s_pos - base) >= AOT_ARG_CAP) {\n", pad);
-        aot_emit_ret_fallback_loc(f, loc, dep, AOT_DEOPT_HEAD_APP_ARG_CAP, pad1);
-        fprintf(f, "%s}\n", pad);
-
         aot_emit_node(f, arg_loc, dep, arg_n, 0, pad, tmp);
         fprintf(f, "%su64 %s = heap_alloc(2);\n", pad, app_n);
         fprintf(f, "%sheap_set(%s + 0, term_new_era());\n", pad, app_n);
