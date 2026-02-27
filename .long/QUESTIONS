@@ -1,41 +1,23 @@
-1) Strict MAT/SWI forcing contract: when should compiled code stop reducing and deopt?
+1) Strict MAT/SWI mismatch after full local WHNF: deopt vs inline interaction?
 
 Context:
-- Current strict paths (`SWI`/`MAT` heads) call `aot_force_strict`, which does bounded DP forcing and a local `wnf` only for `APP/ALO/REF` tags.
-- We still see large true-deopt counts at strict mismatch sites (`HEAD_MAT_NON_CTR` / `HEAD_SWI_NON_NUM`), which suggests forcing often stops before reaching the eventual constructor/number WHNF.
-- Expert guidance says this is likely under-forcing and we should keep reducing like the interpreter.
+- Current AOT head paths for `SWI`/`MAT` now call iterative `aot_force_strict` (DP forcing + local `wnf` loops for `APP/ALO/REF/OP2/USE`).
+- This reduced hard deopts a lot, but `mat_mul`/`ray_sphere` still have large `HEAD_MAT_NON_CTR` counts.
+- These remaining cases are terms that are still not `C00..C16`/`NUM` after strict forcing in compiled mode.
 
-Precise question:
-- In no step-limit mode (`STEPS_ITRS_LIM==0`), should strict compiled paths keep reducing indefinitely (interpreter-equivalent behavior) until reaching `CTR/NUM`, with no deopt on mismatch?
-- Or do you want a bounded safety policy in compiled mode (fuel/depth) that intentionally deopts after a threshold?
-- If bounded is preferred, what is the intended observable contract (same result but possible performance cliff, or explicit divergence-preservation requirements)?
+Question:
+- When strict scrutinee WHNF is still non-constructor/non-number, do you want compiled code to always deopt to ALO (current behavior), or should we inline the corresponding runtime strict interaction path instead (for example, dispatch to the same logic interpreter MAT/SWI would take on that WHNF tag) and continue compiled execution when possible?
+- In other words: is deopt the intended semantic boundary for strict mismatch, or should compiled mode attempt one more semantic step using runtime interaction helpers before deopting?
 
-2) Expression-mode OP2 support: should compiled expression emission preserve laziness only, or partially evaluate strictness?
-
-Context:
-- New deopt metadata shows top `EXPR_UNSUPPORTED_TAG` sites in `mat_mul`, `ray_sphere`, and `nqueens` are mostly `expr_tag=OP2` (various op exts).
-- Head mode already has strict OP2 handling, but expression mode currently falls back for OP2 tags.
-- In expression context, we can either:
-  A) build residual `term_new_op2(lhs_alo, rhs_alo)` lazily (no forcing now), or
-  B) force lhs (and maybe rhs when lhs is NUM) eagerly in emitted expression code for better specialization.
-
-Precise question:
-- For AOT expression mode, what semantic target do you prefer for OP2:
-  - always lazy residual construction (closer to generic expression semantics), or
-  - strict partial evaluation in emitted code when safe?
-- If strict partial evaluation is desired, which strictness level is acceptable in expression mode without risking observable order/duplication issues?
-
-3) Case-tree fast path target: should we prioritize head-mode LET/APP-of-LAM next, or strict forcing/OP2 first?
+2) `HEAD_DUP_ENV_CAP` elimination strategy: acceptable shape for AOT environment storage?
 
 Context:
-- Goal text highlights LET-like forms (`(λname.body)(arg)`) and DUP/LET interleavings as major reasons whole bodies fall back to ALO.
-- Current telemetry after recent fixes still shows dominant true-deopts in strict mismatch + OP2 unsupported categories.
-- Implementing LET/APP-of-LAM in head mode may unlock larger portions of case-tree spines, but strict/OP2 work has immediate hotspot evidence.
+- After OP2 residualization and stricter forcing, `nqueens` hard deopts are now dominated by a single reason/site: `HEAD_DUP_ENV_CAP` (currently `AOT_ENV_CAP=16`).
+- This cap is now the main blocker for true-deopt reduction on that benchmark.
 
-Precise question:
-- What ordering do you want for next implementation priority:
-  1. strict `MAT/SWI` continuation + expression `OP2` coverage,
-  2. head-mode LET/APP-of-LAM compilation,
-  3. head-mode DUP env-cap redesign,
-  or another order?
-- A concrete priority order would help avoid local optimizations that don’t move admission benchmarks.
+Question:
+- Which approach is preferred for long-term AOT design?
+  A) raise global `AOT_ENV_CAP` substantially,
+  B) emit per-definition env capacity from compile-time depth analysis,
+  C) move env cells to dynamically sized storage for compiled frames.
+- If B is preferred: is “max binder depth along compiled head paths” sufficient, or are there runtime interactions that can exceed static lexical depth and require dynamic spill anyway?

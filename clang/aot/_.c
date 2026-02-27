@@ -40,6 +40,7 @@ static HvmAotFn AOT_FNS[BOOK_CAP] = {0};
 #define AOT_MAX_DEPTH 4096
 #define AOT_TRY_CALL_MAX_DEPTH 1024
 #define AOT_FORCE_DUP_FUEL 32
+#define AOT_FORCE_STRICT_FUEL 64
 #define AOT_DEOPT_SITE_CAP (1u << 16)
 #define AOT_DEOPT_TOP_K    16
 
@@ -75,6 +76,7 @@ typedef enum {
   AOT_DEOPT_EXPR_APP_ARG_CAPTURE,
   AOT_DEOPT_EXPR_CTR_FIELD_CAPTURE,
   AOT_DEOPT_EXPR_DUP_ENV_CAP,
+  AOT_DEOPT_EXPR_OP2_LHS_CAPTURE,
   AOT_DEOPT_EXPR_OP2_RHS_CAPTURE,
   AOT_DEOPT_EXPR_UNSUPPORTED_TAG,
   AOT_DEOPT_CALL_DEPTH_CAP,
@@ -114,6 +116,7 @@ fn const char *aot_deopt_reason_name(u32 reason) {
     "EXPR_APP_ARG_CAPTURE",
     "EXPR_CTR_FIELD_CAPTURE",
     "EXPR_DUP_ENV_CAP",
+    "EXPR_OP2_LHS_CAPTURE",
     "EXPR_OP2_RHS_CAPTURE",
     "EXPR_UNSUPPORTED_TAG",
     "CALL_DEPTH_CAP",
@@ -216,6 +219,7 @@ fn const char *aot_term_tag_name(u32 tag) {
 fn int aot_deopt_reason_is_residual(u32 reason) {
   return reason == AOT_DEOPT_EXPR_APP_ARG_CAPTURE
       || reason == AOT_DEOPT_EXPR_CTR_FIELD_CAPTURE
+      || reason == AOT_DEOPT_EXPR_OP2_LHS_CAPTURE
       || reason == AOT_DEOPT_EXPR_OP2_RHS_CAPTURE;
 }
 
@@ -423,6 +427,10 @@ fn int aot_can_force_strict_tag(u8 tag) {
     case REF: {
       return 1;
     }
+    case OP2:
+    case USE: {
+      return 1;
+    }
     default: {
       return 0;
     }
@@ -509,13 +517,24 @@ fn Term aot_force_dup(Term term) {
 
 // Tries conservative strict forcing for compiled SWI/MAT scrutinees.
 fn Term aot_force_strict(Term term, u32 stack_top) {
-  u8 tag = term_tag(term);
-  if (tag == DP0 || tag == DP1) {
-    term = aot_force_dup(term);
-    tag = term_tag(term);
-  }
-  if (aot_can_force_strict_tag(tag)) {
-    term = aot_force_whnf_local(term, stack_top);
+  for (u32 fuel = AOT_FORCE_STRICT_FUEL; fuel > 0; --fuel) {
+    Term prev = term;
+    u8 tag = term_tag(term);
+    if (tag == DP0 || tag == DP1) {
+      term = aot_force_dup(term);
+      if (term == prev) {
+        return term;
+      }
+      continue;
+    }
+    if (aot_can_force_strict_tag(tag)) {
+      term = aot_force_whnf_local(term, stack_top);
+      if (term == prev) {
+        return term;
+      }
+      continue;
+    }
+    return term;
   }
   return term;
 }
