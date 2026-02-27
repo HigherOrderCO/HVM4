@@ -1,24 +1,24 @@
 1) Safe boundary to reduce `WNF_DUP_NOD` / `AOT_DUP_CELL` without semantic drift
 
 Context:
-- After Round 23 attribution, previously `UNCLASSIFIED` compiled heap traffic is now mostly labeled `WNF_DUP_NOD`.
-- Example with `HVM_AOT_DEOPT=1 HVM_AOT_ALLOC=1 HVM_AOT_HEAP_ATTR=1 --as-c -s -T1`:
+- After OP2 reductions, major remaining heap cost in several admission benches is DUP-related.
+- Example (`HVM_AOT_DEOPT=1 HVM_AOT_ALLOC=1 HVM_AOT_HEAP_ATTR=1 --as-c -s -T1`):
   - `gab_takl`: `WNF_DUP_NOD=231,193,148` nodes (dominant)
-  - `mat_mul`: `AOT_DUP_CELL=36,255,642`, `WNF_DUP_NOD=18,170,880`
-- Current AOT optimization only skips DUP-cell allocation for copy-free payloads (`NUM`, `C00`, `ERA`, `ANY`, `NAM`, `BJV`, `BJ0`, `BJ1`).
-- For non-copy-free payloads we still allocate DUP cells and later often pay `wnf_dup_nod` cloning costs.
+  - `trie_bitwise`: `WNF_DUP_NOD=642,614,910` nodes (dominant)
+  - `mat_mul` after Round 25 still has `AOT_DUP_CELL=87,360`, `WNF_DUP_NOD=18,170,880`
+- Current compiled DUP handling only avoids cell allocation for `aot_is_copy_free(...)`; everything else allocates DUP cells and often ends in `wnf_dup_nod`.
 
 Question:
-- What is the strongest safe criterion (or set of criteria) to delay or avoid materializing non-copy-free DUP payloads in compiled mode?
-- Specifically, which DP0/DP1 usage patterns guarantee we can transform or postpone duplication without violating linearity and exact DUP/SUP interaction behavior?
+- What is the strongest safe static criterion to avoid or delay non-copy-free DUP cell materialization in compiled mode?
+- Concretely, which DP0/DP1 usage shapes are guaranteed linear-safe for specialization (or for late materialization) without changing IC behavior?
 
-2) OP2 lowering policy for compiled strict paths (SUP/INC boundary)
+2) Contract for eager non-demanded primitive folding in AOT
 
 Context:
-- Round 24 changed demanded OP2 emission to force/fold strict `ERA/NUM` cases in compiled mode (when `STEPS_ITRS_LIM==0`), which removed a large `TERM_OP2` chunk on `ray_sphere`.
-- Current fast path still leaves unresolved OP2 in non-`NUM` cases by emitting `term_new_op2(...)` (often with lazy RHS capture), instead of eagerly applying `OP2-SUP` / `OP2-INC-*` interactions.
-- This choice is conservative, but `mat_mul` still shows very high `TERM_OP2`, suggesting we may need broader OP2 lowering to make real progress.
+- Round 25 added non-head OP2 folding when operands are already WHNF (`NUM/ERA`) and `STEPS_ITRS_LIM==0`.
+- This gave large wins (`mat_mul` heap `145M -> 18.7M`, `u32_fib` heap `252M -> 22`) with passing tests and parity spot checks.
+- This fold does not force operands, but it does evaluate an OP2 earlier than lazy runtime would.
 
 Question:
-- For the case-tree AOT subset, should compiled OP2 lowering eagerly encode `OP2-SUP` / `OP2-INC-*` interactions (when tags are known after strict forcing), or is deferring to later WNF intentionally preferable for invariants/perf?
-- If eager lowering is acceptable, what guardrails are required so we do not perturb sharing/linearity behavior in DUP-heavy programs?
+- Is “eager fold only when operands are already WHNF values” considered semantically acceptable as a general AOT rule for strict primitives (with step-limited mode excluded)?
+- Any hidden invariants (stats/interaction accounting/debug expectations) that should block extending this pattern to other primitives (`EQL`, `AND`, `OR`, etc.)?

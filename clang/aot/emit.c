@@ -889,7 +889,24 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
 
       aot_emit_node(f, op2_loc + 0, dep, lhs_n, 0, pad, tmp);
       aot_emit_node(f, op2_loc + 1, dep, rhs_n, 0, pad, tmp);
-      fprintf(f, "%sTerm %s = term_new_op2(%u, %s, %s);\n", pad, out, opr, lhs_n, rhs_n);
+      fprintf(f, "%sTerm %s;\n", pad, out);
+      fprintf(f, "%sif (STEPS_ITRS_LIM == 0) {\n", pad);
+      fprintf(f, "%sif (term_tag(%s) == ERA) {\n", pad1, lhs_n);
+      fprintf(f, "%s%s = wnf_op2_era();\n", pad2, out);
+      fprintf(f, "%s} else if (term_tag(%s) == NUM) {\n", pad1, lhs_n);
+      fprintf(f, "%sif (term_tag(%s) == ERA) {\n", pad2, rhs_n);
+      fprintf(f, "%s%s = wnf_op2_num_era();\n", pad2, out);
+      fprintf(f, "%s} else if (term_tag(%s) == NUM) {\n", pad2, rhs_n);
+      fprintf(f, "%s%s = wnf_op2_num_num_raw(%u, (u32)term_val(%s), (u32)term_val(%s));\n", pad2, out, opr, lhs_n, rhs_n);
+      fprintf(f, "%s} else {\n", pad2);
+      fprintf(f, "%s%s = term_new_op2(%u, %s, %s);\n", pad2, out, opr, lhs_n, rhs_n);
+      fprintf(f, "%s}\n", pad2);
+      fprintf(f, "%s} else {\n", pad1);
+      fprintf(f, "%s%s = term_new_op2(%u, %s, %s);\n", pad2, out, opr, lhs_n, rhs_n);
+      fprintf(f, "%s}\n", pad1);
+      fprintf(f, "%s} else {\n", pad);
+      fprintf(f, "%s%s = term_new_op2(%u, %s, %s);\n", pad1, out, opr, lhs_n, rhs_n);
+      fprintf(f, "%s}\n", pad);
       return;
     }
     case APP: {

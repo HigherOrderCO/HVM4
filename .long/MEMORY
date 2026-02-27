@@ -1,49 +1,48 @@
-Round 24 (2026-02-27)
+Round 25 (2026-02-27)
 
 What landed
 - Files changed:
   - `clang/aot/emit.c`
-- Goal of this round: reduce `TERM_OP2` materialization in compiled strict contexts without changing semantics or step-limited behavior.
+- Added an expression-level OP2 fold path (non-head `aot_emit_node(..., OP2)`):
+  - still emits structural lhs/rhs terms;
+  - when `STEPS_ITRS_LIM == 0`, if tags are already WHNF:
+    - `ERA` lhs -> `wnf_op2_era()`
+    - `NUM` lhs + `ERA` rhs -> `wnf_op2_num_era()`
+    - `NUM` lhs + `NUM` rhs -> `wnf_op2_num_num_raw(...)`
+    - otherwise keep `term_new_op2(...)`
+  - when `STEPS_ITRS_LIM != 0`, preserves old structural `term_new_op2(...)`.
 
-Core implementation
-1) Demanded OP2 now has a strict fast path
-- Reworked `aot_emit_node_demanded(..., OP2)`:
-  - emits `Term out;`
-  - when `STEPS_ITRS_LIM == 0`, mirrors head OP2 strict logic:
-    - demanded-emit LHS
-    - `aot_force_strict(lhs, *s_pos)`
-    - `ERA` LHS -> `wnf_op2_era()`
-    - `NUM` LHS -> demanded-emit+force RHS, then:
-      - `ERA` RHS -> `wnf_op2_num_era()`
-      - `NUM` RHS -> `wnf_op2_num_num_raw(...)`
-      - otherwise keep `term_new_op2(...)`
-    - non-`NUM`/non-`ERA` LHS keeps lazy RHS capture via `aot_fallback_alo(...)` and builds unresolved `term_new_op2(...)`
-- This removes transient OP2 nodes when nested demanded OP2 chains are reducible.
-
-2) Step-limited safety path preserved
-- When `STEPS_ITRS_LIM != 0`, demanded OP2 now explicitly falls back to prior structural emission (`aot_emit_node(...)`), keeping step-sensitive behavior unchanged.
+Why this mattered
+- Round 24 only reduced demanded OP2 materialization; `mat_mul` stayed dominated by expression `TERM_OP2`.
+- Many OP2 sites already had NUM/ERA operands at runtime, but we still allocated OP2 nodes.
 
 Validation
 - Build: `cd clang && clang -O2 -o main main.c`
-- Tests: `./test/_all_.sh` passed (all interpreted + AOT tests).
-- Canary command: `HVM_AOT_DEOPT=1 HVM_AOT_ALLOC=1 HVM_AOT_HEAP_ATTR=1 --as-c -s -T1`
+- Tests: `./test/_all_.sh` passed.
+- Admission-set sweep (`HVM_AOT_DEOPT=1 ... --as-c -s -T1`) stayed deopt-clean:
+  - `AOT_DEOPT total=0` on all sampled admission benches.
+  - Residuals unchanged/small (`mat_mul` still 3 `EXPR_CTR_FIELD_CAPTURE`; `gab_takl` still 3 residual captures).
+- Output parity spot checks (interpreted vs `--as-c`) matched on:
+  - `mat_mul`, `u32_fib`, `graph_color`, `prime_sieve`, `tree_fold`, `ray_sphere`.
 
-Canary deltas (before -> after)
-- `mat_mul`:
-  - `AOT_HEAP total_nodes`: `145,024,874 -> 145,024,874` (flat)
-  - `TERM_OP2`: `90,249,536 -> 90,249,536` (flat)
-- `ray_sphere`:
-  - `AOT_HEAP total_nodes`: `147,379,185 -> 110,375,185` (down 37,004,000, ~25.1%)
-  - `TERM_OP2`: `66,608,360 -> 29,604,360` (down 37,004,000, ~55.6%)
-  - `AOT_DUP_CELL` and `WNF_DUP_NOD` unchanged on this sample
-- `edit_dist` spot check:
-  - `AOT_HEAP total_nodes`: `88,505,052 -> 88,466,686` (small drop)
+Key deltas (before -> after)
+- `mat_mul` (major):
+  - `AOT_HEAP total_nodes`: `145,024,874 -> 18,694,000`
+  - `TERM_OP2`: `90,249,536 -> 86,944`
+  - runtime heap/time (`--as-c -s -T1`): `145,025,641 / 0.730s -> 18,694,767 / 0.305s`
+- `graph_color`: heap `428,696,118 -> 193,799,054`, time `2.438s -> 1.616s`
+- `prime_sieve`: heap `63,967,872 -> 41,289,272`, time `0.452s -> 0.330s`
+- `tree_fold`: heap `65,011,755 -> 44,040,247`, time `0.485s -> 0.414s`
+- `u32_fib`: heap `252,983,962 -> 22`, time `3.877s -> 2.993s`
+- `ray_sphere`: modest additional reduction (`110,375,185 -> 109,701,465`)
+- `edit_dist`: modest additional reduction (`88,466,686 -> 88,048,872`)
 
 Key lessons
-- A large OP2 hotspot was specifically in nested demanded OP2 evaluation (clear in `ray_sphere`), not universal across all arithmetic-heavy benches (`mat_mul` unchanged).
-- Remaining `TERM_OP2` in `mat_mul` is likely from non-demanded expression materialization paths, not this demanded-only path.
+- A huge share of compiled OP2 churn was from expression paths with already WHNF operands, not only demanded strict contexts.
+- Step-limited gating (`STEPS_ITRS_LIM==0`) remains the safe boundary for eager fold behavior.
+- Remaining large costs now skew toward `WNF_DUP_NOD` and some DUP-cell traffic, not OP2 in `mat_mul`.
 
-Likely next steps
-1) Extend strictness propagation beyond demanded OP2 so non-demanded OP2 nodes can fold when consumers are statically strict.
-2) Use new heap-kind splits plus deopt/residual sites to identify where `mat_mul` still constructs unresolved OP2 nodes.
-3) Continue on DUP pressure (`AOT_DUP_CELL`, `WNF_DUP_NOD`) once OP2 materialization coverage is broader.
+Next likely steps
+1) Apply the same “already-WHNF fold” idea to other strict primitives where safe (without forcing).
+2) Attack `WNF_DUP_NOD` with stronger compiled DUP specialization criteria.
+3) Remove residual ALO captures (`EXPR_CTR_FIELD_CAPTURE` / `EXPR_APP_ARG_CAPTURE`) where structural emission is provably safe.
