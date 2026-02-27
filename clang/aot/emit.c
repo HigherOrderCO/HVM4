@@ -14,6 +14,7 @@ static u8  AOT_EMIT_DEOPT_KIND[AOT_DEOPT_SITE_CAP] = {0};
 static u64 AOT_EMIT_DEOPT_LOC[AOT_DEOPT_SITE_CAP] = {0};
 static u32 AOT_EMIT_DEOPT_AUX[AOT_DEOPT_SITE_CAP] = {0};
 static u32 AOT_EMIT_DEF_ID = 0;
+static u8  AOT_EMIT_SELF_LOOP = 0;
 // Bounds structural expression emission to avoid emitter/code-size blowups.
 #define AOT_EMIT_EXPR_STRUCT_DEPTH_CAP 128
 #define AOT_EMIT_EXPR_STRUCT_NODE_CAP  4096
@@ -297,6 +298,34 @@ fn u8 aot_emit_expr_structural(u64 loc) {
   return aot_emit_expr_can_structuralize(loc, 0, &budget);
 }
 
+// Returns 1 when one head-position subtree can self-tail-call this definition.
+fn u8 aot_emit_has_self_tail_ref(u64 loc, u32 def_id) {
+  Term term = heap_read(loc);
+  switch (term_tag(term)) {
+    case APP: {
+      return aot_emit_has_self_tail_ref(term_val(term) + 0, def_id);
+    }
+    case LAM: {
+      return aot_emit_has_self_tail_ref(term_val(term), def_id);
+    }
+    case DUP: {
+      return aot_emit_has_self_tail_ref(term_val(term) + 1, def_id);
+    }
+    case SWI:
+    case MAT: {
+      u64 mat_loc = term_val(term);
+      return aot_emit_has_self_tail_ref(mat_loc + 0, def_id)
+          || aot_emit_has_self_tail_ref(mat_loc + 1, def_id);
+    }
+    case REF: {
+      return term_ext(term) == def_id;
+    }
+    default: {
+      return 0;
+    }
+  }
+}
+
 // Returns current head term without consuming pending APP frames.
 fn void aot_emit_ret_head(FILE *f, u64 loc, u32 dep, const char *pad, u32 *tmp) {
   char head_n[32];
@@ -332,7 +361,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_tmp(app_n, sizeof(app_n), "app", tmp);
 
         aot_emit_node(f, arg_loc, dep, arg_n, 0, pad, tmp);
-        fprintf(f, "%su64 %s = heap_alloc(2);\n", pad, app_n);
+        fprintf(f, "%su64 %s = aot_alloc(2, AOT_ALLOC_APP_FRAME_HEAD);\n", pad, app_n);
         fprintf(f, "%sheap_set(%s + 0, term_new_era());\n", pad, app_n);
         fprintf(f, "%sheap_set(%s + 1, %s);\n", pad, app_n, arg_n);
         fprintf(f, "%sstack[*s_pos] = term_new(0, APP, 0, %s);\n", pad, app_n);
@@ -390,7 +419,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
 
         aot_emit_node(f, dup_loc + 0, dep, val_n, 0, pad, tmp);
         fprintf(f, "%sTerm x%u = %s;\n", pad, dep, val_n);
-        fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
+        fprintf(f, "%su64 e%u = aot_alloc(2, AOT_ALLOC_DUP_CELL);\n", pad, dep);
         fprintf(f, "%sheap_set(e%u + 1, term_new(0, NUM, 0, 0ULL));\n", pad, dep);
         fprintf(f, "%sif (aot_is_copy_free(x%u)) {\n", pad, dep);
         fprintf(f, "%sheap_set(e%u + 0, term_sub_set(x%u, 1));\n", pad1, dep, dep);
@@ -482,7 +511,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         fprintf(f, "%su64 %s = term_val(%s);\n", pad1, ctr, arg);
         fprintf(f, "%sfor (u32 j = %s; j > 0; j--) {\n", pad1, ari);
         fprintf(f, "%s  Term %s = heap_read(%s + (u64)(j - 1));\n", pad1, fld, ctr);
-        fprintf(f, "%s  u64 %s = heap_alloc(2);\n", pad1, cell);
+        fprintf(f, "%s  u64 %s = aot_alloc(2, AOT_ALLOC_APP_FRAME_MAT);\n", pad1, cell);
         fprintf(f, "%s  heap_set(%s + 0, term_new_era());\n", pad1, cell);
         fprintf(f, "%s  heap_set(%s + 1, %s);\n", pad1, cell, fld);
         fprintf(f, "%s  stack[*s_pos] = term_new(0, APP, 0, %s);\n", pad1, cell);
@@ -533,7 +562,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
 
       case REF: {
         fprintf(f, "%sif (STEPS_ITRS_LIM == 0) {\n", pad);
-        if (term_ext(term) == AOT_EMIT_DEF_ID) {
+        if (term_ext(term) == AOT_EMIT_DEF_ID && AOT_EMIT_SELF_LOOP) {
           fprintf(f, "%scontinue;\n", pad1);
         } else {
           fprintf(f, "%sreturn aot_call_ref(%u, stack, s_pos, base);\n", pad1, term_ext(term));
@@ -567,7 +596,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       char fld_n[32];
       aot_emit_tmp(ctr_n, sizeof(ctr_n), "ctr", tmp);
 
-      fprintf(f, "%su64 %s = heap_alloc(%u);\n", pad, ctr_n, ari);
+      fprintf(f, "%su64 %s = aot_alloc(%u, AOT_ALLOC_CTR_FIELDS);\n", pad, ctr_n, ari);
       for (u32 i = 0; i < ari; i++) {
         aot_emit_tmp(fld_n, sizeof(fld_n), "fld", tmp);
         if (aot_emit_expr_structural(ctr_loc + i)) {
@@ -724,7 +753,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
 
       aot_emit_node(f, dup_loc + 0, dep, val_n, 0, pad, tmp);
       fprintf(f, "%sTerm x%u = %s;\n", pad, dep, val_n);
-      fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
+      fprintf(f, "%su64 e%u = aot_alloc(2, AOT_ALLOC_DUP_CELL);\n", pad, dep);
       fprintf(f, "%sheap_set(e%u + 1, term_new(0, NUM, 0, 0ULL));\n", pad, dep);
       fprintf(f, "%sif (aot_is_copy_free(x%u)) {\n", pad, dep);
       fprintf(f, "%sheap_set(e%u + 0, term_sub_set(x%u, 1));\n", pad1, dep, dep);
@@ -777,16 +806,28 @@ fn void aot_emit_def(FILE *f, u32 id) {
   fprintf(f, ";\n");
   fprintf(f, "  }\n");
   fprintf(f, "\n");
-  fprintf(f, "  for (;;) {\n");
-  fprintf(f, "    Term env_cells[AOT_ENV_CAP] = {0};\n");
-  fprintf(f, "    u64 env_locs[AOT_ENV_CAP] = {0};\n");
-  fprintf(f, "\n");
-  {
-    u32 tmp = 0;
-    AOT_EMIT_DEF_ID = id;
-    aot_emit_node(f, root, 0, NULL, 1, "    ", &tmp);
+  u8 self_loop = aot_emit_has_self_tail_ref(root, id);
+  AOT_EMIT_DEF_ID = id;
+  AOT_EMIT_SELF_LOOP = self_loop;
+  if (self_loop) {
+    fprintf(f, "  for (;;) {\n");
+    fprintf(f, "    Term env_cells[AOT_ENV_CAP] = {0};\n");
+    fprintf(f, "    u64 env_locs[AOT_ENV_CAP] = {0};\n");
+    fprintf(f, "\n");
+    {
+      u32 tmp = 0;
+      aot_emit_node(f, root, 0, NULL, 1, "    ", &tmp);
+    }
+    fprintf(f, "  }\n");
+  } else {
+    fprintf(f, "  Term env_cells[AOT_ENV_CAP] = {0};\n");
+    fprintf(f, "  u64 env_locs[AOT_ENV_CAP] = {0};\n");
+    fprintf(f, "\n");
+    {
+      u32 tmp = 0;
+      aot_emit_node(f, root, 0, NULL, 1, "  ", &tmp);
+    }
   }
-  fprintf(f, "  }\n");
   fprintf(f, "}\n\n");
 }
 

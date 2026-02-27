@@ -14,6 +14,7 @@
 fn void  aot_emit(const char *c_path, const char *runtime_path, const char *src_path, const char *src_text, const AotBuildCfg *cfg);
 fn void  aot_emit_stdout(const char *runtime_path, const char *src_path, const char *src_text, const AotBuildCfg *cfg);
 fn void  sys_error(const char *msg);
+static u64 AOT_BUILD_TEMP_SEQ = 0;
 
 fn double aot_build_now_ms(void) {
   struct timespec ts;
@@ -237,6 +238,19 @@ fn void aot_build_temp_path(char *out, u32 out_len, const char *name) {
   }
 }
 
+// Builds one unique AOT temp-file path safe for parallel invocations.
+fn void aot_build_temp_unique_path(char *out, u32 out_len, const char *stem, const char *ext) {
+  char tmp_root[PATH_MAX];
+  aot_build_temp_root(tmp_root, sizeof(tmp_root));
+
+  u64 seq = __atomic_fetch_add(&AOT_BUILD_TEMP_SEQ, 1, __ATOMIC_RELAXED);
+  int pid = (int)getpid();
+  int n = snprintf(out, out_len, "%s/%s.%d.%llu.%s", tmp_root, stem, pid, (unsigned long long)seq, ext);
+  if (n < 0 || n >= (int)out_len) {
+    sys_error("AOT temp file path too long");
+  }
+}
+
 // Emits only C code to stdout.
 fn void aot_build_to_c(const char *argv0, const char *src_path, const char *src_text, const AotBuildCfg *cfg) {
   char runtime_path[PATH_MAX];
@@ -244,7 +258,7 @@ fn void aot_build_to_c(const char *argv0, const char *src_path, const char *src_
   aot_emit_stdout(runtime_path, src_path, src_text, cfg);
 }
 
-// Emits + compiles + runs once, keeping deterministic temp artifacts.
+// Emits + compiles + runs once, keeping unique temp artifacts.
 fn int aot_build_as_c_once(const char *argv0, const char *src_path, const char *src_text, const AotBuildCfg *cfg) {
   int  rc = 1;
   char c_path[PATH_MAX];
@@ -253,8 +267,8 @@ fn int aot_build_as_c_once(const char *argv0, const char *src_path, const char *
   double t0 = timed ? aot_build_now_ms() : 0.0;
   double tp = t0;
 
-  aot_build_temp_path(c_path, sizeof(c_path), "hvm4-aot-as-c.main.c");
-  aot_build_temp_path(x_path, sizeof(x_path), "hvm4-aot-as-c.main.bin");
+  aot_build_temp_unique_path(c_path, sizeof(c_path), "hvm4-aot-as-c.main", "c");
+  aot_build_temp_unique_path(x_path, sizeof(x_path), "hvm4-aot-as-c.main", "bin");
   if (timed) {
     double now = aot_build_now_ms();
     aot_build_timing_log("prepare", now - tp);
@@ -304,7 +318,7 @@ fn int aot_build_to_output(const char *argv0, const char *src_path, const char *
   double t0 = timed ? aot_build_now_ms() : 0.0;
   double tp = t0;
 
-  aot_build_temp_path(c_path, sizeof(c_path), "hvm4-aot-output.main.c");
+  aot_build_temp_unique_path(c_path, sizeof(c_path), "hvm4-aot-output.main", "c");
   if (timed) {
     double now = aot_build_now_ms();
     aot_build_timing_log("prepare", now - tp);

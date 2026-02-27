@@ -62,6 +62,87 @@ fn void aot_itrs_add(u64 amount) {
   }
 }
 
+// Allocation Telemetry
+// --------------------
+
+typedef enum {
+  AOT_ALLOC_APP_FRAME_HEAD = 0,
+  AOT_ALLOC_APP_FRAME_MAT,
+  AOT_ALLOC_DUP_CELL,
+  AOT_ALLOC_CTR_FIELDS,
+  AOT_ALLOC_ENV_BIND,
+  AOT_ALLOC_CLASS_COUNT,
+} AotAllocClass;
+
+static int AOT_ALLOC_ENABLED = -1;
+static u64 AOT_ALLOC_CALLS[AOT_ALLOC_CLASS_COUNT] = {0};
+static u64 AOT_ALLOC_NODES[AOT_ALLOC_CLASS_COUNT] = {0};
+
+// Returns one human-readable name for one allocation class.
+fn const char *aot_alloc_class_name(u32 cls) {
+  static const char *NAMES[AOT_ALLOC_CLASS_COUNT] = {
+    "APP_FRAME_HEAD",
+    "APP_FRAME_MAT",
+    "DUP_CELL",
+    "CTR_FIELDS",
+    "ENV_BIND",
+  };
+  if (cls >= AOT_ALLOC_CLASS_COUNT) {
+    return "UNKNOWN";
+  }
+  return NAMES[cls];
+}
+
+// Returns 1 when allocation-class telemetry is enabled via HVM_AOT_ALLOC.
+fn int aot_alloc_enabled(void) {
+  int enabled = __atomic_load_n(&AOT_ALLOC_ENABLED, __ATOMIC_RELAXED);
+  if (enabled >= 0) {
+    return enabled;
+  }
+
+  const char *env = getenv("HVM_AOT_ALLOC");
+  enabled = env != NULL && env[0] != '\0' && strcmp(env, "0") != 0;
+  __atomic_store_n(&AOT_ALLOC_ENABLED, enabled, __ATOMIC_RELAXED);
+  return enabled;
+}
+
+// Allocates one heap chunk and attributes it to one AOT allocation class.
+fn u64 aot_alloc(u32 size, u32 cls) {
+  if (aot_alloc_enabled() && cls < AOT_ALLOC_CLASS_COUNT) {
+    __atomic_fetch_add(&AOT_ALLOC_CALLS[cls], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&AOT_ALLOC_NODES[cls], size, __ATOMIC_RELAXED);
+  }
+  return heap_alloc(size);
+}
+
+// Prints allocation-class counters when telemetry is enabled.
+fn void aot_alloc_dump(FILE *f) {
+  if (!aot_alloc_enabled()) {
+    return;
+  }
+
+  u64 total_calls = 0;
+  u64 total_nodes = 0;
+  for (u32 cls = 0; cls < AOT_ALLOC_CLASS_COUNT; cls++) {
+    total_calls += __atomic_load_n(&AOT_ALLOC_CALLS[cls], __ATOMIC_RELAXED);
+    total_nodes += __atomic_load_n(&AOT_ALLOC_NODES[cls], __ATOMIC_RELAXED);
+  }
+
+  fprintf(f, "AOT_ALLOC total_calls=%llu total_nodes=%llu\n", (unsigned long long)total_calls, (unsigned long long)total_nodes);
+  for (u32 cls = 0; cls < AOT_ALLOC_CLASS_COUNT; cls++) {
+    u64 calls = __atomic_load_n(&AOT_ALLOC_CALLS[cls], __ATOMIC_RELAXED);
+    u64 nodes = __atomic_load_n(&AOT_ALLOC_NODES[cls], __ATOMIC_RELAXED);
+    if (calls == 0 && nodes == 0) {
+      continue;
+    }
+    fprintf(f, "AOT_ALLOC class[%u]=%s calls=%llu nodes=%llu\n",
+      cls,
+      aot_alloc_class_name(cls),
+      (unsigned long long)calls,
+      (unsigned long long)nodes);
+  }
+}
+
 // Fallback
 // --------
 
@@ -470,7 +551,7 @@ fn u64 aot_env_head(Term *env_cells, u64 *env_locs, u32 len) {
     u64 prev = i == 0 ? 0ULL : env_locs[i - 1];
     u64 bind = env_locs[i];
     if (bind == 0ULL) {
-      bind = heap_alloc(2);
+      bind = aot_alloc(2, AOT_ALLOC_ENV_BIND);
       heap_set(bind + 0, env_cells[i]);
       heap_set(bind + 1, term_new(0, NUM, 0, prev));
       env_locs[i] = bind;
