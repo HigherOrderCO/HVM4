@@ -100,6 +100,22 @@ fn void aot_emit_fun_name(char *out, u32 out_cap, const char *name) {
   out[j] = '\0';
 }
 
+// Resolves one compiled definition id to its emitted C function symbol.
+fn u8 aot_emit_compiled_fun_name(u32 id, char *out, u32 out_cap) {
+  if (id >= TABLE.len || id >= BOOK_CAP) {
+    return 0;
+  }
+  if (BOOK[id] == 0) {
+    return 0;
+  }
+  char *name = table_get(id);
+  if (name == NULL) {
+    return 0;
+  }
+  aot_emit_fun_name(out, out_cap, name);
+  return 1;
+}
+
 // Escape Helpers
 // --------------
 
@@ -363,19 +379,13 @@ fn u8 aot_emit_try_demanded_ref_call(FILE *f, u64 loc, u32 dep, const char *out,
   u64 arg_locs[AOT_ARG_CAP] = {0};
   u32 ref_id = 0;
   u32 arg_len = 0;
-  u8 self_ref = 0;
-  char self_fun[256] = {0};
+  u8 direct_ref = 0;
+  char callee_fun[256] = {0};
 
   if (!aot_emit_collect_ref_spine(loc, &ref_id, arg_locs, &arg_len)) {
     return 0;
   }
-  if (ref_id == AOT_EMIT_DEF_ID) {
-    char *self_name = table_get(ref_id);
-    if (self_name != NULL) {
-      aot_emit_fun_name(self_fun, sizeof(self_fun), self_name);
-      self_ref = 1;
-    }
-  }
+  direct_ref = aot_emit_compiled_fun_name(ref_id, callee_fun, sizeof(callee_fun));
 
   char pad1[128];
   char pad2[128];
@@ -411,14 +421,14 @@ fn u8 aot_emit_try_demanded_ref_call(FILE *f, u64 loc, u32 dep, const char *out,
     fprintf(f, "%s%s[%u] = %s;\n", pad1, args_n, idx, arg_n);
   }
   fprintf(f, "%su32 %s = *s_pos;\n", pad1, base_n);
-  if (self_ref) {
+  if (direct_ref) {
     fprintf(f, "%sTerm %s;\n", pad1, head_n);
     fprintf(f, "%sif (aot_call_depth() >= AOT_MAX_DEPTH) {\n", pad1);
     fprintf(f, "%s%s = term_new_ref(%u);\n", pad2, head_n, ref_id);
     fprintf(f, "%s} else {\n", pad1);
     fprintf(f, "%sAOT_CALL_DEPTH++;\n", pad2);
     fprintf(f, "%saot_heap_compiled_enter();\n", pad2);
-    fprintf(f, "%s%s = %s(stack, s_pos, %s, %s, &%s);\n", pad2, head_n, self_fun, base_n, args_n, pos_n);
+    fprintf(f, "%s%s = %s(stack, s_pos, %s, %s, &%s);\n", pad2, head_n, callee_fun, base_n, args_n, pos_n);
     fprintf(f, "%saot_heap_compiled_leave();\n", pad2);
     fprintf(f, "%sAOT_CALL_DEPTH--;\n", pad2);
     fprintf(f, "%s}\n", pad1);
@@ -775,11 +785,27 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       }
 
       case REF: {
+        u32 ref_id = term_ext(term);
+        u8 direct_ref = 0;
+        char callee_fun[256] = {0};
+        char call_n[32];
+        aot_emit_tmp(call_n, sizeof(call_n), "call", tmp);
+        direct_ref = aot_emit_compiled_fun_name(ref_id, callee_fun, sizeof(callee_fun));
         fprintf(f, "%sif (STEPS_ITRS_LIM == 0) {\n", pad);
-        if (term_ext(term) == AOT_EMIT_DEF_ID && AOT_EMIT_SELF_LOOP) {
+        if (ref_id == AOT_EMIT_DEF_ID && AOT_EMIT_SELF_LOOP) {
           fprintf(f, "%scontinue;\n", pad1);
+        } else if (direct_ref) {
+          fprintf(f, "%sif (aot_call_depth() >= AOT_MAX_DEPTH) {\n", pad1);
+          fprintf(f, "%sreturn term_new_ref(%u);\n", pad2, ref_id);
+          fprintf(f, "%s}\n", pad1);
+          fprintf(f, "%sAOT_CALL_DEPTH++;\n", pad1);
+          fprintf(f, "%saot_heap_compiled_enter();\n", pad1);
+          fprintf(f, "%sTerm %s = %s(stack, s_pos, base, a_args, a_pos);\n", pad1, call_n, callee_fun);
+          fprintf(f, "%saot_heap_compiled_leave();\n", pad1);
+          fprintf(f, "%sAOT_CALL_DEPTH--;\n", pad1);
+          fprintf(f, "%sreturn %s;\n", pad1, call_n);
         } else {
-          fprintf(f, "%sreturn aot_call_ref(%u, stack, s_pos, base, a_args, a_pos);\n", pad1, term_ext(term));
+          fprintf(f, "%sreturn aot_call_ref(%u, stack, s_pos, base, a_args, a_pos);\n", pad1, ref_id);
         }
         fprintf(f, "%s}\n", pad);
         aot_emit_ret_head(f, loc, dep, pad, tmp);
@@ -1075,6 +1101,19 @@ fn void aot_emit_def(FILE *f, u32 id) {
   fprintf(f, "}\n\n");
 }
 
+// Emits forward declarations for all compiled definition functions.
+fn void aot_emit_prototypes(FILE *f) {
+  fprintf(f, "// Forward declarations for generated definition functions.\n");
+  for (u32 id = 0; id < TABLE.len; id++) {
+    char fun_name[256];
+    if (!aot_emit_compiled_fun_name(id, fun_name, sizeof(fun_name))) {
+      continue;
+    }
+    fprintf(f, "static Term %s(Term *stack, u32 *s_pos, u32 base, Term *a_args, u32 *a_pos);\n", fun_name);
+  }
+  fprintf(f, "\n");
+}
+
 // Registration Emitter
 // --------------------
 
@@ -1212,6 +1251,7 @@ fn void aot_emit_to_file(FILE *f, const char *runtime_path, const char *src_path
   aot_emit_c_string_decl(f, "AOT_SOURCE_PATH", src_path);
   aot_emit_c_string_decl(f, "AOT_SOURCE_TEXT", src_text);
   aot_emit_ffi_table(f, cfg);
+  aot_emit_prototypes(f);
 
   for (u32 id = 0; id < TABLE.len; id++) {
     if (BOOK[id] == 0) {
