@@ -1,34 +1,37 @@
-1) Allocation attribution gap after adding `AOT_ALLOC`: where should we instrument next to cover the missing heap?
+1) Allocation attribution boundary after Round 17 (missing heap still large)
 
 Context:
-- Round 16 added `aot_alloc(size,class)` and wired all explicit compiled `heap_alloc` sites we emit today (`APP_FRAME_HEAD`, `APP_FRAME_MAT`, `DUP_CELL`, `CTR_FIELDS`, `ENV_BIND`).
-- On some canaries this matches a large share (e.g. `mat_mul`), but on others it is tiny compared to total heap:
-  - `edit_dist`: `AOT_ALLOC total_nodes=460,368` vs `Heap=377,992,109` with `AOT_DEOPT=0`, `AOT_RESID=0`.
-- This implies most allocation is happening outside currently classified compiled sites.
+- Round 17 removed compiled APP-frame and env-bind-list materialization from hot paths.
+- On canaries, `AOT_ALLOC` dropped drastically and is now often dominated by `DUP_CELL`.
+- But for `edit_dist`, gap remains huge even with `AOT_DEOPT=0` and `AOT_RESID=0`:
+  - `AOT_ALLOC total_nodes=51,264`
+  - runtime `Heap=377,583,005`
+- So most allocations are still outside our currently attributed explicit AOT sites.
 
 Question:
-- In HVM’s runtime architecture, what are the highest-probability allocation sources we should instrument next to explain this gap?
-- Is there a preferred attribution boundary (for example: `term_new_app`/`term_new_ctr` wrappers used by compiled paths vs globally instrumenting `heap_alloc`) that preserves signal quality without too much noise?
+- In HVM runtime, where should we instrument next for highest signal-to-noise to explain this gap?
+- Should we prefer a thread-local compiled-context counter around global `heap_alloc`, or per-helper instrumentation first (`aot_force_*`, `wnf_*` interactions reached from compiled strict forcing)?
 
-2) Direct compiled call ABI: minimum safe boundary to stop APP-frame materialization
+2) DUP_CELL elimination opportunities with current semantics
 
 Context:
-- Deopts are near-zero on canaries, yet speedups are still far from goal.
-- Telemetry confirms huge APP/env/DUP-related allocation volume on hot kernels.
-- We want to lower known-arity compiled-to-compiled calls without constructing `APP(REF,arg)` heap frames when possible.
+- After removing APP/env bind materialization, `DUP_CELL` became the dominant explicit AOT allocation class:
+  - `mat_mul`: 18,128,240 `DUP_CELL` calls
+  - `ray_sphere`: 13,458,320
+  - `nqueens`: 19,354,763
+- Current emitter allocates a DUP cell for each compiled DUP binder to preserve DP0/DP1 behavior.
 
 Question:
-- What exact invariants must remain true at AOT/interpreter boundaries (stack shape, `base`, strict forcing behavior, DUP/SUP handling) so direct argument passing is semantics-preserving?
-- Is a worker/wrapper split (register args internally, stack ABI at boundary) aligned with HVM runtime expectations?
+- Which DUP patterns are semantically safe to scalarize/avoid cell allocation in compiled mode?
+- Is there a known criterion (linearity / copy-free payload / no escaping DP references / no SUP interaction) to prove a DUP cell can stay in registers and only materialize on fallback?
 
-3) Mutual/non-tail recursion strategy after self-tail loop success
+3) Next recursion step: SCC trampoline with raw arg ABI
 
 Context:
-- Self-tail `REF` loop restart removed `CALL_DEPTH_CAP` deopts on `gab_deriv`.
-- Remaining depth sensitivity comes from non-self recursive chains that still use `aot_call_ref`.
+- Self-tail `REF` loop is already in place and stable.
+- We now pass raw local args across compiled calls (`a_args/a_pos`) and only reify at interpreter boundary.
+- Non-self recursion still uses C recursion via `aot_call_ref`.
 
 Question:
-- For HVM specifically, should we prefer:
-  - SCC-local dispatch loop (`switch current_def`) with tail jumps, or
-  - a generic trampoline return protocol?
-- Which option is less likely to violate existing stack/base ownership assumptions in WNF/runtime code?
+- For HVM semantics and current stack ownership (`stack,s_pos,base`), is SCC-local dispatch loop the preferred next step over a generic trampoline return-protocol?
+- Any pitfalls when combining SCC dispatch with pending raw local args that are not yet reified into runtime APP frames?

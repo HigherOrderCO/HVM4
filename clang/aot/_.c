@@ -11,7 +11,7 @@
 // Type
 // ----
 
-typedef Term (*HvmAotFn)(Term *stack, u32 *s_pos, u32 base);
+typedef Term (*HvmAotFn)(Term *stack, u32 *s_pos, u32 base, Term *a_args, u32 *a_pos);
 
 // Build-time runtime config embedded into generated AOT executables.
 typedef struct {
@@ -572,8 +572,32 @@ fn u64 aot_env_get(Term *env_cells, u64 *env_locs, u32 idx) {
   if (idx >= AOT_ENV_CAP) {
     return 0ULL;
   }
-  aot_env_head(env_cells, env_locs, idx + 1);
-  return env_locs[idx];
+  u64 bind = env_locs[idx];
+  if (bind != 0ULL) {
+    return bind;
+  }
+
+  bind = aot_alloc(2, AOT_ALLOC_ENV_BIND);
+  heap_set(bind + 0, env_cells[idx]);
+  heap_set(bind + 1, term_new(0, NUM, 0, 0ULL));
+  env_locs[idx] = bind;
+  return bind;
+}
+
+// Pushes one raw argument as one runtime APP frame.
+fn void aot_stack_push_arg(Term *stack, u32 *s_pos, Term arg, u32 cls) {
+  u64 cell = aot_alloc(2, cls);
+  heap_set(cell + 0, term_new_era());
+  heap_set(cell + 1, arg);
+  stack[*s_pos] = term_new(0, APP, 0, cell);
+  (*s_pos)++;
+}
+
+// Reifies pending local compiled args back to runtime APP frames.
+fn void aot_stack_reify_args(Term *stack, u32 *s_pos, const Term *a_args, u32 a_pos, u32 cls) {
+  for (u32 i = 0; i < a_pos; i++) {
+    aot_stack_push_arg(stack, s_pos, a_args[i], cls);
+  }
 }
 
 // Reapplies arguments [from, argc) to a head term.
@@ -739,8 +763,8 @@ fn u32 aot_call_depth(void) {
   return AOT_CALL_DEPTH;
 }
 
-// Calls one compiled ref using current stack slice, else returns residual REF application.
-fn Term aot_call_ref(u32 ref_id, Term *stack, u32 *s_pos, u32 base) {
+// Calls one compiled ref using current stack slice and pending local args.
+fn Term aot_call_ref(u32 ref_id, Term *stack, u32 *s_pos, u32 base, Term *a_args, u32 *a_pos) {
   if (AOT_CALL_DEPTH >= AOT_MAX_DEPTH) {
     return term_new_ref(ref_id);
   }
@@ -751,7 +775,7 @@ fn Term aot_call_ref(u32 ref_id, Term *stack, u32 *s_pos, u32 base) {
   }
 
   AOT_CALL_DEPTH++;
-  Term out = fun(stack, s_pos, base);
+  Term out = fun(stack, s_pos, base, a_args, a_pos);
   AOT_CALL_DEPTH--;
 
   return out;
@@ -783,9 +807,14 @@ fn int aot_try_call(u32 id, Term *stack, u32 *s_pos, u32 base, Term *out) {
     return 0;
   }
 
+  Term a_args[AOT_ARG_CAP] = {0};
+  u32  a_pos = 0;
   AOT_CALL_DEPTH++;
-  *out = fun(stack, s_pos, base);
+  *out = fun(stack, s_pos, base, a_args, &a_pos);
   AOT_CALL_DEPTH--;
+  if (a_pos > 0) {
+    aot_stack_reify_args(stack, s_pos, a_args, a_pos, AOT_ALLOC_APP_FRAME_HEAD);
+  }
   return 1;
 }
 

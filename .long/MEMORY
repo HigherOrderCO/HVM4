@@ -1,81 +1,73 @@
-Round 16 (2026-02-27)
+Round 17 (2026-02-27)
 
 What landed
 - Files changed:
   - `clang/aot/_.c`
   - `clang/aot/emit.c`
-  - `clang/aot/build.c`
-  - `clang/runtime/eval_main.c`
-- Added AOT allocation-class telemetry:
-  - New runtime classes and counters in `aot/_.c`:
-    - `APP_FRAME_HEAD`
-    - `APP_FRAME_MAT`
-    - `DUP_CELL`
-    - `CTR_FIELDS`
-    - `ENV_BIND`
-  - New helper `aot_alloc(size, class)` wraps `heap_alloc` and atomically records calls/nodes when `HVM_AOT_ALLOC=1`.
-  - Added `aot_alloc_dump(stderr)`; called from `runtime_eval_main` after evaluation.
-  - `aot_env_head` bind-node allocation now uses `aot_alloc(..., ENV_BIND)`.
-- Emitted AOT code now attributes explicit allocations:
-  - head APP frame pushes -> `AOT_ALLOC_APP_FRAME_HEAD`
-  - MAT field APP pushes -> `AOT_ALLOC_APP_FRAME_MAT`
-  - DUP env cells (head+expr) -> `AOT_ALLOC_DUP_CELL`
-  - ctor payload blocks -> `AOT_ALLOC_CTR_FIELDS`
-- Self-tail loop emission refined:
-  - Added static scanner `aot_emit_has_self_tail_ref(root, def_id)` over head-position structure.
-  - `for(;;)` wrapper is emitted only for defs that actually contain head-tail self `REF`.
-  - `continue` in head `REF` is now gated by both self-id and per-def `AOT_EMIT_SELF_LOOP`.
-  - Non-self-loop defs emit one-shot `env_cells/env_locs` locals (no loop).
-- Fixed `--as-c` temp-path collision bug:
-  - Added `aot_build_temp_unique_path(...)` with `pid + atomic seq` suffix.
-  - `aot_build_as_c_once` now uses unique `.c` and `.bin` paths.
-  - `aot_build_to_output` temp C path also made unique.
+- Removed compiled-path APP-frame materialization by introducing a local raw-arg ABI:
+  - `HvmAotFn` now takes `(stack, s_pos, base, a_args, a_pos)`.
+  - `aot_call_ref(...)` forwards local args through compiled->compiled calls.
+  - `aot_try_call(...)` now allocates a local `a_args[AOT_ARG_CAP]` and reifies pending args back to runtime APP frames only at the interpreter boundary.
+  - Added helpers:
+    - `aot_stack_push_arg(...)`
+    - `aot_stack_reify_args(...)`
+- Emitter (`emit.c`) now lowers head-position args to local arg stack:
+  - head `APP`: pushes arg into `a_args` instead of `aot_alloc(...APP_FRAME_HEAD)`.
+  - head `LAM`: consumes from `a_args` first, then falls back to runtime stack APP frames.
+  - head `SWI`: peeks/forces from `a_args` first; writes back forced arg into `a_args` slot.
+  - head `MAT`: peeks/forces from `a_args` first; on matched branch pushes ctor fields into `a_args` (no APP-frame heap alloc).
+  - head `REF`: calls `aot_call_ref(id, stack, s_pos, base, a_args, a_pos)`.
+  - Generated function signature updated accordingly.
+- Reduced env bind-list allocation pressure:
+  - `aot_env_get(...)` no longer calls `aot_env_head(...)` for prefix materialization.
+  - It now lazily allocates only the requested slot when missing.
+  - `aot_env_head(...)` remains for deopt/fallback list construction/rewiring.
 
 Why
-- After deopt cleanup, optimization focus is heap behavior; needed direct observability of allocation classes on compiled paths.
-- Shared deterministic `--as-c` temp filenames caused parallel runs to corrupt generated C.
-- Round 15 loop-wrapped all defs; this round avoids loop/env reset overhead for defs without self-tail recursion.
+- Round 16 telemetry showed massive allocation in `APP_FRAME_*` and `ENV_BIND` despite near-zero deopts.
+- The compiled evaluator was still emulating runtime APP/env structures eagerly.
+- This round moves compiled execution toward register/local-array argument passing, with heap representation only at boundary crossings.
 
 Validation
 - Build: `cd clang && clang -O2 -o main main.c`.
-- Tests: `./test/_all_.sh` -> all pass (interpreted + AOT).
-- `--as-c` race smoke test:
-  - Ran two `./clang/main test/fib.hvm --as-c -s` concurrently.
-  - Both succeeded, no stderr errors, correct outputs.
+- Tests:
+  - Full `./test/_all_.sh` run logged to `/tmp/hvm_all_round17.log`.
+  - Exit code `0`; tail confirms `All tests passed!`.
 - Canary telemetry (`HVM_AOT_DEOPT=1 HVM_AOT_ALLOC=1 --as-c -s -T1`):
-  - `gab_deriv`: deopt 0, resid 1 (`EXPR_CTR_FIELD_CAPTURE`), result `16400000`
-    - `AOT_ALLOC total_calls=2,000,003 total_nodes=4,000,005`
-    - class mix: head app 800,002; mat app 1,200,000; ctr_fields 1
-    - time `1.502s`
-  - `gab_takl`: deopt 0, resid 3 (`EXPR_APP_ARG_CAPTURE`), result `259`
-    - `AOT_ALLOC total_calls=3 total_nodes=6`
-    - time `1.854s`
-  - `mat_mul`: deopt 0, resid 3 (`EXPR_CTR_FIELD_CAPTURE`), result `113238912`
-    - `AOT_ALLOC total_calls=99,596,648 total_nodes=199,193,293`
-    - class mix: head app 45.3M, mat app 9.0M, dup 18.1M, env_bind 27.2M
-    - time `0.975s`
-  - `ray_sphere`: deopt/resid 0/0, result `4011084840`
-    - `AOT_ALLOC total_calls=60,222,565 total_nodes=120,445,130`
-    - class mix dominated by head app + env_bind + dup
-    - time `1.260s`
-  - `nqueens`: deopt/resid 0/0, result `1380080`
-    - `AOT_ALLOC total_calls=85,435,202 total_nodes=170,870,404`
-    - class mix dominated by head app + env_bind + dup
-    - time `0.886s`
-  - `edit_dist`: deopt/resid 0/0, result `1962522748`
-    - `AOT_ALLOC total_calls=230,184 total_nodes=460,368`
-    - time `1.795s`
-- Partial `bench.ts --timeout 3 hvmi hvmc` (killed mid-run) still shows mixed gains/losses in early set; no regressions observed from this round’s correctness checks.
+  - `gab_deriv`: deopt/resid `0/1` (`EXPR_CTR_FIELD_CAPTURE`), result `16400000`
+    - `AOT_ALLOC total_calls=1 total_nodes=1` (`CTR_FIELDS` only)
+    - time `1.442s` (was `1.502s` in Round 16)
+  - `gab_takl`: deopt/resid `0/3` (`EXPR_APP_ARG_CAPTURE`), result `259`
+    - `AOT_ALLOC total_calls=0 total_nodes=0`
+    - time `1.676s` (was `1.854s`)
+  - `mat_mul`: deopt/resid `0/3` (`EXPR_CTR_FIELD_CAPTURE`), result `113238912`
+    - `AOT_ALLOC total_calls=18,128,243 total_nodes=36,256,483`
+    - class mix: `DUP_CELL` 18,128,240; `CTR_FIELDS` 3
+    - time `0.589s` (was `0.975s`)
+  - `ray_sphere`: deopt/resid `0/0`, result `4011084840`
+    - `AOT_ALLOC total_calls=13,458,320 total_nodes=26,916,640` (`DUP_CELL` only)
+    - time `0.976s` (was `1.260s`)
+  - `nqueens`: deopt/resid `0/0`, result `1380080`
+    - `AOT_ALLOC total_calls=19,354,763 total_nodes=38,709,526` (`DUP_CELL` only)
+    - time `0.496s` (was `0.886s`)
+  - `edit_dist`: deopt/resid `0/0`, result `1962522748`
+    - `AOT_ALLOC total_calls=25,632 total_nodes=51,264` (`DUP_CELL` only)
+    - time `1.683s` (was `1.795s`)
 
-Key insight from telemetry
-- Even when `AOT_DEOPT=0` and residuals are near-zero, total heap can remain very high.
-- `AOT_ALLOC` explains explicit compiled-site allocations, but not all allocations in execution:
-  - e.g. `edit_dist` has tiny `AOT_ALLOC` yet huge total heap, implying substantial allocation from non-instrumented paths (generic helpers/interactions or constructors outside current classified sites).
-- Immediate next perf work should combine:
-  1) broader allocation attribution coverage,
-  2) direct compiled-to-compiled call lowering (avoid APP-frame materialization),
-  3) mutual/non-tail recursion trampoline/SCC strategy.
+Key insight (updated)
+- APP/env materialization was indeed a dominant bottleneck on many kernels; removing it yields substantial speedups and large allocation drops.
+- After this change, explicit compiled-site allocation is often dominated by `DUP_CELL`.
+- `edit_dist` still shows huge total heap vs tiny `AOT_ALLOC`, confirming substantial allocation outside currently attributed AOT sites (likely generic runtime interactions/forcing paths).
 
-Operational notes
-- `--as-c` temp collisions are fixed; parallel `--as-c` invocations no longer require serialization.
-- Keep canary telemetry command-line unchanged for parity (`--as-c -s -T1`) when comparing against prior rounds.
+Known invariants preserved
+- Deopt and residual semantics remain stable on canaries.
+- `AOT_DEOPT_CALL_DEPTH_CAP` behavior unchanged.
+- Self-tail loop logic still works with shared `a_args/a_pos` ABI.
+
+Next steps
+1) Add compiled-context allocation attribution at allocator boundary:
+   - thread-local `AOT_IN_COMPILED` set/unset on compiled entry/exit,
+   - count all `heap_alloc` while in compiled context (optionally by size bucket/class heuristic).
+2) Investigate remaining `DUP_CELL` dominance:
+   - identify when DUP cells are semantically unavoidable vs candidates for compiled-path scalarization.
+3) Revisit direct call/trampoline for non-self recursion only after allocator attribution confirms remaining bottlenecks.
