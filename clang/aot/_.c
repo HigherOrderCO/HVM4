@@ -73,6 +73,7 @@ typedef enum {
   AOT_DEOPT_EXPR_APP_UNSUPPORTED_FUN,
   AOT_DEOPT_EXPR_APP_ENV_CAP,
   AOT_DEOPT_EXPR_APP_ARG_CAPTURE,
+  AOT_DEOPT_EXPR_CTR_FIELD_CAPTURE,
   AOT_DEOPT_EXPR_DUP_ENV_CAP,
   AOT_DEOPT_EXPR_OP2_RHS_CAPTURE,
   AOT_DEOPT_EXPR_UNSUPPORTED_TAG,
@@ -84,6 +85,7 @@ typedef enum {
   AOT_DEOPT_SITE_KIND_NONE = 0,
   AOT_DEOPT_SITE_KIND_HEAD_SWI_NON_NUM,
   AOT_DEOPT_SITE_KIND_HEAD_MAT_NON_CTR,
+  AOT_DEOPT_SITE_KIND_EXPR_UNSUPPORTED_TAG,
   AOT_DEOPT_SITE_KIND_COUNT,
 } AotDeoptSiteKind;
 
@@ -110,6 +112,7 @@ fn const char *aot_deopt_reason_name(u32 reason) {
     "EXPR_APP_UNSUPPORTED_FUN",
     "EXPR_APP_ENV_CAP",
     "EXPR_APP_ARG_CAPTURE",
+    "EXPR_CTR_FIELD_CAPTURE",
     "EXPR_DUP_ENV_CAP",
     "EXPR_OP2_RHS_CAPTURE",
     "EXPR_UNSUPPORTED_TAG",
@@ -127,6 +130,7 @@ fn const char *aot_deopt_site_kind_name(u32 kind) {
     "NONE",
     "HEAD_SWI_NON_NUM",
     "HEAD_MAT_NON_CTR",
+    "EXPR_UNSUPPORTED_TAG",
   };
   if (kind >= AOT_DEOPT_SITE_KIND_COUNT) {
     return "UNKNOWN";
@@ -134,9 +138,85 @@ fn const char *aot_deopt_site_kind_name(u32 kind) {
   return NAMES[kind];
 }
 
+// Packs one static (tag,ext) pair into deopt site aux metadata.
+fn u32 aot_deopt_aux_pack_tag_ext(u8 tag, u32 ext) {
+  return ((u32)(tag & TAG_MASK) << EXT_BITS) | (ext & EXT_MASK);
+}
+
+// Unpacks one static tag from deopt site aux metadata.
+fn u32 aot_deopt_aux_unpack_tag(u32 aux) {
+  return (aux >> EXT_BITS) & TAG_MASK;
+}
+
+// Unpacks one static ext from deopt site aux metadata.
+fn u32 aot_deopt_aux_unpack_ext(u32 aux) {
+  return aux & EXT_MASK;
+}
+
+// Returns one human-readable name for a term tag.
+fn const char *aot_term_tag_name(u32 tag) {
+  static const char *NAMES[TAG_MASK + 1] = {
+    [APP] = "APP",
+    [VAR] = "VAR",
+    [LAM] = "LAM",
+    [DP0] = "DP0",
+    [DP1] = "DP1",
+    [SUP] = "SUP",
+    [DUP] = "DUP",
+    [ALO] = "ALO",
+    [REF] = "REF",
+    [NAM] = "NAM",
+    [DRY] = "DRY",
+    [ERA] = "ERA",
+    [MAT] = "MAT",
+    [C00] = "C00",
+    [C01] = "C01",
+    [C02] = "C02",
+    [C03] = "C03",
+    [C04] = "C04",
+    [C05] = "C05",
+    [C06] = "C06",
+    [C07] = "C07",
+    [C08] = "C08",
+    [C09] = "C09",
+    [C10] = "C10",
+    [C11] = "C11",
+    [C12] = "C12",
+    [C13] = "C13",
+    [C14] = "C14",
+    [C15] = "C15",
+    [C16] = "C16",
+    [NUM] = "NUM",
+    [SWI] = "SWI",
+    [USE] = "USE",
+    [OP2] = "OP2",
+    [DSU] = "DSU",
+    [DDU] = "DDU",
+    [EQL] = "EQL",
+    [AND] = "AND",
+    [OR]  = "OR",
+    [UNS] = "UNS",
+    [ANY] = "ANY",
+    [INC] = "INC",
+    [BJV] = "BJV",
+    [BJ0] = "BJ0",
+    [BJ1] = "BJ1",
+    [PRI] = "PRI",
+  };
+  if (tag > TAG_MASK) {
+    return "UNKNOWN";
+  }
+  if (NAMES[tag] == NULL) {
+    return "UNKNOWN";
+  }
+  return NAMES[tag];
+}
+
 // Returns 1 when one reason is intentional residualization, not a hard bailout.
 fn int aot_deopt_reason_is_residual(u32 reason) {
-  return reason == AOT_DEOPT_EXPR_APP_ARG_CAPTURE || reason == AOT_DEOPT_EXPR_OP2_RHS_CAPTURE;
+  return reason == AOT_DEOPT_EXPR_APP_ARG_CAPTURE
+      || reason == AOT_DEOPT_EXPR_CTR_FIELD_CAPTURE
+      || reason == AOT_DEOPT_EXPR_OP2_RHS_CAPTURE;
 }
 
 // Returns 1 when deopt tracing is enabled via HVM_AOT_DEOPT.
@@ -268,6 +348,10 @@ fn void aot_deopt_dump_top_sites(FILE *f, const char *prefix, const u64 *site_co
         fprintf(f, " expect_num=%u", aux);
       } else if (kind == AOT_DEOPT_SITE_KIND_HEAD_MAT_NON_CTR) {
         fprintf(f, " expect_ctr_ext=%u", aux);
+      } else if (kind == AOT_DEOPT_SITE_KIND_EXPR_UNSUPPORTED_TAG) {
+        u32 expr_tag = aot_deopt_aux_unpack_tag(aux);
+        u32 expr_ext = aot_deopt_aux_unpack_ext(aux);
+        fprintf(f, " expr_tag=%s(%u) expr_ext=%u", aot_term_tag_name(expr_tag), expr_tag, expr_ext);
       } else if (aux != 0) {
         fprintf(f, " aux=%u", aux);
       }

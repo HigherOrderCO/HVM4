@@ -486,6 +486,24 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       fprintf(f, "%sTerm %s = heap_read(%lluULL);\n", pad, out, (unsigned long long)loc);
       return;
     }
+    case C01 ... C16: {
+      u32 ari = (u32)(tag - C00);
+      u64 ctr_loc = term_val(term);
+      char ctr_n[32];
+      char fld_n[32];
+      aot_emit_tmp(ctr_n, sizeof(ctr_n), "ctr", tmp);
+
+      fprintf(f, "%su64 %s = heap_alloc(%u);\n", pad, ctr_n, ari);
+      for (u32 i = 0; i < ari; i++) {
+        aot_emit_tmp(fld_n, sizeof(fld_n), "fld", tmp);
+        fprintf(f, "%sTerm %s = ", pad, fld_n);
+        aot_emit_alo_expr(f, ctr_loc + i, dep, AOT_DEOPT_EXPR_CTR_FIELD_CAPTURE);
+        fprintf(f, ";\n");
+        fprintf(f, "%sheap_set(%s + %u, %s);\n", pad, ctr_n, i, fld_n);
+      }
+      fprintf(f, "%sTerm %s = term_new(%u, %u, %u, %s);\n", pad, out, term_sub_get(term), tag, term_ext(term), ctr_n);
+      return;
+    }
     case VAR:
     case BJV: {
       u64 lvl = term_val(term);
@@ -616,7 +634,13 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
     }
     default: {
       fprintf(f, "%sTerm %s = ", pad, out);
-      aot_emit_alo_expr(f, loc, dep, AOT_DEOPT_EXPR_UNSUPPORTED_TAG);
+      aot_emit_alo_expr_meta(
+        f,
+        loc,
+        dep,
+        AOT_DEOPT_EXPR_UNSUPPORTED_TAG,
+        AOT_DEOPT_SITE_KIND_EXPR_UNSUPPORTED_TAG,
+        aot_deopt_aux_pack_tag_ext(tag, term_ext(term)));
       fprintf(f, ";\n");
       return;
     }
@@ -682,14 +706,14 @@ fn void aot_emit_register(FILE *f) {
   fprintf(f, "}\n\n");
 }
 
-// Emits registration for source-mapped strict deopt sites.
+// Emits registration for source-mapped deopt sites.
 fn void aot_emit_register_deopt_sites(FILE *f) {
   u32 len = AOT_EMIT_DEOPT_SITE;
   if (len > AOT_DEOPT_SITE_CAP) {
     len = AOT_DEOPT_SITE_CAP;
   }
 
-  fprintf(f, "// Registers strict-site metadata for deopt counters.\n");
+  fprintf(f, "// Registers deopt-site metadata for deopt counters.\n");
   fprintf(f, "static void aot_register_deopt_sites_generated(void) {\n");
   for (u32 site = 0; site < len; site++) {
     u32 kind = AOT_EMIT_DEOPT_KIND[site];

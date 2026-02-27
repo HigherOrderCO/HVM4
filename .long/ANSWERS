@@ -1,0 +1,31 @@
+# A1: Allocating constructors directly in C is fine
+
+There is nothing wrong with allocating constructors from compiled C code. ALO
+just allocates lazily. Direct allocation is equivalent. If your constructor
+emission segfaults, the bug is somewhere else in your code -- not in the
+concept of constructor emission itself. You are most likely breaking some other
+invariant (maybe double-reading a linear resource, or corrupting the heap
+layout). Do not blame constructor emission. Debug the actual segfault.
+
+# A2: Priority: strict forcing at MAT/SWI sites
+
+Your MAT/SWI code already forces the scrutinee via aot_force_strict when it
+sees DP/APP/ALO/REF tags. But then if the forced result STILL isn't a
+constructor (C00..C16) or a NUM, it deopts. The millions of deopts you see
+are happening because forcing isn't going far enough -- the scrutinee reduces
+to something that needs MORE reduction steps to reach a constructor.
+
+The fix is straightforward: after forcing, if the tag still isn't what you
+expect, you need to keep reducing (call wnf on it). This is what the
+interpreter does. The compiled code should do the same. The forced WHNF of
+any well-typed scrutinee in a MAT/SWI WILL be a constructor or NUM
+eventually -- if it isn't, you haven't reduced it enough.
+
+Focus on making strict MAT/SWI forcing actually reach WHNF instead of doing
+a partial force and giving up.
+
+# A3: AOT_ENV_CAP is your code, your decision
+
+Same answer as AOT_ARG_CAP. You introduced this constant. You own it. If it's
+causing a million deopts on nqueens, fix it however you see fit. Do not ask
+about constants you introduced.

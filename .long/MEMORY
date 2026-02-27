@@ -1,69 +1,72 @@
-Round 12 (2026-02-26)
+Round 13 (2026-02-27)
 
 What changed this round (landed)
-- Landed code change in:
+- Landed code changes in:
+  - `clang/aot/_.c`
   - `clang/aot/emit.c`
-- Removed head-mode APP cap bailout in generated code.
-  - Previous behavior in `aot_emit_node(..., head=1)` for `APP`:
-    - if `(*s_pos - base) >= AOT_ARG_CAP`, return ALO fallback with `HEAD_APP_ARG_CAP`.
-  - New behavior:
-    - no cap check; compiled head APP always emits arg, pushes one APP frame, and recurses into function head.
-- Effect: eliminates `HEAD_APP_ARG_CAP` deopts entirely on measured admission benches.
+- Added actionable metadata for generic `EXPR_UNSUPPORTED_TAG` sites.
+  - New site kind: `AOT_DEOPT_SITE_KIND_EXPR_UNSUPPORTED_TAG`.
+  - Packed static `(tag, ext)` into site `aux` via `aot_deopt_aux_pack_tag_ext`.
+  - `aot_deopt_dump_top_sites` now prints `expr_tag=<name>(id) expr_ext=<ext>` for those sites.
+- Added one residualization reason:
+  - `AOT_DEOPT_EXPR_CTR_FIELD_CAPTURE` (counted under `AOT_RESID`).
+- Reintroduced expression-mode constructor support for `C01..C16` with a safe non-recursive strategy:
+  - allocate constructor node (`heap_alloc(ari)`),
+  - fill each field with lazy ALO capture of the static field location,
+  - return `term_new(term_sub_get(term), tag, term_ext(term), ctr_loc)`.
+- Generic expression fallback (`default` in `head=0`) now emits metadata-tagged unsupported sites.
+
+Root cause found for prior constructor segfault
+- The previous constructor emission retried this round and reproduced the `--as-c` crash on:
+  - `test/match_recursive_arg.hvm`
+  - `test/use_match_depth.hvm`
+- ASAN on host `clang/main` showed the crash was emitter-time stack overflow, not generated-runtime corruption:
+  - deep recursion in `aot_emit_node` at constructor field recursion (`emit.c` old line ~499).
+- Trigger: deep static constructor literals (e.g., `100000n`) cause huge recursive expansion if fields are emitted recursively.
+- Fix: constructor fields are now lazily captured (non-recursive emission), which avoids emitter stack blowup.
 
 Validation
-- Rebuilt:
-  - `cd clang && clang -O2 -o main main.c`
+- Rebuilt: `cd clang && clang -O2 -o main main.c`
+- Canary regressions now pass (`--as-c -s`):
+  - `test/match_recursive_arg.hvm`
+  - `test/use_match_depth.hvm`
 - Full suite passes:
   - `./test/_all_.sh` (interpreted + AOT)
 - Parity checks (result line):
-  - `gab_deriv`: `16400000 == 16400000`
   - `gab_tak`: `56 == 56`
   - `gab_takl`: `259 == 259`
-  - `edit_dist`: `1962522748 == 1962522748`
   - `mat_mul`: `113238912 == 113238912`
-- Admission deopt/resid sweep (serial `--as-c -s`, `HVM_AOT_DEOPT=1`, 45s alarm wrapper):
-  - `bignat_mul`: deopt 10759, resid 43
-  - `edit_dist`: deopt 12783, resid 51183
-  - `gab_tak`: deopt 0, resid 4
-  - `gab_takl`: deopt 0, resid 4
-  - `graph_color`: deopt 16, resid 60
-  - `huffman`: deopt 320640, resid 10240
-  - `lambda_eval`: deopt 1, resid 37
-  - `mat_mul`: deopt 22584227, resid 87568
-  - `nqueens`: deopt 4058698, resid 3052469
-  - `prime_sieve`: deopt 24432, resid 6
-  - `queue_bank`: deopt 410000, resid 3600
-  - `ray_sphere`: deopt 9419780, resid 11103520
-  - `sort_merge`: deopt 40995, resid 51
-  - `sort_quick`: deopt 294948, resid 217
-  - `tree_fold`: deopt 2, resid 4
-  - `trie_bitwise`: deopt 47, resid 136
-  - `u32_fib`: deopt 0, resid 2
-- In all sampled outputs, `HEAD_APP_ARG_CAP` no longer appears in reasons/top-sites.
 
-Observed hotspot shifts
-- `edit_dist` true deopts collapsed from 4,178,375 to 12,783 after cap removal.
-- `gab_tak` and `gab_takl` remain at zero true deopts.
-- Dominant true-deopt class is now clearly `EXPR_UNSUPPORTED_TAG`.
-- Some benches increased in true-deopt count after removing early cap bailouts:
-  - `mat_mul`: 9,722,755 -> 22,584,227
-  - `ray_sphere`: 7,065,683 -> 9,419,780
-  This indicates execution now proceeds further in compiled paths and hits unsupported-tag sites more often instead of bailing at cap.
-- `nqueens` still shows a large `HEAD_DUP_ENV_CAP` component alongside `EXPR_UNSUPPORTED_TAG`.
+Deopt/resid spot checks (`HVM_AOT_DEOPT=1`, serial `--as-c -s`)
+- `gab_tak`: deopt 0, resid 4
+- `gab_takl`: deopt 0, resid 4
+- `mat_mul`: deopt 22,584,224; resid 87,571
+  - resid includes `EXPR_CTR_FIELD_CAPTURE` hits=3
+  - top true-deopt sites now clearly identified as `expr_tag=OP2` with concrete `ext`
+- `ray_sphere`: deopt 9,419,780; resid 11,103,520
+  - top true-deopt sites also mostly `expr_tag=OP2`
+- `nqueens`: deopt 4,058,698; resid 3,052,469
+  - still has large `HEAD_DUP_ENV_CAP` (~1,023,113)
 
-Failed attempt (reverted)
-- Tried adding expression-mode structural constructor emission for `C01..C16`.
-- Regression: AOT segfaults on `test/match_recursive_arg.hvm` and `test/use_match_depth.hvm` (`RC=139`, empty output under test harness).
-- Reverted immediately; test suite returned to green.
-- Takeaway: naive constructor materialization in expression mode violates a runtime invariant (likely around duplication/substitution/ownership), and needs a semantics-guided design before retry.
+Key insights now
+- Tag-aware metadata removed blind site-number triage for `EXPR_UNSUPPORTED_TAG`.
+- Constructor emission is semantically viable; the earlier crash was from compile-time recursion depth.
+- Dominant remaining deopt work is now concrete:
+  - strict mismatch continuation/forcing depth (`HEAD_MAT_NON_CTR` paths),
+  - expression `OP2` hotspots,
+  - `HEAD_DUP_ENV_CAP` on `nqueens`.
+
+Expert answers received (see `.long/ANSWERS`)
+- Direct constructor allocation in emitted C is fine.
+- Priority guidance: improve strict `MAT/SWI` forcing until real WHNF before deopting.
+- `AOT_ENV_CAP` policy is ours to redesign.
 
 Operational notes
-- Environment still lacks GNU `timeout`; use:
+- `--as-c` temp outputs are still deterministic (`/tmp/hvm4-aot-as-c.main.c`), so benchmark probes must stay serial.
+- No GNU `timeout`; keep using:
   - `perl -e 'alarm shift; exec @ARGV' <sec> <cmd> ...`
-- Keep `--as-c` benchmark runs serial unless temp-path randomness is implemented.
 
 Next likely steps
-- Use current top-sites to target `EXPR_UNSUPPORTED_TAG` by highest-hit locations first.
-- Add safe metadata for generic unsupported sites (e.g., static tag id at emission) to avoid blind site-number triage.
-- Investigate `HEAD_DUP_ENV_CAP` on `nqueens` (env-depth strategy vs fallback policy).
-- Reattempt constructor/tag support only with explicit invariants validated on `match_recursive_arg` and `use_match_depth`.
+1. Strengthen strict `MAT/SWI` continuation so scrutinees are reduced far enough to hit `NUM`/`CTR` in compiled mode (or fail only on explicit safety guard).
+2. Use new metadata to target top `expr_tag=OP2` unsupported sites.
+3. Address `HEAD_DUP_ENV_CAP` (`nqueens`) via cap increase or per-definition env sizing.
