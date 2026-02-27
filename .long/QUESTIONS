@@ -1,23 +1,24 @@
-1) What is the intended semantic boundary for a “no-allocation case-tree spine” in compiled mode?
+1) Post-autodup invariant for binder multiplicity (needed for stack-only binders)
 
 Context:
-- We now have very low hard-deopt rates on key canaries, and several benchmark wins, but we are still far from the admission target (~10x speedup on each listed workload).
-- Current emitted AOT code still reconstructs many dynamic terms (APP/CTR/env cells) even when control-flow shape is statically known.
-- This likely means we optimized fallback behavior but not the main cost model.
+- I am trying to remove heap traffic from compiled case-tree paths.
+- A major blocker is whether a lambda binder can be used multiple times without explicit DUP mediation.
+- If multi-use can still happen as repeated `VAR` occurrences, then stack-only local binders can silently duplicate work or break sharing.
+- If multi-use is always rewritten as explicit `DUP`/`DP0`/`DP1`, then non-DP binders can be safely kept in C locals (no heap cell).
 
 Question:
-- For HVM semantics, which interactions are considered safe to execute in fully allocation-light style (direct stack/frame/register manipulation) without materializing intermediate nodes?
-- Specifically, in strict case-tree paths (LAM/MAT/SWI/OP2/REF recursion), should compiled code aim to avoid constructing expression-spine APP/CTR terms unless it must deopt or preserve sharing across branches?
-- Any canonical examples of interactions where allocating is semantically required (not just convenient) in compiled mode?
+- After parse + autodup on this runtime, is there a hard guarantee that every non-erased binder is either linear (`VAR` once) or duplicated only through explicit DUP/DP nodes?
+- If yes, where is that invariant established/enforced in this codebase?
+- If not guaranteed globally, what conservative condition should the AOT emitter check before choosing stack-only binder storage?
 
-2) Preferred direction for eliminating `CALL_DEPTH_CAP` without risking C stack overflow
+2) Semantic constraints for eliminating APP-frame allocations in compiled REF calls
 
 Context:
-- `gab_deriv` still reports `CALL_DEPTH_CAP` deopts in telemetry (97 hits in current run).
-- We currently execute compiled recursion with native C calls and depth caps (`AOT_MAX_DEPTH` / `AOT_TRY_CALL_MAX_DEPTH`).
-- Raising caps alone is risky and probably not enough for long-term coverage.
+- Telemetry shows deopt is low, but Heap/Itrs is still high (~2.3-4.1 on key canaries).
+- A large remaining cost is `heap_alloc(2)` APP-frame construction during compiled recursive/reference calls.
+- I want to emit direct compiled call paths (C-level argument passing) and avoid building APP nodes on hot strict paths.
 
 Question:
-- Should we prioritize emitter-level tail-call conversion for self-recursive calls first, then move to a general trampoline/dispatcher for mutual recursion?
-- Is there a preferred runtime shape for this project (e.g., return a “next call” packet/tag vs loop around `aot_try_call`) that better preserves current stack/heap invariants?
-- Any known pitfalls with DUP/SUP sharing when compiled recursion is trampolined?
+- In this runtime, which invariants require real APP nodes on the runtime stack, and which are just current implementation convenience?
+- Is it semantically acceptable for compiled code to pass args via a private C arg buffer and only reify APP nodes when crossing to fallback/deopt?
+- Are there known edge cases with DUP/SUP interactions where skipping APP-node materialization would violate expected sharing/interaction behavior?

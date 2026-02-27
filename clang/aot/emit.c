@@ -186,7 +186,7 @@ fn void aot_emit_env_head(FILE *f, u32 dep) {
   if (dep == 0) {
     fprintf(f, "0ULL");
   } else {
-    fprintf(f, "e%u", dep - 1);
+    fprintf(f, "aot_env_head(env_cells, env_locs, %u)", dep);
   }
 }
 
@@ -355,18 +355,13 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%s(*s_pos)--;\n", pad);
         if (lam_era) {
-          fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
-          fprintf(f, "%sheap_set(e%u + 0, term_sub_set(term_new_era(), 1));\n", pad, dep);
+          fprintf(f, "%senv_cells[%u] = term_sub_set(term_new_era(), 1);\n", pad, dep);
+          fprintf(f, "%senv_locs[%u] = 0ULL;\n", pad, dep);
         } else {
           fprintf(f, "%su64 %s = term_val(%s);\n", pad, app, frm);
           fprintf(f, "%sTerm x%u = heap_read(%s + 1);\n", pad, dep, app);
-          fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
-          fprintf(f, "%sheap_set(e%u + 0, term_sub_set(x%u, 1));\n", pad, dep, dep);
-        }
-        if (dep == 0) {
-          fprintf(f, "%sheap_set(e%u + 1, term_new(0, NUM, 0, 0ULL));\n", pad, dep);
-        } else {
-          fprintf(f, "%sheap_set(e%u + 1, term_new(0, NUM, 0, e%u));\n", pad, dep, dep - 1);
+          fprintf(f, "%senv_cells[%u] = term_sub_set(x%u, 1);\n", pad, dep, dep);
+          fprintf(f, "%senv_locs[%u] = 0ULL;\n", pad, dep);
         }
         aot_emit_itrs_inc(f, pad);
         aot_emit_node(f, term_val(term), dep + 1, out, 1, pad, tmp);
@@ -386,16 +381,13 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_node(f, dup_loc + 0, dep, val_n, 0, pad, tmp);
         fprintf(f, "%sTerm x%u = %s;\n", pad, dep, val_n);
         fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
-        if (dep == 0) {
-          fprintf(f, "%sheap_set(e%u + 1, term_new(0, NUM, 0, 0ULL));\n", pad, dep);
-        } else {
-          fprintf(f, "%sheap_set(e%u + 1, term_new(0, NUM, 0, e%u));\n", pad, dep, dep - 1);
-        }
+        fprintf(f, "%sheap_set(e%u + 1, term_new(0, NUM, 0, 0ULL));\n", pad, dep);
         fprintf(f, "%sif (aot_is_copy_free(x%u)) {\n", pad, dep);
         fprintf(f, "%sheap_set(e%u + 0, term_sub_set(x%u, 1));\n", pad1, dep, dep);
         fprintf(f, "%s} else {\n", pad);
         fprintf(f, "%sheap_set(e%u + 0, x%u);\n", pad1, dep, dep);
         fprintf(f, "%s}\n", pad);
+        fprintf(f, "%senv_locs[%u] = e%u;\n", pad, dep, dep);
         aot_emit_node(f, dup_loc + 1, dep + 1, out, 1, pad, tmp);
         return;
       }
@@ -597,14 +589,17 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       u32 idx = (u32)(lvl - 1);
       u32 lab = term_ext(term);
       char cell_n[32];
+      char loc_n[32];
       aot_emit_tmp(cell_n, sizeof(cell_n), "cell", tmp);
+      aot_emit_tmp(loc_n, sizeof(loc_n), "loc", tmp);
 
       fprintf(f, "%sTerm %s;\n", pad, out);
-      fprintf(f, "%sTerm %s = heap_read(e%u + 0);\n", pad, cell_n, idx);
+      fprintf(f, "%su64 %s = aot_env_get(env_cells, env_locs, %u);\n", pad, loc_n, idx);
+      fprintf(f, "%sTerm %s = heap_read(%s + 0);\n", pad, cell_n, loc_n);
       fprintf(f, "%sif (term_sub_get(%s)) {\n", pad, cell_n);
       fprintf(f, "%s%s = term_sub_set(%s, 0);\n", pad1, out, cell_n);
       fprintf(f, "%s} else {\n", pad);
-      fprintf(f, "%s%s = term_new(0, DP0, %u, e%u);\n", pad1, out, lab, idx);
+      fprintf(f, "%s%s = term_new(0, DP0, %u, %s);\n", pad1, out, lab, loc_n);
       fprintf(f, "%s}\n", pad);
       return;
     }
@@ -621,14 +616,17 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       u32 idx = (u32)(lvl - 1);
       u32 lab = term_ext(term);
       char cell_n[32];
+      char loc_n[32];
       aot_emit_tmp(cell_n, sizeof(cell_n), "cell", tmp);
+      aot_emit_tmp(loc_n, sizeof(loc_n), "loc", tmp);
 
       fprintf(f, "%sTerm %s;\n", pad, out);
-      fprintf(f, "%sTerm %s = heap_read(e%u + 0);\n", pad, cell_n, idx);
+      fprintf(f, "%su64 %s = aot_env_get(env_cells, env_locs, %u);\n", pad, loc_n, idx);
+      fprintf(f, "%sTerm %s = heap_read(%s + 0);\n", pad, cell_n, loc_n);
       fprintf(f, "%sif (term_sub_get(%s)) {\n", pad, cell_n);
       fprintf(f, "%s%s = term_sub_set(%s, 0);\n", pad1, out, cell_n);
       fprintf(f, "%s} else {\n", pad);
-      fprintf(f, "%s%s = term_new(0, DP1, %u, e%u);\n", pad1, out, lab, idx);
+      fprintf(f, "%s%s = term_new(0, DP1, %u, %s);\n", pad1, out, lab, loc_n);
       fprintf(f, "%s}\n", pad);
       return;
     }
@@ -672,19 +670,14 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         return;
       }
       if ((term_ext(fun) & LAM_ERA_MASK) != 0) {
-        fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
-        fprintf(f, "%sheap_set(e%u + 0, term_sub_set(term_new_era(), 1));\n", pad, dep);
+        fprintf(f, "%senv_cells[%u] = term_sub_set(term_new_era(), 1);\n", pad, dep);
+        fprintf(f, "%senv_locs[%u] = 0ULL;\n", pad, dep);
       } else {
         fprintf(f, "%sTerm x%u = ", pad, dep);
         aot_emit_alo_expr(f, app_loc + 1, dep, AOT_DEOPT_EXPR_APP_ARG_CAPTURE);
         fprintf(f, ";\n");
-        fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
-        fprintf(f, "%sheap_set(e%u + 0, term_sub_set(x%u, 1));\n", pad, dep, dep);
-      }
-      if (dep == 0) {
-        fprintf(f, "%sheap_set(e%u + 1, term_new(0, NUM, 0, 0ULL));\n", pad, dep);
-      } else {
-        fprintf(f, "%sheap_set(e%u + 1, term_new(0, NUM, 0, e%u));\n", pad, dep, dep - 1);
+        fprintf(f, "%senv_cells[%u] = term_sub_set(x%u, 1);\n", pad, dep, dep);
+        fprintf(f, "%senv_locs[%u] = 0ULL;\n", pad, dep);
       }
       aot_emit_itrs_inc(f, pad);
       aot_emit_node(f, term_val(fun), dep + 1, out, 0, pad, tmp);
@@ -707,16 +700,13 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       aot_emit_node(f, dup_loc + 0, dep, val_n, 0, pad, tmp);
       fprintf(f, "%sTerm x%u = %s;\n", pad, dep, val_n);
       fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
-      if (dep == 0) {
-        fprintf(f, "%sheap_set(e%u + 1, term_new(0, NUM, 0, 0ULL));\n", pad, dep);
-      } else {
-        fprintf(f, "%sheap_set(e%u + 1, term_new(0, NUM, 0, e%u));\n", pad, dep, dep - 1);
-      }
+      fprintf(f, "%sheap_set(e%u + 1, term_new(0, NUM, 0, 0ULL));\n", pad, dep);
       fprintf(f, "%sif (aot_is_copy_free(x%u)) {\n", pad, dep);
       fprintf(f, "%sheap_set(e%u + 0, term_sub_set(x%u, 1));\n", pad1, dep, dep);
       fprintf(f, "%s} else {\n", pad);
       fprintf(f, "%sheap_set(e%u + 0, x%u);\n", pad1, dep, dep);
       fprintf(f, "%s}\n", pad);
+      fprintf(f, "%senv_locs[%u] = e%u;\n", pad, dep, dep);
       aot_emit_node(f, dup_loc + 1, dep + 1, bod_n, 0, pad, tmp);
       fprintf(f, "%sTerm %s = %s;\n", pad, out, bod_n);
       return;
@@ -761,6 +751,9 @@ fn void aot_emit_def(FILE *f, u32 id) {
   aot_emit_alo_expr(f, root, 0, AOT_DEOPT_CALL_DEPTH_CAP);
   fprintf(f, ";\n");
   fprintf(f, "  }\n");
+  fprintf(f, "\n");
+  fprintf(f, "  Term env_cells[AOT_ENV_CAP] = {0};\n");
+  fprintf(f, "  u64 env_locs[AOT_ENV_CAP] = {0};\n");
   fprintf(f, "\n");
   {
     u32 tmp = 0;

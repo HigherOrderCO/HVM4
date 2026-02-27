@@ -456,6 +456,45 @@ fn Term aot_fallback_alo(u64 tm_loc, u16 len, u64 ls_loc, u32 reason, u32 site) 
   return term_new_alo(ls_loc, len, tm_loc);
 }
 
+// Ensures one lexical bind-list prefix exists in heap and returns its head.
+fn u64 aot_env_head(Term *env_cells, u64 *env_locs, u32 len) {
+  if (len == 0) {
+    return 0ULL;
+  }
+
+  if (len > AOT_ENV_CAP) {
+    len = AOT_ENV_CAP;
+  }
+
+  for (u32 i = 0; i < len; i++) {
+    u64 prev = i == 0 ? 0ULL : env_locs[i - 1];
+    u64 bind = env_locs[i];
+    if (bind == 0ULL) {
+      bind = heap_alloc(2);
+      heap_set(bind + 0, env_cells[i]);
+      heap_set(bind + 1, term_new(0, NUM, 0, prev));
+      env_locs[i] = bind;
+      continue;
+    }
+
+    Term link = heap_read(bind + 1);
+    if (term_tag(link) != NUM || term_val(link) != prev) {
+      heap_set_rel(bind + 1, term_new(0, NUM, 0, prev));
+    }
+  }
+
+  return env_locs[len - 1];
+}
+
+// Ensures one lexical binder slot exists in heap and returns its location.
+fn u64 aot_env_get(Term *env_cells, u64 *env_locs, u32 idx) {
+  if (idx >= AOT_ENV_CAP) {
+    return 0ULL;
+  }
+  aot_env_head(env_cells, env_locs, idx + 1);
+  return env_locs[idx];
+}
+
 // Reapplies arguments [from, argc) to a head term.
 fn Term aot_reapply(Term head, u16 argc, const Term *args, u16 from) {
   for (u16 i = from; i < argc; i++) {
