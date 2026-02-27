@@ -1,49 +1,43 @@
-Round 30 (2026-02-27)
+Round 31 (2026-02-27)
 
 What landed
 - Files changed:
-  - `clang/aot/_.c`
-- Change: `aot_can_force_strict_tag(...)` now includes `DP0/DP1`.
-- Effect path:
-  - `aot_try_mat_dp_ctr_match(...)` previously treated nested-DP payloads (`cell_tag=DP0/DP1`) as immediate `non_ctr` misses.
-  - Now it may run one local `aot_force_whnf_local(...)` on that payload and retry constructor/ext checks.
-  - This keeps the existing tri-state probe contract intact (`0/1/2`) and reuses existing miss/mismatch semantics.
+  - `clang/aot/emit.c`
+- Change: head-position static `APP(LAM, arg)` is now fused at emit time.
+  - In `aot_emit_node(..., head=1)`, `APP` checks whether the static fun child is `LAM`.
+  - If yes and `dep < AOT_ENV_CAP`, emitted code binds the lambda variable directly into `env_cells/env_locs` and jumps to the lambda body head node.
+  - For erased binders (`LAM_ERA_MASK`), emitted code no longer materializes the APP argument at all.
+  - Old push/pop `a_args` path remains for all non-LAM funs and for env-cap edge cases (`dep >= AOT_ENV_CAP`) to preserve prior fallback behavior.
 
 Why this mattered
-- Previous telemetry showed dominant MAT-DP misses were `non_ctr_pre[tag=3/4]` (nested DP payloads), especially on `gab_takl` and `mat_mul`.
-- Allowing DP payload local forcing converts many of those misses into `hits`/`ext_miss`, reducing generic strict-path DUP traffic.
+- Before this round, head `APP` always built/pushed the argument term before discovering the callee was statically `LAM`.
+- That created avoidable work on hot paths, and wasted allocations for erased binders that should discard the argument.
+- This is a structural partial-evaluation step (compile-time APP-LAM interaction), not a narrow runtime micro-branch.
 
 Validation
 - Build: `cd clang && clang -O2 -o main main.c`
-- Tests: `./test/_all_.sh` passed.
-- Admission sweep (`HVM_AOT_DEOPT=1 --as-c -s -T1`) stayed deopt-clean:
-  - `AOT_DEOPT total=0` on all 17 admission benchmarks.
-  - Residual captures unchanged and tiny: `gab_takl` (`APP_ARG_CAPTURE=3`), `mat_mul` (`CTR_FIELD_CAPTURE=3`), others `0`.
+- Tests: `./test/_all_.sh` passed (interpreted + AOT).
+- Canaries (`HVM_AOT_DEOPT=1 --as-c -s -T1`) stayed deopt-clean:
+  - `gab_takl`: `AOT_DEOPT total=0`, `AOT_RESID total=3` (`EXPR_APP_ARG_CAPTURE`), time `~0.875s`, heap `133,580,632`.
+  - `mat_mul`: `AOT_DEOPT total=0`, `AOT_RESID total=3` (`EXPR_CTR_FIELD_CAPTURE`), time `~0.302s`, heap `18,607,823`.
+  - `trie_bitwise`: `AOT_DEOPT total=0`, `AOT_RESID total=0`, time `~1.956s`, heap `777,640,606`.
+  - `u32_fib`: `AOT_DEOPT total=0`, `AOT_RESID total=0`, time `~2.862s`, heap `22`.
 
-Telemetry deltas (vs previous Round 29 snapshot)
-- `gab_takl`:
-  - Before: `probes=66,111,351 hits=80,043 non_ctr=32,941,705 ext_miss=80,042 force=80,043`
-  - After:  `probes=66,111,351 hits=33,021,748 non_ctr=0 ext_miss=32,945,959 force=33,021,748`
-  - `WNF_DUP_NOD` calls/nodes: `57,789,264 / 230,948,694` -> `33,174,300 / 132,490,410` (major drop).
-  - Runtime sample (`--as-c -s -T1`): `~0.933s`.
-- `mat_mul`:
-  - Before: `hits=209 non_ctr=9,085,439 ext_miss=208 force=208`
-  - After:  `hits=9,085,648 non_ctr=0 ext_miss=9,042,176 force=9,085,647`
-  - `WNF_DUP_NOD`: `9,085,440 / 18,170,880` -> `9,041,968 / 18,083,936` (small improvement).
-  - Runtime sample: `~0.299s`.
-- `trie_bitwise`:
-  - Essentially unchanged (`WNF_DUP_NOD` still `111,663,716 / 642,584,032`).
+Observed effect
+- `gab_takl` sample runtime improved vs prior note (`~0.933s -> ~0.875s`), consistent with removing head APP-LAM argument materialization overhead.
+- Other canaries were roughly flat (expected; this optimization primarily helps APP-LAM-heavy paths, especially with erased binders).
 
 Key lessons
-- A large class of strict-MAT DP misses was unlockable by reusing existing local-WHNF force machinery on nested DP payloads.
-- This is much higher leverage than ext-miss-only shortcut.
-- DP local forcing does not, by itself, solve all DUP pressure (e.g. `trie_bitwise` remains dominated elsewhere).
+- Compile-time APP-LAM fusion in head mode is safe/high-leverage when static callee shape is known.
+- Preserving fallback semantics is easiest by guarding fusion under existing env-cap constraints and keeping old generic path otherwise.
+- The remaining performance wall is still heap-centric execution on broader case-tree code; this change is one step toward that redesign.
 
 Guardrails preserved
-- No arg consumption on probe status `2` (ext mismatch fast path) — keep existing semantics.
-- Step-limited semantics unchanged (all probe fast paths still preserve fallback behavior).
+- No change to non-LAM APP semantics.
+- No change to env-cap behavior (`dep >= AOT_ENV_CAP` keeps old route).
+- Deopt/residual accounting remains stable on sampled canaries.
 
 Next likely steps
-1) Investigate remaining heavy DUP sources outside MAT-DP (`trie_bitwise` dominant `WNF_DUP_NOD`).
-2) Revisit tiny residual captures in `gab_takl`/`mat_mul` (`APP_ARG_CAPTURE` / `CTR_FIELD_CAPTURE`) only if they show measurable runtime cost.
-3) If needed, add a stricter bounded DP-on-DP composition path to avoid full local-WHNF force cost on some nested chains.
+1) Extend static APP-LAM fusion to more emitter contexts where lambdas are immediately consumed (e.g., demanded-expression paths), while preserving escape/fallback boundaries.
+2) Start explicit "stack-local case-tree" lowering for strict numeric/constructor matches to reduce heap term materialization in the common path.
+3) Investigate the remaining `AOT_RESID` captures (`gab_takl` APP arg, `mat_mul` ctor field) only if they show measurable runtime impact after bigger structural lowering lands.

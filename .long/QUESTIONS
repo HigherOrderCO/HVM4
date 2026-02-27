@@ -1,14 +1,28 @@
-1) Semantics boundary for MAT-DP probe forcing nested DP payloads
+1) Semantics boundaries for stack-local case-tree lowering (without heap term materialization)
 
 Context:
-- In Round 30, we changed strict-MAT DP probing so `aot_try_mat_dp_ctr_match(...)` can locally WHNF-force payloads tagged `DP0/DP1` (via `aot_force_whnf_local`) before deciding probe result.
-- This converted large `non_ctr_pre[tag=3/4]` populations into probe `hits`/`ext_miss` and substantially reduced `WNF_DUP_NOD` on `gab_takl`.
-- Current approach still relies on full `wnf` for that payload force step; we did not implement explicit DP-on-DP projection composition.
+- Current AOT still evaluates most paths as `Term`/heap operations even when deopt is zero.
+- We have now fused one static interaction (`APP(LAM,arg)` in head mode), including erased-binder arg skipping, and saw a measurable `gab_takl` win.
+- Next intended step is larger: lower case-tree hot paths (especially strict `SWI/MAT` over `NUM/CTR`) to C locals/registers, touching heap only on escape/SUP boundaries.
 
 Question:
-- Is this “local force nested-DP payload once, then probe constructor/ext” strategy semantically safe for all strict-MAT contexts in HVM’s IC runtime model, or only for a subset?
+- What exact semantic invariants must be preserved to consider a branch "heap-free safe" in HVM IC terms?
 
-Please clarify with concrete invariants/counterexamples:
-- Which heap-state mutations on DUP cells (SUB-bit transitions and `heap_take`/`heap_set_rel` ordering) are required to preserve linearity when probing this way.
-- Whether probe-time forcing may accidentally alter observable behavior in corner cases (other than interaction count differences), e.g. when the sibling projection is later demanded.
-- If not universally safe, what syntactic/runtime preconditions must hold before enabling this optimization.
+Please answer with concrete rules/examples:
+- Which values can stay as raw C locals until return, and what events force reification into heap `Term`s.
+- How to treat DUP linearity/SUB-bit obligations when a value remains stack-local through multiple branch steps.
+- Minimal correctness criteria for introducing this lowering behind a guard (e.g., strict-no-SUP path), so we can stage it safely.
+
+2) MAT-DP local forcing on nested DP payloads: global safety confirmation
+
+Context:
+- In Round 30, strict-MAT DP probing was extended so `aot_try_mat_dp_ctr_match(...)` may locally WHNF-force nested `DP0/DP1` payloads once before deciding hit/ext-miss/non-ctr.
+- This removed dominant `non_ctr_pre[tag=3/4]` misses and significantly reduced `WNF_DUP_NOD` on `gab_takl`.
+
+Question:
+- Is this nested-DP local forcing strategy semantically safe for all strict-MAT contexts, or only under additional preconditions?
+
+Please clarify with invariants/counterexamples:
+- Required DUP-cell mutation ordering (`heap_take`/`heap_set_rel`, SUB-bit transitions).
+- Whether probe-time forcing can change observable behavior beyond interaction count (especially when sibling projection is later forced).
+- If conditions are required, specify the precise syntactic/runtime guard we should enforce.

@@ -536,9 +536,32 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         u64 app_loc = term_val(term);
         u64 fun_loc = app_loc + 0;
         u64 arg_loc = app_loc + 1;
+        Term fun_tm = heap_read(fun_loc);
+
+        // Static APP-LAM fusion:
+        // - avoids transient arg-stack push/pop in head position;
+        // - skips erased binder argument materialization entirely.
+        if (term_tag(fun_tm) == LAM && dep < AOT_ENV_CAP) {
+          u32 lam_ext = term_ext(fun_tm);
+          u8  lam_era = (lam_ext & LAM_ERA_MASK) != 0;
+          if (!lam_era) {
+            char arg_n[32];
+            aot_emit_tmp(arg_n, sizeof(arg_n), "arg", tmp);
+            aot_emit_node(f, arg_loc, dep, arg_n, 0, pad, tmp);
+            fprintf(f, "%sTerm x%u = %s;\n", pad, dep, arg_n);
+            fprintf(f, "%senv_cells[%u] = term_sub_set(x%u, 1);\n", pad, dep, dep);
+            fprintf(f, "%senv_locs[%u] = 0ULL;\n", pad, dep);
+          } else {
+            fprintf(f, "%senv_cells[%u] = term_sub_set(term_new_era(), 1);\n", pad, dep);
+            fprintf(f, "%senv_locs[%u] = 0ULL;\n", pad, dep);
+          }
+          aot_emit_itrs_inc(f, pad);
+          aot_emit_node(f, term_val(fun_tm), dep + 1, out, 1, pad, tmp);
+          return;
+        }
+
         char arg_n[32];
         aot_emit_tmp(arg_n, sizeof(arg_n), "arg", tmp);
-
         fprintf(f, "%sif (*a_pos >= AOT_ARG_CAP) {\n", pad);
         aot_emit_ret_fallback_loc(f, loc, dep, AOT_DEOPT_HEAD_APP_ARG_CAP, pad1);
         fprintf(f, "%s}\n", pad);
