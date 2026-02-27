@@ -1,30 +1,30 @@
-1) Safe demand propagation boundaries for direct `APP* -> REF` lowering
+1) Historical reason for disabling compiled dispatch in strict forcing
 
 Context:
-- Round 20 added a conservative demanded lowering: in strict `OP2` operands, if expression is static `APP*` with `REF` head, we call compiled worker directly with local args and isolated `base=*s_pos`, then rebuild residual APPs from leftover args.
-- This is correct on tests and gives a large heap reduction on `gab_deriv` (~57% fewer `AOT_HEAP` nodes), but most canaries remain unchanged, implying strict-context coverage is still narrow.
-- To avoid changing lazy semantics, we intentionally did not apply this in constructor fields or generic stored/pass-through expressions.
+- In Round 21, we removed `AOT_TRY_CALL_ENABLED = 0` from `aot_force_whnf_local(...)`, so strict forcing (`SWI/MAT` scrutinees and DUP-force retries) can use `aot_try_call`.
+- This produced large wins with full test pass:
+  - `edit_dist` AOT_HEAP `377,580,459 -> 88,505,052`, time `2.032s -> 0.692s`
+  - `gab_takl` AOT_HEAP `647,075,444 -> 232,282,424`, time `2.318s -> 1.079s`
+- Since this flag was explicitly disabled before, I want to confirm there was no known semantic hazard that current tests do not cover.
 
 Question:
-- Can you define a precise “safe demanded context” checklist for this runtime, beyond OP2, where this lowering is semantically equivalent to building APP nodes then reducing?
-- Specifically, are these safe to mark demanded in compiled emission: `SWI/MAT` scrutinee-producing subexpressions, `DUP` bodies in head paths, strict primitive operands, and immediate-return branch tails that are not currently head-compiled?
-- If any of these are unsafe, please point to the concrete interaction/sharing counterexample pattern (e.g., DUP/SUP timing or lambda capture case).
+- Was the old disable intentional due to a specific bug class (e.g., stack-base ownership in nested `wnf`, re-entrancy with shared globals, step-limit accounting, or DUP/SUP ordering)?
+- If yes, can you share a minimal counterexample shape so we can encode it as a regression test?
 
-2) Dominant source of remaining size-2 allocations in hot canaries
+
+2) Fastest path for remaining `mat_mul` bottleneck after strict-force fix
 
 Context:
-- After Round 20, these are still essentially unchanged:
-  - `edit_dist` `AOT_HEAP total_nodes=377,580,459`
-  - `ray_sphere` `AOT_HEAP total_nodes=241,571,185`
-  - `mat_mul` `AOT_HEAP total_nodes=145,024,874`
-- Histograms are still heavily size-2, but current attribution is size-only, not kind-specific.
-- We can add kind attribution, but if domain knowledge already identifies the dominant interaction families, we can prioritize implementation faster.
+- After enabling compiled dispatch in strict forcing, many canaries improved heavily, but `mat_mul` stayed mostly flat:
+  - pre/post `AOT_HEAP total_nodes ~= 145,024,874`
+  - explicit `AOT_ALLOC` still dominated by `DUP_CELL` (`36,255,642` nodes)
+  - `AOT_HEAP` still mostly size-2.
+- So the previous strict-force bottleneck is not the main limiter there.
 
 Question:
-- In these workloads, do you expect size-2 allocations to be primarily:
-  A) APP spine materialization,
-  B) DUP/DP cell traffic,
-  C) OP2/equality temporary nodes,
-  D) arity-2 constructor fields,
-  E) another known hotspot?
-- If you can rank likely sources for `edit_dist` vs `mat_mul` specifically, we can sequence the next redesign step with much less instrumentation churn.
+- For `mat_mul`-style numeric recursion in this runtime, what should be prioritized first for speed:
+  A) reducing non-copy-free DUP cell traffic (escape analysis/scalarization),
+  B) reducing size-2 APP/OP2 materialization in expression mode,
+  C) recursion/trampoline/SCC dispatch changes,
+  D) another known hotspot?
+- A ranked recommendation would help choose the next architectural step.

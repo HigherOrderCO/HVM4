@@ -755,14 +755,11 @@ fn int aot_can_force_strict_tag(u8 tag) {
 // Forces one term to WHNF using a stack segment above caller-owned frames.
 fn Term aot_force_whnf_local(Term term, u32 stack_top) {
   u32 saved_sp = WNF_S_POS;
-  u8  saved_tc = AOT_TRY_CALL_ENABLED;
   if (stack_top == 0) {
     stack_top = 1;
   }
   WNF_S_POS = stack_top;
-  AOT_TRY_CALL_ENABLED = 0;
   Term out = wnf(term);
-  AOT_TRY_CALL_ENABLED = saved_tc;
   WNF_S_POS = saved_sp;
   return out;
 }
