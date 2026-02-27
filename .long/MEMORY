@@ -1,50 +1,57 @@
-Round 28 (2026-02-27)
+Round 29 (2026-02-27)
 
 What landed
 - Files changed:
   - `clang/aot/emit.c`
   - `clang/aot/_.c`
-  - `clang/runtime/eval_main.c`
-- Implemented a strict-`MAT` DP fast path in head-mode emission:
-  - `MAT` now probes scrutinees via `aot_try_mat_dp_ctr_match(...)` before generic `aot_force_strict(...)`.
-  - On match (`DP0/DP1` over matching constructor), compiled code now:
-    - skips full constructor duplication,
-    - consumes the argument source exactly as before,
-    - pushes lazy projected fields (`DP0`/`DP1` over original constructor fields) into `a_args`,
-    - continues into the match branch.
-- Extended probe helper to attempt one local WHNF force of DP payloads when payload tags are strict-forceable (`APP/ALO/REF/OP2/USE`) before deciding miss.
-- Added opt-in probe telemetry (`HVM_AOT_MAT_DP=1`) and stderr dump line:
-  - `AOT_MAT_DP probes/hits/non_dp/sub/non_ctr/ext_miss/force/force_to_ctr`.
-- Wired telemetry dump in shared runtime eval path (`runtime_eval_main`).
+- Implemented tri-state MAT-DP probe result in `aot_try_mat_dp_ctr_match(...)`:
+  - `0`: no fast path
+  - `1`: DP payload is constructor with matching `ext` (existing match fast path)
+  - `2`: DP payload is constructor with mismatching `ext` (new mismatch fast path)
+- Head `MAT` emission now handles probe status `2` by jumping directly to branch-1 (`mat_loc + 1`) without running `aot_force_strict` on the DP scrutinee.
+- Added MAT-DP miss telemetry by payload tag for `non_ctr` probes:
+  - `AOT_MAT_DP non_ctr_pre[tag=...]`
+  - `AOT_MAT_DP non_ctr_post[tag=...]`
+
+Critical bug found and fixed
+- Initial implementation of the `probe==2` branch incorrectly consumed the scrutinee argument (`*a_pos--` / `*s_pos--`).
+- This violated existing MAT mismatch lowering semantics and caused AOT segfaults (`factorial`, `fibo`, `sum_4`, `use_match_depth`).
+- Fix: mismatch fast path must NOT consume the arg; it must mirror the existing generic ext-miss arm behavior exactly.
 
 Why this mattered
-- `WNF_DUP_NOD` still dominates heap on heavy AOT benches. The goal was to bypass full `wnf_dup_nod` materialization in strict `MAT` when only branch routing + lazy fields are needed.
-- Telemetry was needed to verify whether the new path is actually reached and why it misses.
+- Previous telemetry showed many DP constructor ext-miss probes still paid generic strict forcing and DUP work.
+- The new `probe==2` branch removes that avoidable force step while staying deopt-clean.
 
 Validation
 - Build: `cd clang && clang -O2 -o main main.c`
-- Tests: `./test/_all_.sh` passed after fixes.
-- Canaries (`--as-c -s -T1`, with `HVM_AOT_DEOPT=1 HVM_AOT_HEAP_ATTR=1`) stayed deopt-clean (`AOT_DEOPT total=0`) and preserved results.
+- Tests: `./test/_all_.sh` passed after the mismatch-arg fix.
+- Canaries (`--as-c -s -T1`, with `HVM_AOT_DEOPT=1 HVM_AOT_HEAP_ATTR=1 HVM_AOT_MAT_DP=1`) stayed deopt-clean (`AOT_DEOPT total=0`).
 
-Telemetry snapshot (`HVM_AOT_MAT_DP=1`)
+Telemetry snapshot (current)
 - `gab_takl`:
-  - `AOT_MAT_DP probes=66,111,351 hits=1 non_dp=33,057,540 sub=32,063 non_ctr=32,941,705 ext_miss=80,042 force=80,043 force_to_ctr=80,043`
-  - `WNF_DUP_NOD calls=57,850,379 nodes=231,193,148` (no practical reduction)
+  - `AOT_MAT_DP probes=66,111,351 hits=80,043 non_dp=32,977,498 sub=32,063 non_ctr=32,941,705 ext_miss=80,042 force=80,043 force_to_ctr=80,043`
+  - `AOT_MAT_DP non_ctr_pre[tag=3]=23,001,425` / `[tag=4]=9,940,280`
+  - `WNF_DUP_NOD calls=57,789,264 nodes=230,948,694`
 - `trie_bitwise`:
-  - `AOT_MAT_DP probes=112,665 hits=21,298 non_dp=79,167 sub=0 non_ctr=0 ext_miss=12,200 force=11,211 force_to_ctr=11,211`
-  - `WNF_DUP_NOD calls=111,669,237 nodes=642,614,910` (still dominant)
+  - `AOT_MAT_DP probes=112,665 hits=33,498 non_dp=66,967 sub=0 non_ctr=0 ext_miss=12,200 force=11,211 force_to_ctr=11,211`
+  - `WNF_DUP_NOD calls=111,663,716 nodes=642,584,032`
 - `mat_mul`:
-  - `AOT_MAT_DP probes=18,128,241 hits=1 non_dp=9,042,593 non_ctr=9,085,439 ext_miss=208 force=208 force_to_ctr=208`
-  - `WNF_DUP_NOD` unchanged.
+  - `AOT_MAT_DP probes=18,128,241 hits=209 non_dp=9,042,385 sub=0 non_ctr=9,085,439 ext_miss=208 force=208 force_to_ctr=208`
+  - `AOT_MAT_DP non_ctr_pre[tag=3]=9,041,967` / `[tag=4]=43,472`
+  - `WNF_DUP_NOD calls=9,085,440 nodes=18,170,880`
+
+Observed deltas vs previous snapshot
+- `gab_takl`: `WNF_DUP_NOD` reduced by ~61k calls / ~244k nodes.
+- `trie_bitwise`: `WNF_DUP_NOD` reduced by ~5.5k calls / ~30.9k nodes.
+- `mat_mul`: effectively flat.
+- So ext-miss shortcut is correct and measurable but not a major lever alone.
 
 Key lessons
-- Match-only DP projection is semantics-safe and test-clean, but current impact is low on admission-heavy benches.
-- Large miss buckets are:
-  - non-DP scrutinees (fast path inapplicable), and
-  - DP scrutinees that force to constructor but do not match the target constructor (`ext_miss`).
-- The hottest remaining cost is still generic DUP materialization on paths outside successful match projection.
+- The dominant MAT-DP miss class is nested DP payloads (`tag=3/4`, i.e., `DP0/DP1`) that the current probe does not collapse.
+- `non_ctr_post` is effectively absent in sampled canaries; misses are mostly pre-force DP payloads, not failed strict local force conversions.
+- Next material gain likely needs DP-on-DP specialization (or another lazy projection composition path), not more ctor ext checks.
 
 Next likely steps
-1) Optimize `MAT` mismatch-on-DP path (after payload becomes constructor with different `ext`) to avoid paying full `wnf_dup_nod` when branch behavior can remain lazy.
-2) Add classification telemetry for where `WNF_DUP_NOD` is triggered after failed MAT probe (miss-type -> eventual interaction), to target the highest-yield miss category.
-3) Investigate whether compiled branch-1 application can accept a virtual/projection-backed constructor representation safely, avoiding eager duplicated constructor allocation.
+1) Add a bounded DP-on-DP probe in `aot_try_mat_dp_ctr_match` that composes projections across nested DUP cells before falling back.
+2) Keep semantics guardrails explicit: no arg consumption on MAT mismatch fast path.
+3) Re-run same canaries with `HVM_AOT_MAT_DP=1` and compare `non_ctr_pre[tag=3/4]` and `WNF_DUP_NOD` as success metric.

@@ -1,16 +1,22 @@
-1) Semantics-safe shortcut for `MAT` mismatch on `DP0/DP1` scrutinees
+1) Safe specialization for nested `DP0/DP1` scrutinees in strict `MAT`
 
 Context:
-- In AOT head-mode, we now have a strict-`MAT` fast path for `DP0/DP1` scrutinees when the DUP payload is (or can be forced to) a constructor with the same `ext` as the tested branch. In that case we skip full `wnf_dup_nod` and pass lazy projected fields (`DP0/DP1` per field) to the matched branch.
-- This is correct and test-clean, but telemetry (`HVM_AOT_MAT_DP=1`) shows a large miss bucket where the payload becomes a constructor with a *different* `ext` (`ext_miss`). On these paths we still fall back to generic strict forcing and end up paying large `WNF_DUP_NOD` cost.
-- For constructor mismatch, IC rule is `APP-MAT-CTR-MIS`: result is `(m ctr)` (default branch applied to scrutinee constructor).
+- We added a strict-`MAT` probe (`aot_try_mat_dp_ctr_match`) that fast-paths when scrutinee is `DP0/DP1` over a constructor payload.
+- We also added an ext-mismatch shortcut (direct branch-1) and validated semantics/test correctness.
+- Current telemetry still shows the dominant miss source is `non_ctr_pre[tag=3/4]` (payload is another `DP0/DP1`):
+  - `gab_takl`: `non_ctr_pre[tag=3]=23,001,425`, `[tag=4]=9,940,280`
+  - `mat_mul`: `non_ctr_pre[tag=3]=9,041,967`, `[tag=4]=43,472`
+- This implies nested DUP projections are blocking MAT fast path and still driving `WNF_DUP_NOD`.
+
+Goal:
+- Add a bounded probe specialization that can look through `DP`-over-`DP` payload chains and still decide MAT branch / project fields lazily when safe.
 
 Question:
-- For this mismatch case with scrutinee originally `DP0/DP1`, can compiled code safely avoid full duplicated-constructor materialization and still preserve exact IC semantics?
-- Concretely, can we feed branch-1 a virtual/projection-backed constructor (or the original DP handle) instead of a fully materialized side-constructor, and under what invariants?
+- Under IC semantics, is it sound to compose nested projections without materializing intermediate side terms?
+- Concretely, for scrutinee shape `DPs(labA, sideA, locA)` whose payload cell is another `DPt(labB, sideB, locB)` (possibly repeated), can we compute an equivalent final projection descriptor and continue probing/matching constructor payload directly?
 
-Please specify required guarantees explicitly:
-- whether branch-1 must receive a concrete side-constructor value immediately,
-- whether delaying side-constructor materialization until branch-1 actually inspects fields is semantically equivalent,
-- SUB-bit / DUP-cell state transitions that must still occur for linearity and determinism,
-- any counterexample pattern where this shortcut would be unsound.
+Please clarify invariants we must preserve:
+- Required SUB-bit transitions while traversing nested DUP cells.
+- Whether `heap_take/heap_set` ordering constraints exist for determinism/races (single-threaded AOT path still uses shared heap primitives).
+- Whether there are counterexamples where DP composition changes observable behavior (e.g., interaction counts allowed to differ, but term/linearity must remain identical).
+- If composition is valid only for a subset, which tag/configuration boundaries should force fallback immediately.

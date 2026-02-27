@@ -67,6 +67,8 @@ static u64 AOT_MAT_DP_NON_CTR = 0;
 static u64 AOT_MAT_DP_EXT_MISS = 0;
 static u64 AOT_MAT_DP_FORCE = 0;
 static u64 AOT_MAT_DP_FORCE_TO_CTR = 0;
+static u64 AOT_MAT_DP_NON_CTR_PRE[TAG_MASK + 1] = {0};
+static u64 AOT_MAT_DP_NON_CTR_POST[TAG_MASK + 1] = {0};
 
 // Returns 1 when global heap attribution is enabled via HVM_AOT_HEAP_ATTR.
 fn int aot_heap_attr_enabled(void) {
@@ -275,6 +277,26 @@ fn void aot_mat_dp_dump(FILE *f) {
     (unsigned long long)ext_miss,
     (unsigned long long)force,
     (unsigned long long)force_ctr);
+
+  for (u32 tag = 0; tag <= TAG_MASK; tag++) {
+    u64 c = __atomic_load_n(&AOT_MAT_DP_NON_CTR_PRE[tag], __ATOMIC_RELAXED);
+    if (c == 0) {
+      continue;
+    }
+    fprintf(f, "AOT_MAT_DP non_ctr_pre[tag=%u]=%llu\n",
+      tag,
+      (unsigned long long)c);
+  }
+
+  for (u32 tag = 0; tag <= TAG_MASK; tag++) {
+    u64 c = __atomic_load_n(&AOT_MAT_DP_NON_CTR_POST[tag], __ATOMIC_RELAXED);
+    if (c == 0) {
+      continue;
+    }
+    fprintf(f, "AOT_MAT_DP non_ctr_post[tag=%u]=%llu\n",
+      tag,
+      (unsigned long long)c);
+  }
 }
 
 // Counts one interaction on compiled paths.
@@ -872,8 +894,11 @@ fn int aot_is_copy_free(Term term) {
 fn int aot_can_force_strict_tag(u8 tag);
 fn Term aot_force_whnf_local(Term term, u32 stack_top);
 
-// Tries one strict-MAT fast path for DP scrutinees over matching constructors.
-// On success, returns 1 and outputs constructor metadata for lazy field projections.
+// Tries one strict-MAT fast path for DP scrutinees over constructor payloads.
+// Returns:
+// - 0: no fast path available
+// - 1: constructor ext matches ctr_ext (outputs projection metadata)
+// - 2: constructor ext mismatches ctr_ext (caller can jump to MAT miss arm)
 fn int aot_try_mat_dp_ctr_match(Term term, u32 ctr_ext, u32 stack_top, u8 *side_out, u32 *lab_out, u32 *ari_out, u64 *ctr_loc_out) {
   int trace = aot_mat_dp_enabled();
   if (trace) {
@@ -906,6 +931,7 @@ fn int aot_try_mat_dp_ctr_match(Term term, u32 ctr_ext, u32 stack_top, u8 *side_
     if (!aot_can_force_strict_tag(cell_tag)) {
       if (trace) {
         __atomic_fetch_add(&AOT_MAT_DP_NON_CTR, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&AOT_MAT_DP_NON_CTR_PRE[cell_tag], 1, __ATOMIC_RELAXED);
       }
       heap_set_rel(loc, cell);
       return 0;
@@ -925,6 +951,7 @@ fn int aot_try_mat_dp_ctr_match(Term term, u32 ctr_ext, u32 stack_top, u8 *side_
     if (cell_tag < C00 || cell_tag > C16) {
       if (trace) {
         __atomic_fetch_add(&AOT_MAT_DP_NON_CTR, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&AOT_MAT_DP_NON_CTR_POST[cell_tag], 1, __ATOMIC_RELAXED);
       }
       return 0;
     }
@@ -937,7 +964,7 @@ fn int aot_try_mat_dp_ctr_match(Term term, u32 ctr_ext, u32 stack_top, u8 *side_
       __atomic_fetch_add(&AOT_MAT_DP_EXT_MISS, 1, __ATOMIC_RELAXED);
     }
     heap_set_rel(loc, cell);
-    return 0;
+    return 2;
   }
 
   if (side_out != NULL) {
