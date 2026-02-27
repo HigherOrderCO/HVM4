@@ -1,24 +1,33 @@
-1) Post-autodup invariant for binder multiplicity (needed for stack-only binders)
+1) What are the exact semantic preconditions for replacing `aot_fallback_alo(tm_loc, len, ls, reason, site)` with a direct static term?
 
 Context:
-- I am trying to remove heap traffic from compiled case-tree paths.
-- A major blocker is whether a lambda binder can be used multiple times without explicit DUP mediation.
-- If multi-use can still happen as repeated `VAR` occurrences, then stack-only local binders can silently duplicate work or break sharing.
-- If multi-use is always rewritten as explicit `DUP`/`DP0`/`DP1`, then non-DP binders can be safely kept in C locals (no heap cell).
+- We attempted an optimization in AOT emission: when residualizing with `dep==0`, emit `heap_read(tm_loc)` directly instead of `aot_fallback_alo(...)`.
+- This looked correct on canary telemetry (residual counters dropped), but it broke AOT test `autodup_bound_vars` under collapse (`-C`) by producing quoted residuals like `(_ + 100)` where fully collapsed numbers were expected.
+- Reverting restored correctness.
+- This indicates ALO with `len=0` still carries important semantics (likely lexical lifting/readback behavior), so “empty env => equivalent to raw static term” is false in general.
 
 Question:
-- After parse + autodup on this runtime, is there a hard guarantee that every non-erased binder is either linear (`VAR` once) or duplicated only through explicit DUP/DP nodes?
-- If yes, where is that invariant established/enforced in this codebase?
-- If not guaranteed globally, what conservative condition should the AOT emitter check before choosing stack-only binder storage?
+- Which structural properties of a static term are sufficient to prove that replacing ALO with raw static term is semantics-preserving?
+- Is there a known safe subset (e.g., no lexical-level dependence after lifting, no constructs requiring ALO-mediated rebinding) that we can implement as a conservative predicate?
 
-2) Semantic constraints for eliminating APP-frame allocations in compiled REF calls
+2) Post-autodup linearity guarantee for stack-only binder storage
 
 Context:
-- Telemetry shows deopt is low, but Heap/Itrs is still high (~2.3-4.1 on key canaries).
-- A large remaining cost is `heap_alloc(2)` APP-frame construction during compiled recursive/reference calls.
-- I want to emit direct compiled call paths (C-level argument passing) and avoid building APP nodes on hot strict paths.
+- We want to reduce heap traffic in compiled paths by keeping binders in C locals whenever possible.
+- Safety depends on whether multi-use of binders can still occur implicitly (multiple `VAR` occurrences) or is always explicit via `DUP`/`DP0`/`DP1` after normalization/autodup.
 
 Question:
-- In this runtime, which invariants require real APP nodes on the runtime stack, and which are just current implementation convenience?
-- Is it semantically acceptable for compiled code to pass args via a private C arg buffer and only reify APP nodes when crossing to fallback/deopt?
-- Are there known edge cases with DUP/SUP interactions where skipping APP-node materialization would violate expected sharing/interaction behavior?
+- Is there a hard invariant in this codebase that every non-erased binder is used linearly unless duplicated through explicit DUP/DP nodes?
+- If yes, where is this enforced?
+- If not global, what conservative emitter-side condition should guard stack-only binder storage?
+
+3) Direct compiled REF-call lowering without APP-frame materialization
+
+Context:
+- Deopt is near-zero on several kernels, but Heap/Itrs remains high.
+- A dominant suspected source is APP-frame allocation (`heap_alloc(2)` for argument stack frames) in compiled call paths.
+- We plan to pass known arity arguments directly in compiled C calls and reify APP nodes only at fallback/deopt boundaries.
+
+Question:
+- Which runtime invariants *strictly require* real APP nodes to exist (if any) versus current implementation convenience?
+- Are there known interaction-edge cases (especially involving DUP/SUP or strict forcing) where skipping APP-node materialization would violate expected behavior?

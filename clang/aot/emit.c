@@ -13,9 +13,9 @@ static u32 AOT_EMIT_DEOPT_SITE = 0;
 static u8  AOT_EMIT_DEOPT_KIND[AOT_DEOPT_SITE_CAP] = {0};
 static u64 AOT_EMIT_DEOPT_LOC[AOT_DEOPT_SITE_CAP] = {0};
 static u32 AOT_EMIT_DEOPT_AUX[AOT_DEOPT_SITE_CAP] = {0};
-// Bounds structural expression APP-arg emission to avoid emitter/code-size blowups.
-#define AOT_EMIT_EXPR_APP_ARG_DEPTH_CAP 64
-#define AOT_EMIT_EXPR_APP_ARG_NODE_CAP  4096
+// Bounds structural expression emission to avoid emitter/code-size blowups.
+#define AOT_EMIT_EXPR_STRUCT_DEPTH_CAP 128
+#define AOT_EMIT_EXPR_STRUCT_NODE_CAP  4096
 
 // Returns 1 when this AOT build needs interaction counting.
 fn int aot_emit_counting(const AotBuildCfg *cfg) {
@@ -233,9 +233,9 @@ fn void aot_emit_ret_fallback_loc_meta(FILE *f, u64 loc, u32 dep, u32 reason, u3
 // - `head=0`: materializes one lazy expression into local `Term <out>`.
 fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const char *pad, u32 *tmp);
 
-// Returns 1 when one expression subtree is safe to emit structurally for APP args.
+// Returns 1 when one expression subtree is safe to emit structurally.
 fn u8 aot_emit_expr_can_structuralize(u64 loc, u32 depth, u32 *budget) {
-  if (depth >= AOT_EMIT_EXPR_APP_ARG_DEPTH_CAP) {
+  if (depth >= AOT_EMIT_EXPR_STRUCT_DEPTH_CAP) {
     return 0;
   }
   if (*budget == 0) {
@@ -250,7 +250,6 @@ fn u8 aot_emit_expr_can_structuralize(u64 loc, u32 depth, u32 *budget) {
     case ERA:
     case ANY:
     case C00:
-    case C01 ... C16:
     case REF:
     case VAR:
     case BJV:
@@ -258,6 +257,16 @@ fn u8 aot_emit_expr_can_structuralize(u64 loc, u32 depth, u32 *budget) {
     case BJ0:
     case DP1:
     case BJ1: {
+      return 1;
+    }
+    case C01 ... C16: {
+      u32 ari = (u32)(term_tag(term) - C00);
+      u64 ctr_loc = term_val(term);
+      for (u32 i = 0; i < ari; i++) {
+        if (!aot_emit_expr_can_structuralize(ctr_loc + i, depth + 1, budget)) {
+          return 0;
+        }
+      }
       return 1;
     }
     case OP2: {
@@ -281,9 +290,9 @@ fn u8 aot_emit_expr_can_structuralize(u64 loc, u32 depth, u32 *budget) {
   }
 }
 
-// Returns 1 when one APP arg should use structural expression emission.
-fn u8 aot_emit_app_arg_structural(u64 loc) {
-  u32 budget = AOT_EMIT_EXPR_APP_ARG_NODE_CAP;
+// Returns 1 when one expression should use structural emission.
+fn u8 aot_emit_expr_structural(u64 loc) {
+  u32 budget = AOT_EMIT_EXPR_STRUCT_NODE_CAP;
   return aot_emit_expr_can_structuralize(loc, 0, &budget);
 }
 
@@ -556,9 +565,13 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       fprintf(f, "%su64 %s = heap_alloc(%u);\n", pad, ctr_n, ari);
       for (u32 i = 0; i < ari; i++) {
         aot_emit_tmp(fld_n, sizeof(fld_n), "fld", tmp);
-        fprintf(f, "%sTerm %s = ", pad, fld_n);
-        aot_emit_alo_expr(f, ctr_loc + i, dep, AOT_DEOPT_EXPR_CTR_FIELD_CAPTURE);
-        fprintf(f, ";\n");
+        if (aot_emit_expr_structural(ctr_loc + i)) {
+          aot_emit_node(f, ctr_loc + i, dep, fld_n, 0, pad, tmp);
+        } else {
+          fprintf(f, "%sTerm %s = ", pad, fld_n);
+          aot_emit_alo_expr(f, ctr_loc + i, dep, AOT_DEOPT_EXPR_CTR_FIELD_CAPTURE);
+          fprintf(f, ";\n");
+        }
         fprintf(f, "%sheap_set(%s + %u, %s);\n", pad, ctr_n, i, fld_n);
       }
       fprintf(f, "%sTerm %s = term_new(%u, %u, %u, %s);\n", pad, out, term_sub_get(term), tag, term_ext(term), ctr_n);
@@ -653,7 +666,7 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_tmp(fun_n, sizeof(fun_n), "fun", tmp);
         aot_emit_tmp(arg_n, sizeof(arg_n), "arg", tmp);
         aot_emit_node(f, app_loc + 0, dep, fun_n, 0, pad, tmp);
-        if (aot_emit_app_arg_structural(app_loc + 1)) {
+        if (aot_emit_expr_structural(app_loc + 1)) {
           aot_emit_node(f, app_loc + 1, dep, arg_n, 0, pad, tmp);
         } else {
           fprintf(f, "%sTerm %s = ", pad, arg_n);
@@ -673,9 +686,16 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         fprintf(f, "%senv_cells[%u] = term_sub_set(term_new_era(), 1);\n", pad, dep);
         fprintf(f, "%senv_locs[%u] = 0ULL;\n", pad, dep);
       } else {
-        fprintf(f, "%sTerm x%u = ", pad, dep);
-        aot_emit_alo_expr(f, app_loc + 1, dep, AOT_DEOPT_EXPR_APP_ARG_CAPTURE);
-        fprintf(f, ";\n");
+        if (aot_emit_expr_structural(app_loc + 1)) {
+          char arg_n[32];
+          aot_emit_tmp(arg_n, sizeof(arg_n), "arg", tmp);
+          aot_emit_node(f, app_loc + 1, dep, arg_n, 0, pad, tmp);
+          fprintf(f, "%sTerm x%u = %s;\n", pad, dep, arg_n);
+        } else {
+          fprintf(f, "%sTerm x%u = ", pad, dep);
+          aot_emit_alo_expr(f, app_loc + 1, dep, AOT_DEOPT_EXPR_APP_ARG_CAPTURE);
+          fprintf(f, ";\n");
+        }
         fprintf(f, "%senv_cells[%u] = term_sub_set(x%u, 1);\n", pad, dep, dep);
         fprintf(f, "%senv_locs[%u] = 0ULL;\n", pad, dep);
       }
