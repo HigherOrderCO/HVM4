@@ -6,5 +6,5 @@ fn Term term_new_at(u64 loc, u8 tag, u32 ext, u32 ari, Term *args) {
 }
 
 fn Term term_new_(u8 tag, u32 ext, u32 ari, Term *args) {
-  return term_new_at(heap_alloc(ari), tag, ext, ari, args);
+  return term_new_at(heap_alloc_kind(ari, AOT_HEAP_KIND_TERM_GENERIC), tag, ext, ari, args);
 }

@@ -3,13 +3,13 @@ fn Copy term_clone_at(u64 loc, u32 lab) {
 }
 
 fn Copy term_clone(u32 lab, Term val) {
-  u64 loc   = heap_alloc(1);
+  u64 loc   = heap_alloc_kind(1, AOT_HEAP_KIND_TERM_CLONE);
   heap_set(loc, val);
   return term_clone_at(loc, lab);
 }
 
 fn void term_clone2(u32 lab, Term a, Term b, Copy *A, Copy *B) {
-  u64 loc = heap_alloc(2);
+  u64 loc = heap_alloc_kind(2, AOT_HEAP_KIND_TERM_CLONE);
   heap_set(loc + 0, a);
   heap_set(loc + 1, b);
   *A = term_clone_at(loc + 0, lab);
@@ -17,7 +17,7 @@ fn void term_clone2(u32 lab, Term a, Term b, Copy *A, Copy *B) {
 }
 
 fn void term_clone3(u32 lab, Term a, Term b, Term c, Copy *A, Copy *B, Copy *C) {
-  u64 loc = heap_alloc(3);
+  u64 loc = heap_alloc_kind(3, AOT_HEAP_KIND_TERM_CLONE);
   heap_set(loc + 0, a);
   heap_set(loc + 1, b);
   heap_set(loc + 2, c);

@@ -5,5 +5,5 @@ fn Term term_new_and_at(u64 loc, Term a, Term b) {
 }
 
 fn Term term_new_and(Term a, Term b) {
-  return term_new_and_at(heap_alloc(2), a, b);
+  return term_new_and_at(heap_alloc_kind(2, AOT_HEAP_KIND_TERM_AND), a, b);
 }

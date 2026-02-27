@@ -8,5 +8,5 @@ fn Term term_new_or_at(u64 loc, Term a, Term b) {
 }
 
 fn Term term_new_or(Term a, Term b) {
-  return term_new_or_at(heap_alloc(2), a, b);
+  return term_new_or_at(heap_alloc_kind(2, AOT_HEAP_KIND_TERM_OR), a, b);
 }

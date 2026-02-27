@@ -8,5 +8,5 @@ fn Term term_new_eql_at(u64 loc, Term a, Term b) {
 }
 
 fn Term term_new_eql(Term a, Term b) {
-  return term_new_eql_at(heap_alloc(2), a, b);
+  return term_new_eql_at(heap_alloc_kind(2, AOT_HEAP_KIND_TERM_EQL), a, b);
 }

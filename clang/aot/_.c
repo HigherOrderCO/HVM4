@@ -55,6 +55,8 @@ static u64 AOT_HEAP_CALLS = 0;
 static u64 AOT_HEAP_NODES = 0;
 static u64 AOT_HEAP_BUCKET_CALLS[AOT_HEAP_BUCKET_COUNT] = {0};
 static u64 AOT_HEAP_BUCKET_NODES[AOT_HEAP_BUCKET_COUNT] = {0};
+static u64 AOT_HEAP_KIND_CALLS[AOT_HEAP_KIND_COUNT] = {0};
+static u64 AOT_HEAP_KIND_NODES[AOT_HEAP_KIND_COUNT] = {0};
 static _Thread_local u32 AOT_HEAP_COMPILED_DEPTH = 0;
 
 // Returns 1 when global heap attribution is enabled via HVM_AOT_HEAP_ATTR.
@@ -98,6 +100,40 @@ fn const char *aot_heap_bucket_name(u32 bucket) {
   }
 }
 
+// Returns one human-readable label for one heap-allocation kind.
+fn const char *aot_heap_kind_name(u32 kind) {
+  switch (kind) {
+    case AOT_HEAP_KIND_NONE:         return "UNCLASSIFIED";
+    case AOT_HEAP_KIND_TERM_APP:     return "TERM_APP";
+    case AOT_HEAP_KIND_TERM_OP2:     return "TERM_OP2";
+    case AOT_HEAP_KIND_TERM_CTR:     return "TERM_CTR";
+    case AOT_HEAP_KIND_TERM_DUP:     return "TERM_DUP";
+    case AOT_HEAP_KIND_TERM_SUP:     return "TERM_SUP";
+    case AOT_HEAP_KIND_TERM_MAT:     return "TERM_MAT";
+    case AOT_HEAP_KIND_TERM_SWI:     return "TERM_SWI";
+    case AOT_HEAP_KIND_TERM_DRY:     return "TERM_DRY";
+    case AOT_HEAP_KIND_TERM_DSU:     return "TERM_DSU";
+    case AOT_HEAP_KIND_TERM_DDU:     return "TERM_DDU";
+    case AOT_HEAP_KIND_TERM_ALO:     return "TERM_ALO";
+    case AOT_HEAP_KIND_TERM_LAM:     return "TERM_LAM";
+    case AOT_HEAP_KIND_TERM_USE:     return "TERM_USE";
+    case AOT_HEAP_KIND_TERM_INC:     return "TERM_INC";
+    case AOT_HEAP_KIND_TERM_UNS:     return "TERM_UNS";
+    case AOT_HEAP_KIND_TERM_EQL:     return "TERM_EQL";
+    case AOT_HEAP_KIND_TERM_AND:     return "TERM_AND";
+    case AOT_HEAP_KIND_TERM_OR:      return "TERM_OR";
+    case AOT_HEAP_KIND_TERM_PRI:     return "TERM_PRI";
+    case AOT_HEAP_KIND_TERM_GENERIC: return "TERM_GENERIC";
+    case AOT_HEAP_KIND_TERM_CLONE:   return "TERM_CLONE";
+    case AOT_HEAP_KIND_AOT_APP_HEAD: return "AOT_APP_FRAME_HEAD";
+    case AOT_HEAP_KIND_AOT_APP_MAT:  return "AOT_APP_FRAME_MAT";
+    case AOT_HEAP_KIND_AOT_DUP_CELL: return "AOT_DUP_CELL";
+    case AOT_HEAP_KIND_AOT_CTR:      return "AOT_CTR_FIELDS";
+    case AOT_HEAP_KIND_AOT_ENV_BIND: return "AOT_ENV_BIND";
+    default:                         return "UNKNOWN";
+  }
+}
+
 // Marks entry into compiled execution for allocator attribution.
 fn void aot_heap_compiled_enter(void) {
   AOT_HEAP_COMPILED_DEPTH++;
@@ -129,6 +165,25 @@ fn void aot_heap_alloc_note(u64 size) {
   __atomic_fetch_add(&AOT_HEAP_BUCKET_NODES[bucket], size, __ATOMIC_RELAXED);
 }
 
+// Attributes one heap allocation to one semantic term family when available.
+fn void aot_heap_alloc_note_kind(u32 kind, u64 size) {
+  if (!aot_heap_attr_enabled()) {
+    return;
+  }
+  if (AOT_HEAP_COMPILED_DEPTH == 0) {
+    return;
+  }
+  if (size == 0) {
+    return;
+  }
+  if (kind >= AOT_HEAP_KIND_COUNT) {
+    kind = AOT_HEAP_KIND_NONE;
+  }
+
+  __atomic_fetch_add(&AOT_HEAP_KIND_CALLS[kind], 1, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&AOT_HEAP_KIND_NODES[kind], size, __ATOMIC_RELAXED);
+}
+
 // Prints compiled-context heap allocation counters when enabled.
 fn void aot_heap_attr_dump(FILE *f) {
   if (!aot_heap_attr_enabled()) {
@@ -149,6 +204,19 @@ fn void aot_heap_attr_dump(FILE *f) {
     }
     fprintf(f, "AOT_HEAP size[%s] calls=%llu nodes=%llu\n",
       aot_heap_bucket_name(i),
+      (unsigned long long)bcalls,
+      (unsigned long long)bnodes);
+  }
+
+  for (u32 i = 0; i < AOT_HEAP_KIND_COUNT; i++) {
+    u64 bcalls = __atomic_load_n(&AOT_HEAP_KIND_CALLS[i], __ATOMIC_RELAXED);
+    u64 bnodes = __atomic_load_n(&AOT_HEAP_KIND_NODES[i], __ATOMIC_RELAXED);
+    if (bcalls == 0 && bnodes == 0) {
+      continue;
+    }
+    fprintf(f, "AOT_HEAP kind[%u]=%s calls=%llu nodes=%llu\n",
+      i,
+      aot_heap_kind_name(i),
       (unsigned long long)bcalls,
       (unsigned long long)bnodes);
   }
@@ -199,6 +267,18 @@ fn const char *aot_alloc_class_name(u32 cls) {
   return NAMES[cls];
 }
 
+// Maps one AOT allocation class to one heap-kind telemetry label.
+fn u32 aot_alloc_heap_kind(u32 cls) {
+  switch (cls) {
+    case AOT_ALLOC_APP_FRAME_HEAD: return AOT_HEAP_KIND_AOT_APP_HEAD;
+    case AOT_ALLOC_APP_FRAME_MAT:  return AOT_HEAP_KIND_AOT_APP_MAT;
+    case AOT_ALLOC_DUP_CELL:       return AOT_HEAP_KIND_AOT_DUP_CELL;
+    case AOT_ALLOC_CTR_FIELDS:     return AOT_HEAP_KIND_AOT_CTR;
+    case AOT_ALLOC_ENV_BIND:       return AOT_HEAP_KIND_AOT_ENV_BIND;
+    default:                       return AOT_HEAP_KIND_NONE;
+  }
+}
+
 // Returns 1 when allocation-class telemetry is enabled via HVM_AOT_ALLOC.
 fn int aot_alloc_enabled(void) {
   int enabled = __atomic_load_n(&AOT_ALLOC_ENABLED, __ATOMIC_RELAXED);
@@ -218,7 +298,7 @@ fn u64 aot_alloc(u32 size, u32 cls) {
     __atomic_fetch_add(&AOT_ALLOC_CALLS[cls], 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&AOT_ALLOC_NODES[cls], size, __ATOMIC_RELAXED);
   }
-  return heap_alloc(size);
+  return heap_alloc_kind(size, aot_alloc_heap_kind(cls));
 }
 
 // Prints allocation-class counters when telemetry is enabled.

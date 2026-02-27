@@ -6,5 +6,5 @@ fn Term term_new_use_at(u64 loc, Term f) {
 }
 
 fn Term term_new_use(Term f) {
-  return term_new_use_at(heap_alloc(1), f);
+  return term_new_use_at(heap_alloc_kind(1, AOT_HEAP_KIND_TERM_USE), f);
 }

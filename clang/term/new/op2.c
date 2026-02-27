@@ -8,5 +8,5 @@ fn Term term_new_op2_at(u64 loc, u32 opr, Term x, Term y) {
 }
 
 fn Term term_new_op2(u32 opr, Term x, Term y) {
-  return term_new_op2_at(heap_alloc(2), opr, x, y);
+  return term_new_op2_at(heap_alloc_kind(2, AOT_HEAP_KIND_TERM_OP2), opr, x, y);
 }
