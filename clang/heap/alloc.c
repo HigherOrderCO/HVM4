@@ -1,5 +1,6 @@
 fn void aot_heap_alloc_note(u64 size);
 fn void aot_heap_alloc_note_kind(u32 kind, u64 size);
+fn int  aot_heap_attr_enabled(void);
 fn u64 heap_alloc(u64 size);
 
 // Heap allocation kind tags used for compiled-context attribution.
@@ -30,7 +31,14 @@ fn u64 heap_alloc(u64 size);
 #define AOT_HEAP_KIND_AOT_DUP_CELL 24
 #define AOT_HEAP_KIND_AOT_CTR      25
 #define AOT_HEAP_KIND_AOT_ENV_BIND 26
-#define AOT_HEAP_KIND_COUNT        27
+#define AOT_HEAP_KIND_WNF_ALO_DUP  27
+#define AOT_HEAP_KIND_WNF_DUP_LAM  28
+#define AOT_HEAP_KIND_WNF_DUP_SUP  29
+#define AOT_HEAP_KIND_WNF_ALO_LAM  30
+#define AOT_HEAP_KIND_WNF_UNS      31
+#define AOT_HEAP_KIND_WNF_DUP_NOD  32
+#define AOT_HEAP_KIND_WNF_APP_MAT  33
+#define AOT_HEAP_KIND_COUNT        34
 
 static _Thread_local u32 HEAP_ALLOC_KIND_HINT = AOT_HEAP_KIND_NONE;
 
@@ -46,6 +54,9 @@ fn void heap_alloc_kind_hint_set(u32 kind) {
 
 // Allocates one heap chunk with a temporary allocation kind hint.
 fn u64 heap_alloc_kind(u64 size, u32 kind) {
+  if (!aot_heap_attr_enabled()) {
+    return heap_alloc(size);
+  }
   u32 prev = heap_alloc_kind_hint_get();
   heap_alloc_kind_hint_set(kind);
   u64 loc = heap_alloc(size);
@@ -60,12 +71,14 @@ fn u64 heap_alloc(u64 size) {
   u64 next = at + size;
   if (__builtin_expect(next <= HEAP_END[idx] && next >= at, 1)) {
     HEAP_NEXT[idx] = next;
-    u32 kind = heap_alloc_kind_hint_get();
-    if (kind >= AOT_HEAP_KIND_COUNT) {
-      kind = AOT_HEAP_KIND_NONE;
+    if (__builtin_expect(aot_heap_attr_enabled(), 0)) {
+      u32 kind = heap_alloc_kind_hint_get();
+      if (kind >= AOT_HEAP_KIND_COUNT) {
+        kind = AOT_HEAP_KIND_NONE;
+      }
+      aot_heap_alloc_note(size);
+      aot_heap_alloc_note_kind(kind, size);
     }
-    aot_heap_alloc_note(size);
-    aot_heap_alloc_note_kind(kind, size);
     return at;
   }
   fprintf(stderr,

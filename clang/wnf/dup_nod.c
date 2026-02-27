@@ -15,7 +15,7 @@ fn Term wnf_dup_nod(u32 lab, u64 loc, u8 side, Term term) {
   u64  t_loc = term_val(term);
   u32  t_ext = term_ext(term);
   u8   t_tag = term_tag(term);
-  u64  block = heap_alloc(2 * (u64)ari);
+  u64  block = heap_alloc_kind(2 * (u64)ari, AOT_HEAP_KIND_WNF_DUP_NOD);
   u64  r0_loc = block;
   u64  r1_loc = block + ari;
   for (u32 i = 0; i < ari; i++) {

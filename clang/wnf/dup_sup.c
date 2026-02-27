@@ -17,7 +17,7 @@ fn Term wnf_dup_sup(u32 lab, u64 loc, u8 side, Term sup) {
     Term tm1 = heap_read(sup_loc + 1);
     return heap_subst_cop(side, loc, tm0, tm1);
   } else {
-    u64 base = heap_alloc(4);
+    u64 base = heap_alloc_kind(4, AOT_HEAP_KIND_WNF_DUP_SUP);
     u64 at   = base;
     Copy A  = term_clone_at(sup_loc + 0, lab);
     Copy B  = term_clone_at(sup_loc + 1, lab);

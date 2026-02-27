@@ -1,30 +1,14 @@
-1) Historical reason for disabling compiled dispatch in strict forcing
+1) Safe boundary to reduce `WNF_DUP_NOD` / `AOT_DUP_CELL` without semantic drift
 
 Context:
-- In Round 21, we removed `AOT_TRY_CALL_ENABLED = 0` from `aot_force_whnf_local(...)`, so strict forcing (`SWI/MAT` scrutinees and DUP-force retries) can use `aot_try_call`.
-- This produced large wins with full test pass:
-  - `edit_dist` AOT_HEAP `377,580,459 -> 88,505,052`, time `2.032s -> 0.692s`
-  - `gab_takl` AOT_HEAP `647,075,444 -> 232,282,424`, time `2.318s -> 1.079s`
-- Since this flag was explicitly disabled before, I want to confirm there was no known semantic hazard that current tests do not cover.
+- After Round 23 attribution, previously `UNCLASSIFIED` compiled heap traffic is now mostly labeled `WNF_DUP_NOD`.
+- Example with `HVM_AOT_DEOPT=1 HVM_AOT_ALLOC=1 HVM_AOT_HEAP_ATTR=1 --as-c -s -T1`:
+  - `gab_takl`: `WNF_DUP_NOD=231,193,148` nodes (dominant)
+  - `mat_mul`: `AOT_DUP_CELL=36,255,642`, `WNF_DUP_NOD=18,170,880`
+- Current AOT optimization only skips DUP-cell allocation for copy-free payloads (`NUM`, `C00`, `ERA`, `ANY`, `NAM`, `BJV`, `BJ0`, `BJ1`).
+- For non-copy-free payloads we still allocate DUP cells and later often pay `wnf_dup_nod` cloning costs.
 
 Question:
-- Was the old disable intentional due to a specific bug class (e.g., stack-base ownership in nested `wnf`, re-entrancy with shared globals, step-limit accounting, or DUP/SUP ordering)?
-- If yes, can you share a minimal counterexample shape so we can encode it as a regression test?
+- What is the strongest safe criterion (or set of criteria) to delay or avoid materializing non-copy-free DUP payloads in compiled mode?
+- Specifically, which DP0/DP1 usage patterns guarantee we can transform or postpone duplication without violating linearity and exact DUP/SUP interaction behavior?
 
-
-2) Fastest path for remaining `mat_mul` bottleneck after strict-force fix
-
-Context:
-- After enabling compiled dispatch in strict forcing, many canaries improved heavily, but `mat_mul` stayed mostly flat:
-  - pre/post `AOT_HEAP total_nodes ~= 145,024,874`
-  - explicit `AOT_ALLOC` still dominated by `DUP_CELL` (`36,255,642` nodes)
-  - `AOT_HEAP` still mostly size-2.
-- So the previous strict-force bottleneck is not the main limiter there.
-
-Question:
-- For `mat_mul`-style numeric recursion in this runtime, what should be prioritized first for speed:
-  A) reducing non-copy-free DUP cell traffic (escape analysis/scalarization),
-  B) reducing size-2 APP/OP2 materialization in expression mode,
-  C) recursion/trampoline/SCC dispatch changes,
-  D) another known hotspot?
-- A ranked recommendation would help choose the next architectural step.

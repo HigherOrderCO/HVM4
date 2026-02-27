@@ -130,6 +130,13 @@ fn const char *aot_heap_kind_name(u32 kind) {
     case AOT_HEAP_KIND_AOT_DUP_CELL: return "AOT_DUP_CELL";
     case AOT_HEAP_KIND_AOT_CTR:      return "AOT_CTR_FIELDS";
     case AOT_HEAP_KIND_AOT_ENV_BIND: return "AOT_ENV_BIND";
+    case AOT_HEAP_KIND_WNF_ALO_DUP:  return "WNF_ALO_DUP";
+    case AOT_HEAP_KIND_WNF_DUP_LAM:  return "WNF_DUP_LAM";
+    case AOT_HEAP_KIND_WNF_DUP_SUP:  return "WNF_DUP_SUP";
+    case AOT_HEAP_KIND_WNF_ALO_LAM:  return "WNF_ALO_LAM";
+    case AOT_HEAP_KIND_WNF_UNS:      return "WNF_UNS";
+    case AOT_HEAP_KIND_WNF_DUP_NOD:  return "WNF_DUP_NOD";
+    case AOT_HEAP_KIND_WNF_APP_MAT:  return "WNF_APP_MAT_CTR";
     default:                         return "UNKNOWN";
   }
 }

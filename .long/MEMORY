@@ -1,64 +1,74 @@
-Round 21 (2026-02-27)
+Round 23 (2026-02-27)
 
 What landed
 - Files changed:
+  - `clang/heap/alloc.c`
   - `clang/aot/_.c`
-- Goal of this round: remove a hidden interpreter-only path inside compiled strict forcing.
+  - `clang/wnf/alo_dup.c`
+  - `clang/wnf/dup_lam.c`
+  - `clang/wnf/dup_sup.c`
+  - `clang/wnf/alo_lam.c`
+  - `clang/wnf/uns.c`
+  - `clang/wnf/dup_nod.c`
+  - `clang/wnf/app_mat_ctr.c`
+- Goal of this round: remove always-on allocator attribution overhead and classify the dominant compiled `UNCLASSIFIED` heap traffic.
 
-Root cause found
-- `aot_force_whnf_local(term, stack_top)` temporarily set `AOT_TRY_CALL_ENABLED = 0` before calling `wnf(term)`.
-- This meant strict forcing used by compiled `SWI/MAT` scrutinees (and DUP-force retries) could never dispatch to compiled refs, even when the scrutinee was an APP/REF tree that is AOT-compilable.
-- Effect: lots of size-2 heap traffic came from interpreter-style forcing inside otherwise compiled execution, with no `AOT_DEOPT` signal (so it looked like “fully compiled” while still paying fallback-like costs).
+Core implementation
+1) Telemetry-off fast path at allocator boundary
+- `heap_alloc_kind(size, kind)` now early-returns `heap_alloc(size)` when `HVM_AOT_HEAP_ATTR` is off.
+- `heap_alloc` now gates attribution behind one unlikely branch:
+  - `if (__builtin_expect(aot_heap_attr_enabled(), 0)) { ...note size + kind... }`
+- Effect: when attribution is disabled, allocator no longer does TLS hint reads plus two note calls on every allocation.
 
-Code change
-1) Allow compiled dispatch during local strict forcing
-- In `aot_force_whnf_local`:
-  - removed temporary disable/restore of `AOT_TRY_CALL_ENABLED`
-  - kept `WNF_S_POS` save/restore behavior unchanged
-- Net: `wnf()` invoked by strict forcing can now use `aot_try_call` normally.
+2) New WNF interaction heap kinds
+- Added new `AOT_HEAP_KIND_*` ids in `heap/alloc.c`:
+  - `WNF_ALO_DUP`, `WNF_DUP_LAM`, `WNF_DUP_SUP`, `WNF_ALO_LAM`, `WNF_UNS`, `WNF_DUP_NOD`, `WNF_APP_MAT`
+- Added string names in `aot_heap_kind_name()`.
 
-Why this is safe (observed)
-- `aot_try_call` already has depth guards (`AOT_TRY_CALL_MAX_DEPTH`, `AOT_MAX_DEPTH`) and step-limit guard (`STEPS_ITRS_LIM`).
-- `aot_force_whnf_local` still isolates stack segment via `WNF_S_POS = stack_top` and restore, preserving caller frame ownership boundaries.
-- Full test suite passes.
+3) Tagged raw `heap_alloc` in hot WNF interactions
+- Converted these sites to `heap_alloc_kind(..., WNF_*)`:
+  - `wnf_alo_dup`
+  - `wnf_dup_lam`
+  - `wnf_dup_sup`
+  - `wnf_alo_lam`
+  - `wnf_uns`
+  - `wnf_dup_nod`
+  - `wnf_app_mat_ctr`
+
+Why this matters
+- Round 22 showed huge compiled `UNCLASSIFIED` buckets (especially `gab_takl`).
+- After tagging WNF sites, the previously unknown traffic becomes explicit and attributable.
+- Data now points to the true hot family: `WNF_DUP_NOD` (not generic unknown allocator noise).
 
 Validation
 - Build: `cd clang && clang -O2 -o main main.c`
-- Tests: `./test/_all_.sh` passed
-- Canary command: `HVM_AOT_DEOPT=1 HVM_AOT_ALLOC=1 HVM_AOT_HEAP_ATTR=1 --as-c -s -T1`
+- Tests: `./test/_all_.sh` passed (full interpreted + AOT matrix).
+- Canary command baseline: `HVM_AOT_DEOPT=1 HVM_AOT_ALLOC=1 HVM_AOT_HEAP_ATTR=1 --as-c -s -T1`
 
-Canary results (post-change)
-- `gab_tak`
-  - result `56`, deopt/resid `0/0`
-  - `AOT_HEAP total_nodes=44,530` (was `157,226`)
+Canary snapshot (post-change)
 - `gab_takl`
-  - result `259`, deopt/resid `0/3`
-  - `AOT_HEAP total_nodes=232,282,424` (was `647,075,444`)
-  - time `1.079s` (was `2.318s`)
-- `edit_dist`
-  - result `1962522748`, deopt/resid `0/0`
-  - `AOT_HEAP total_nodes=88,505,052` (was `377,580,459`)
-  - time `0.692s` (was `2.032s`)
-- `gab_deriv`
-  - result `16400000`, deopt/resid `0/1`
-  - `AOT_HEAP total_nodes=70,400,000` (was `167,200,000`)
-- `ray_sphere`
-  - result `4011084840`, deopt/resid `0/0`
-  - `AOT_HEAP total_nodes=147,379,185` (was `241,571,185`)
-- `nqueens`
-  - result `1380080`, deopt/resid `0/0`
-  - `AOT_HEAP total_nodes=87,650,050` (was `96,824,342`)
+  - `AOT_HEAP total_nodes=232,282,424` (unchanged)
+  - `WNF_DUP_NOD=231,193,148` nodes
+  - `UNCLASSIFIED` disappeared from reported kinds.
 - `mat_mul`
-  - result unchanged, heap effectively unchanged (`145,024,874`)
+  - `AOT_HEAP total_nodes=145,024,874` (unchanged)
+  - `TERM_OP2=90,249,536`, `AOT_DUP_CELL=36,255,642`, `WNF_DUP_NOD=18,170,880`
+- `edit_dist`
+  - `AOT_HEAP total_nodes=88,505,052` (unchanged)
+  - `WNF_DUP_NOD=7,375,104` (replacing prior unclassified tail)
+- `ray_sphere`
+  - `AOT_HEAP total_nodes=147,379,185` (unchanged)
+  - `WNF_DUP_NOD=16,849,000` (replacing prior unclassified tail)
 
-Key lesson
-- “No deopt hits” does not imply no interpreter overhead: strict-force internals can still silently bypass compiled dispatch.
+Extra check
+- `mat_mul` with attribution OFF (`--as-c -s -T1`) runs at `0.732s` in this tree.
 
-Outstanding bottlenecks after this fix
-- `mat_mul` remains dominated by size-2 + explicit `DUP_CELL`; this path likely needs DUP-cell pressure reduction and/or stricter expression-level lowering for its hot loops.
-- Some residual captures (`EXPR_APP_ARG_CAPTURE`, `EXPR_CTR_FIELD_CAPTURE`) still appear in select canaries but are low count.
+Key lessons
+- Dominant "unknown" compiled allocator traffic was mostly `wnf_dup_nod` clones.
+- Attribution coverage is now strong enough to prioritize optimization work with confidence.
+- Remaining major heap pressures are still `TERM_OP2` and `AOT_DUP_CELL` on arithmetic-heavy workloads.
 
-Next steps
-1) Add lightweight heap kind attribution (APP vs OP2 vs DP vs CTR site families) to avoid blind size-2 optimization.
-2) Revisit non-self recursion architecture (SCC/trampoline) once hot strict paths are compiled.
-3) Expand strict lowering only where WNF semantics guarantee demand, keeping lazy contexts unchanged.
+Likely next steps
+1) Reduce `TERM_OP2` materialization in strict compiled contexts by unboxing strict numeric OP2 paths to direct NUM results.
+2) Attack `WNF_DUP_NOD` pressure by reducing non-copy-free DUP forcing/materialization frequency (while preserving DUP/SUP semantics).
+3) Consider adding a shared header/inc for heap-kind ids to avoid include-order coupling between `heap/alloc.c` and `aot/_.c`.

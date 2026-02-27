@@ -5,7 +5,7 @@
 // @{x',s} t
 fn Term wnf_alo_dup(u64 alo_loc, u64 ls_loc, u16 len, Term book) {
   u64 book_loc = term_val(book);
-  u64 bind_ent = heap_alloc(2);
+  u64 bind_ent = heap_alloc_kind(2, AOT_HEAP_KIND_WNF_ALO_DUP);
   Term alo_v = term_new_alo_at(alo_loc, ls_loc, len, book_loc + 0);
   heap_set(bind_ent + 0, alo_v);
   heap_set(bind_ent + 1, term_new(0, NUM, 0, ls_loc));

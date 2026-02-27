@@ -29,7 +29,7 @@ fn Term wnf_app_mat_ctr(Term mat, Term ctr) {
     if (ari == 2) {
       return res;
     }
-    u64 apps = heap_alloc(2 * (u64)(ari - 2));
+    u64 apps = heap_alloc_kind(2 * (u64)(ari - 2), AOT_HEAP_KIND_WNF_APP_MAT);
     for (u32 i = 2; i < ari; i++) {
       res = term_new_app_at(apps + 2 * (u64)(i - 2), res, heap_read(ctr_loc + i));
     }
