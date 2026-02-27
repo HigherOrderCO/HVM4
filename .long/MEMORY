@@ -1,57 +1,46 @@
-Round 14 (2026-02-27)
+Round 15 (2026-02-27)
 
 What landed
 - File changed:
   - `clang/aot/emit.c`
-- Structural expression policy widened and reused:
-  - Renamed APP-specific structural limits to generic expression structural limits.
-  - Raised structural depth cap from `64` to `128` (node cap stays `4096`).
-  - `aot_emit_expr_can_structuralize` now recurses into constructor fields (`C01..C16`) instead of treating all constructors as trivially structural.
-  - Added generic helper `aot_emit_expr_structural(loc)` and replaced APP-arg-only helper.
-- Constructor field emission in expression mode (`C01..C16`) now tries structural lowering per field:
-  - If field subtree is structuralizable, emit via `aot_emit_node`.
-  - Otherwise keep existing fallback capture `AOT_DEOPT_EXPR_CTR_FIELD_CAPTURE`.
-- Beta-inline APP arg policy (expression `APP` with static `LAM` fun) now mirrors bounded structural strategy:
-  - For non-erased binders, emit arg structurally when possible.
-  - Fallback to `EXPR_APP_ARG_CAPTURE` only when structuralization check fails.
+- Added self-tail-call lowering in compiled head `REF`:
+  - In head mode (`aot_emit_node`, `tag==REF`), when `term_ext(term) == current_def_id` and `STEPS_ITRS_LIM == 0`, emitter now outputs `continue;` instead of `return aot_call_ref(...)`.
+  - Non-self `REF` behavior unchanged (`aot_call_ref`).
+- Wrapped each emitted compiled function body in `for (;;) { ... }`:
+  - `env_cells` / `env_locs` are reinitialized per loop iteration.
+  - `continue` re-enters the same compiled function without C recursion, preserving stack/base calling convention.
+- Added emitter state `AOT_EMIT_DEF_ID` so head REF lowering can identify self-calls.
 
-What was tried and reverted (important)
-- Tried optimization in `aot_emit_alo_expr_meta`: for residual reasons at `dep==0`, emit `heap_read(loc)` instead of `aot_fallback_alo(...)`.
-- This temporarily drove canary residuals to zero, but was UNSOUND.
-- Regression: AOT `autodup_bound_vars` failed under test harness (`-C` path sensitive to lexical/lifting behavior carried by ALO even with len=0).
-- Reverted fully. Keep this as a path to avoid unless we prove strict semantic equivalence for specific term classes.
+Why
+- `gab_deriv` still had hard deopts from `CALL_DEPTH_CAP=97` even after previous residual cleanup.
+- Root cause: self-tail recursion still went through `aot_call_ref`, increasing `AOT_CALL_DEPTH` and eventually bailing out.
+- Self-tail call is semantically a restart of the same compiled case-tree with same `(stack, s_pos, base)`, so loop continue is a safe lowering that avoids C stack/depth growth.
 
 Validation
 - Build:
   - `cd clang && clang -O2 -o main main.c`
 - Tests:
-  - `./test/_all_.sh` => all interpreted + AOT tests pass.
-- Canary parity/deopt (`HVM_AOT_DEOPT=1 --as-c -s -T1`):
-  - `gab_tak`: result `56`, deopt `0`, resid `0`
-  - `gab_takl`: result `259`, deopt `0`, resid `3` (`EXPR_APP_ARG_CAPTURE`)
-  - `mat_mul`: result `113238912`, deopt `0`, resid `3` (`EXPR_CTR_FIELD_CAPTURE`)
-  - `ray_sphere`: result `4011084840`, deopt `0`, resid `0`
-  - `nqueens`: result `1380080`, deopt `0`, resid `0`
-  - `edit_dist`: result `1962522748`, deopt `0`, resid `0`
-  - `gab_deriv`: result `16400000`, deopt `97` (`CALL_DEPTH_CAP`), resid `1` (`EXPR_CTR_FIELD_CAPTURE`)
+  - `./test/_all_.sh` => all pass (interpreted + AOT).
+- Canary telemetry (`HVM_AOT_DEOPT=1 --as-c -s -T1`, sequential):
+  - `gab_deriv`: deopt `97 -> 0`; resid stays `1` (`EXPR_CTR_FIELD_CAPTURE`); result `16400000`.
+    - now: Itrs `122000002`, Heap `392800187`, Time `1.466s`
+  - `gab_takl`: deopt `0`, resid `3` (`EXPR_APP_ARG_CAPTURE`), result `259`.
+  - `mat_mul`: deopt `0`, resid `3` (`EXPR_CTR_FIELD_CAPTURE`), result `113238912`.
+  - `ray_sphere`: deopt/resid `0/0`, result `4011084840`.
+  - `nqueens`: deopt/resid `0/0`, result `1380080`.
+  - `edit_dist`: deopt/resid `0/0`, result `1962522748`.
 
-Observed effects
-- `gab_tak` residual capture went `3 -> 0`.
-- `gab_takl` residual class shifted from `CTR_FIELD_CAPTURE` to `APP_ARG_CAPTURE` (still 3 total).
-- `mat_mul` and `gab_deriv` keep a small `CTR_FIELD_CAPTURE` tail.
-- Heap/itrs on heavy kernels remain broadly similar; this round is mainly residual-class reshaping + safer structural coverage.
+Important operational note
+- `--as-c` uses a shared temp output name (`hvm4-aot-as-c.main.c`); running multiple `--as-c` commands in parallel corrupts emitted C and yields fake syntax/UTF-8 errors.
+- Keep telemetry runs serialized.
 
-Investigation notes
-- Mapped `mat_mul` hot residual sites by inspecting emitted C (`aot_fallback_alo(..., site)`): sites `78..80` corresponded to top-level field captures (`loc 759, 549, 339`).
-- Despite `dep==0`, replacing ALO with raw static term was not semantics-preserving in general.
-
-Operational lessons
-- ALO len=0 is not a no-op wrapper semantically; it still participates in lexical readback/lifting pathways.
-- Any “direct static term at dep=0” optimization must be gated by a stronger invariant than empty lexical env.
-- Keep `--as-c` telemetry serialized; parallel runs can still be noisy/non-deterministic in artifact handling.
+Current hotspot picture
+- Hard deopts on canaries are effectively removed (including prior `HEAD_MAT_NON_CTR`, now `CALL_DEPTH_CAP` on `gab_deriv`).
+- Residual tail remains tiny (`EXPR_APP_ARG_CAPTURE` / `EXPR_CTR_FIELD_CAPTURE`).
+- Main remaining performance limiter is still heap traffic (APP/CTR/env materialization), not deopt count.
 
 Next likely steps
-1. Add static site metadata for residual captures (not only special kinds) so top-site dumps include loc/tag context for `APP_ARG_CAPTURE`/`CTR_FIELD_CAPTURE` without manual emitted-C grep.
-2. Introduce a conservative “closed quoted term” predicate for capture elision that proves ALO equivalence (likely strict subset; no lexical-level dependence through lifting paths).
-3. Continue direct compiled REF-call/app-spine lowering to reduce APP-frame allocations (dominant heap driver), separately from residual cleanup.
-4. Tackle `CALL_DEPTH_CAP` with self-tail-call lowering first, then trampoline for non-tail/mutual recursion.
+1. Add allocation-class telemetry to runtime (`heap_alloc` sites/classes used by compiled paths) to rank APP/CTR/DUP/env costs directly.
+2. Implement direct compiled REF-call / app-spine lowering to avoid APP-frame materialization where callee/arity are statically known.
+3. Extend recursion handling beyond self-tail: trampoline for mutual/non-tail recursion to remove remaining depth sensitivity globally.
+4. Improve residual site metadata registration for `kind=NONE` sites so top-site dumps include `loc/tag/ext/dep` context without emitted-C grepping.

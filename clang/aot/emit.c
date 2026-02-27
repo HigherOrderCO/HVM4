@@ -13,6 +13,7 @@ static u32 AOT_EMIT_DEOPT_SITE = 0;
 static u8  AOT_EMIT_DEOPT_KIND[AOT_DEOPT_SITE_CAP] = {0};
 static u64 AOT_EMIT_DEOPT_LOC[AOT_DEOPT_SITE_CAP] = {0};
 static u32 AOT_EMIT_DEOPT_AUX[AOT_DEOPT_SITE_CAP] = {0};
+static u32 AOT_EMIT_DEF_ID = 0;
 // Bounds structural expression emission to avoid emitter/code-size blowups.
 #define AOT_EMIT_EXPR_STRUCT_DEPTH_CAP 128
 #define AOT_EMIT_EXPR_STRUCT_NODE_CAP  4096
@@ -532,7 +533,11 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
 
       case REF: {
         fprintf(f, "%sif (STEPS_ITRS_LIM == 0) {\n", pad);
-        fprintf(f, "%sreturn aot_call_ref(%u, stack, s_pos, base);\n", pad1, term_ext(term));
+        if (term_ext(term) == AOT_EMIT_DEF_ID) {
+          fprintf(f, "%scontinue;\n", pad1);
+        } else {
+          fprintf(f, "%sreturn aot_call_ref(%u, stack, s_pos, base);\n", pad1, term_ext(term));
+        }
         fprintf(f, "%s}\n", pad);
         aot_emit_ret_head(f, loc, dep, pad, tmp);
         return;
@@ -772,13 +777,16 @@ fn void aot_emit_def(FILE *f, u32 id) {
   fprintf(f, ";\n");
   fprintf(f, "  }\n");
   fprintf(f, "\n");
-  fprintf(f, "  Term env_cells[AOT_ENV_CAP] = {0};\n");
-  fprintf(f, "  u64 env_locs[AOT_ENV_CAP] = {0};\n");
+  fprintf(f, "  for (;;) {\n");
+  fprintf(f, "    Term env_cells[AOT_ENV_CAP] = {0};\n");
+  fprintf(f, "    u64 env_locs[AOT_ENV_CAP] = {0};\n");
   fprintf(f, "\n");
   {
     u32 tmp = 0;
-    aot_emit_node(f, root, 0, NULL, 1, "  ", &tmp);
+    AOT_EMIT_DEF_ID = id;
+    aot_emit_node(f, root, 0, NULL, 1, "    ", &tmp);
   }
+  fprintf(f, "  }\n");
   fprintf(f, "}\n\n");
 }
 

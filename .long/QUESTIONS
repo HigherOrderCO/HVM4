@@ -1,33 +1,31 @@
-1) What are the exact semantic preconditions for replacing `aot_fallback_alo(tm_loc, len, ls, reason, site)` with a direct static term?
+1) What is the strongest *safe* static predicate for ALO elision (or substitution by structural instantiation) in this runtime?
 
 Context:
-- We attempted an optimization in AOT emission: when residualizing with `dep==0`, emit `heap_read(tm_loc)` directly instead of `aot_fallback_alo(...)`.
-- This looked correct on canary telemetry (residual counters dropped), but it broke AOT test `autodup_bound_vars` under collapse (`-C`) by producing quoted residuals like `(_ + 100)` where fully collapsed numbers were expected.
-- Reverting restored correctness.
-- This indicates ALO with `len=0` still carries important semantics (likely lexical lifting/readback behavior), so “empty env => equivalent to raw static term” is false in general.
+- We previously tried replacing `aot_fallback_alo(loc, 0, 0, ...)` with `heap_read(loc)` for `dep==0`; this was unsound (`autodup_bound_vars` + collapse regressions).
+- We now understand ALO is also an instantiation/freshening barrier, not just env packaging.
+- Residual tails are small but persistent (`EXPR_APP_ARG_CAPTURE`, `EXPR_CTR_FIELD_CAPTURE`), and we only want to elide capture where provably equivalent.
 
 Question:
-- Which structural properties of a static term are sufficient to prove that replacing ALO with raw static term is semantics-preserving?
-- Is there a known safe subset (e.g., no lexical-level dependence after lifting, no constructs requiring ALO-mediated rebinding) that we can implement as a conservative predicate?
+- Which exact term-shape constraints are sufficient to guarantee semantic equivalence without ALO?
+- Is there an accepted conservative subset (for example, fully frozen data subset) we should target first?
 
-2) Post-autodup linearity guarantee for stack-only binder storage
+2) Direct compiled REF calls without APP frame allocation: which invariants must be preserved at AOT/interpreter boundaries?
 
 Context:
-- We want to reduce heap traffic in compiled paths by keeping binders in C locals whenever possible.
-- Safety depends on whether multi-use of binders can still occur implicitly (multiple `VAR` occurrences) or is always explicit via `DUP`/`DP0`/`DP1` after normalization/autodup.
+- Deopts are near-zero on canaries; performance now appears heap-allocation bound.
+- A likely dominant cost is APP frame materialization (`heap_alloc(2)` + stack push/pop) even on fully compiled call chains.
+- We want to pass known-arity args via an AOT calling convention and reify APP nodes only when escaping to generic runtime/deopt.
 
 Question:
-- Is there a hard invariant in this codebase that every non-erased binder is used linearly unless duplicated through explicit DUP/DP nodes?
-- If yes, where is this enforced?
-- If not global, what conservative emitter-side condition should guard stack-only binder storage?
+- Which runtime behaviors strictly depend on those APP nodes being materialized *eagerly*?
+- For strict interactions (`SWI/MAT` forcing, DUP/SUP edges), what minimal boundary rule avoids semantic drift?
 
-3) Direct compiled REF-call lowering without APP-frame materialization
+3) Trampoline design choice for non-tail / mutual recursion in compiled mode
 
 Context:
-- Deopt is near-zero on several kernels, but Heap/Itrs remains high.
-- A dominant suspected source is APP-frame allocation (`heap_alloc(2)` for argument stack frames) in compiled call paths.
-- We plan to pass known arity arguments directly in compiled C calls and reify APP nodes only at fallback/deopt boundaries.
+- Round 15 added self-tail loop lowering in emitted functions; this removed `gab_deriv` `CALL_DEPTH_CAP` deopts (`97 -> 0`) while preserving tests/parity.
+- Remaining recursion depth risk now comes from mutual/non-tail recursive compiled calls via `aot_call_ref`.
 
 Question:
-- Which runtime invariants *strictly require* real APP nodes to exist (if any) versus current implementation convenience?
-- Are there known interaction-edge cases (especially involving DUP/SUP or strict forcing) where skipping APP-node materialization would violate expected behavior?
+- Preferred design: (A) explicit `CALL(fn_id,args...)` trampoline return protocol, or (B) shared work loop with mutable "current callee" state?
+- Are there existing invariants around stack/base ownership that make one approach clearly safer in HVM’s runtime architecture?
