@@ -11,6 +11,7 @@ fn void wnf_set_itrs_enabled(int enabled);
 fn void aot_deopt_dump(FILE *f);
 fn void aot_alloc_dump(FILE *f);
 fn void aot_heap_attr_dump(FILE *f);
+fn void aot_mat_dp_dump(FILE *f);
 
 // Runtime Eval Main
 // -----------------
@@ -71,4 +72,5 @@ fn void runtime_eval_main(u32 main_id, const RuntimeEvalCfg *cfg) {
   aot_deopt_dump(stderr);
   aot_alloc_dump(stderr);
   aot_heap_attr_dump(stderr);
+  aot_mat_dp_dump(stderr);
 }

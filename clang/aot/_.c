@@ -58,6 +58,15 @@ static u64 AOT_HEAP_BUCKET_NODES[AOT_HEAP_BUCKET_COUNT] = {0};
 static u64 AOT_HEAP_KIND_CALLS[AOT_HEAP_KIND_COUNT] = {0};
 static u64 AOT_HEAP_KIND_NODES[AOT_HEAP_KIND_COUNT] = {0};
 static _Thread_local u32 AOT_HEAP_COMPILED_DEPTH = 0;
+static int AOT_MAT_DP_ENABLED = -1;
+static u64 AOT_MAT_DP_PROBES = 0;
+static u64 AOT_MAT_DP_HITS = 0;
+static u64 AOT_MAT_DP_NON_DP = 0;
+static u64 AOT_MAT_DP_SUB = 0;
+static u64 AOT_MAT_DP_NON_CTR = 0;
+static u64 AOT_MAT_DP_EXT_MISS = 0;
+static u64 AOT_MAT_DP_FORCE = 0;
+static u64 AOT_MAT_DP_FORCE_TO_CTR = 0;
 
 // Returns 1 when global heap attribution is enabled via HVM_AOT_HEAP_ATTR.
 fn int aot_heap_attr_enabled(void) {
@@ -227,6 +236,45 @@ fn void aot_heap_attr_dump(FILE *f) {
       (unsigned long long)bcalls,
       (unsigned long long)bnodes);
   }
+}
+
+// Returns 1 when MAT-DP probe telemetry is enabled via HVM_AOT_MAT_DP.
+fn int aot_mat_dp_enabled(void) {
+  int enabled = __atomic_load_n(&AOT_MAT_DP_ENABLED, __ATOMIC_RELAXED);
+  if (enabled >= 0) {
+    return enabled;
+  }
+
+  const char *env = getenv("HVM_AOT_MAT_DP");
+  enabled = env != NULL && env[0] != '\0' && strcmp(env, "0") != 0;
+  __atomic_store_n(&AOT_MAT_DP_ENABLED, enabled, __ATOMIC_RELAXED);
+  return enabled;
+}
+
+// Prints MAT-DP probe counters when enabled.
+fn void aot_mat_dp_dump(FILE *f) {
+  if (!aot_mat_dp_enabled()) {
+    return;
+  }
+
+  u64 probes   = __atomic_load_n(&AOT_MAT_DP_PROBES, __ATOMIC_RELAXED);
+  u64 hits     = __atomic_load_n(&AOT_MAT_DP_HITS, __ATOMIC_RELAXED);
+  u64 non_dp   = __atomic_load_n(&AOT_MAT_DP_NON_DP, __ATOMIC_RELAXED);
+  u64 sub      = __atomic_load_n(&AOT_MAT_DP_SUB, __ATOMIC_RELAXED);
+  u64 non_ctr  = __atomic_load_n(&AOT_MAT_DP_NON_CTR, __ATOMIC_RELAXED);
+  u64 ext_miss = __atomic_load_n(&AOT_MAT_DP_EXT_MISS, __ATOMIC_RELAXED);
+  u64 force    = __atomic_load_n(&AOT_MAT_DP_FORCE, __ATOMIC_RELAXED);
+  u64 force_ctr = __atomic_load_n(&AOT_MAT_DP_FORCE_TO_CTR, __ATOMIC_RELAXED);
+
+  fprintf(f, "AOT_MAT_DP probes=%llu hits=%llu non_dp=%llu sub=%llu non_ctr=%llu ext_miss=%llu force=%llu force_to_ctr=%llu\n",
+    (unsigned long long)probes,
+    (unsigned long long)hits,
+    (unsigned long long)non_dp,
+    (unsigned long long)sub,
+    (unsigned long long)non_ctr,
+    (unsigned long long)ext_miss,
+    (unsigned long long)force,
+    (unsigned long long)force_ctr);
 }
 
 // Counts one interaction on compiled paths.
@@ -819,6 +867,97 @@ fn int aot_is_copy_free(Term term) {
       return 0;
     }
   }
+}
+
+fn int aot_can_force_strict_tag(u8 tag);
+fn Term aot_force_whnf_local(Term term, u32 stack_top);
+
+// Tries one strict-MAT fast path for DP scrutinees over matching constructors.
+// On success, returns 1 and outputs constructor metadata for lazy field projections.
+fn int aot_try_mat_dp_ctr_match(Term term, u32 ctr_ext, u32 stack_top, u8 *side_out, u32 *lab_out, u32 *ari_out, u64 *ctr_loc_out) {
+  int trace = aot_mat_dp_enabled();
+  if (trace) {
+    __atomic_fetch_add(&AOT_MAT_DP_PROBES, 1, __ATOMIC_RELAXED);
+  }
+
+  u8 tag = term_tag(term);
+  if (tag != DP0 && tag != DP1) {
+    if (trace) {
+      __atomic_fetch_add(&AOT_MAT_DP_NON_DP, 1, __ATOMIC_RELAXED);
+    }
+    return 0;
+  }
+
+  u8  side = tag == DP0 ? 0 : 1;
+  u64 loc  = term_val(term);
+  u32 lab  = term_ext(term);
+  Term cell = heap_take(loc);
+
+  if (term_sub_get(cell)) {
+    if (trace) {
+      __atomic_fetch_add(&AOT_MAT_DP_SUB, 1, __ATOMIC_RELAXED);
+    }
+    heap_set_rel(loc, cell);
+    return 0;
+  }
+
+  u8 cell_tag = term_tag(cell);
+  if (cell_tag < C00 || cell_tag > C16) {
+    if (!aot_can_force_strict_tag(cell_tag)) {
+      if (trace) {
+        __atomic_fetch_add(&AOT_MAT_DP_NON_CTR, 1, __ATOMIC_RELAXED);
+      }
+      heap_set_rel(loc, cell);
+      return 0;
+    }
+
+    if (trace) {
+      __atomic_fetch_add(&AOT_MAT_DP_FORCE, 1, __ATOMIC_RELAXED);
+    }
+    heap_set_rel(loc, cell);
+    Term forced = aot_force_whnf_local(cell, stack_top);
+    if (forced != cell) {
+      heap_set_rel(loc, forced);
+    }
+
+    cell = forced;
+    cell_tag = term_tag(cell);
+    if (cell_tag < C00 || cell_tag > C16) {
+      if (trace) {
+        __atomic_fetch_add(&AOT_MAT_DP_NON_CTR, 1, __ATOMIC_RELAXED);
+      }
+      return 0;
+    }
+    if (trace) {
+      __atomic_fetch_add(&AOT_MAT_DP_FORCE_TO_CTR, 1, __ATOMIC_RELAXED);
+    }
+  }
+  if (term_ext(cell) != ctr_ext) {
+    if (trace) {
+      __atomic_fetch_add(&AOT_MAT_DP_EXT_MISS, 1, __ATOMIC_RELAXED);
+    }
+    heap_set_rel(loc, cell);
+    return 0;
+  }
+
+  if (side_out != NULL) {
+    *side_out = side;
+  }
+  if (lab_out != NULL) {
+    *lab_out = lab;
+  }
+  if (ari_out != NULL) {
+    *ari_out = (u32)(cell_tag - C00);
+  }
+  if (ctr_loc_out != NULL) {
+    *ctr_loc_out = term_val(cell);
+  }
+
+  if (trace) {
+    __atomic_fetch_add(&AOT_MAT_DP_HITS, 1, __ATOMIC_RELAXED);
+  }
+  heap_set_rel(loc, cell);
+  return 1;
 }
 
 // Returns 1 when strict head forcing can expose a new WHNF scrutinee tag.

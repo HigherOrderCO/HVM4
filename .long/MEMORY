@@ -1,44 +1,50 @@
-Round 27 (2026-02-27)
+Round 28 (2026-02-27)
 
 What landed
 - Files changed:
   - `clang/aot/emit.c`
-- Generalized direct compiled-call lowering from self-only to any known compiled ref.
-- Added `aot_emit_compiled_fun_name(...)` helper to resolve `ref_id -> F_<name>` only when the callee is actually compiled (`id` bounds, `BOOK[id] != 0`, `table_get != NULL`).
-- Added `aot_emit_prototypes(...)` and now emit forward declarations for all generated `F_*` functions before definitions.
-- `aot_emit_try_demanded_ref_call(...)` now uses guarded direct calls for all compiled refs (not just `self`), preserving:
-  - `STEPS_ITRS_LIM == 0` gate,
-  - depth fallback (`aot_call_depth() >= AOT_MAX_DEPTH` -> `term_new_ref(ref_id)`),
-  - `AOT_CALL_DEPTH++/--` and `aot_heap_compiled_enter()/leave()`,
-  - leftover arg reapply loop (`for (j = call_pos; j > 0; j--) term_new_app(...)`).
-- Head-position `REF` (`aot_emit_node(..., head=1)`) now also direct-calls compiled refs under the same guards; tail-self-loop `continue` optimization is preserved.
+  - `clang/aot/_.c`
+  - `clang/runtime/eval_main.c`
+- Implemented a strict-`MAT` DP fast path in head-mode emission:
+  - `MAT` now probes scrutinees via `aot_try_mat_dp_ctr_match(...)` before generic `aot_force_strict(...)`.
+  - On match (`DP0/DP1` over matching constructor), compiled code now:
+    - skips full constructor duplication,
+    - consumes the argument source exactly as before,
+    - pushes lazy projected fields (`DP0`/`DP1` over original constructor fields) into `a_args`,
+    - continues into the match branch.
+- Extended probe helper to attempt one local WHNF force of DP payloads when payload tags are strict-forceable (`APP/ALO/REF/OP2/USE`) before deciding miss.
+- Added opt-in probe telemetry (`HVM_AOT_MAT_DP=1`) and stderr dump line:
+  - `AOT_MAT_DP probes/hits/non_dp/sub/non_ctr/ext_miss/force/force_to_ctr`.
+- Wired telemetry dump in shared runtime eval path (`runtime_eval_main`).
 
 Why this mattered
-- Runtime dispatch (`aot_call_ref` table lookup) remained on hot cross-def call paths even after self-call optimization.
-- This completes the obvious dispatch elimination pass: compiled code now calls compiled code directly whenever possible.
+- `WNF_DUP_NOD` still dominates heap on heavy AOT benches. The goal was to bypass full `wnf_dup_nod` materialization in strict `MAT` when only branch routing + lazy fields are needed.
+- Telemetry was needed to verify whether the new path is actually reached and why it misses.
 
 Validation
-- Build: `cd clang && clang -O2 -o main main.c`.
-- Tests: `./test/_all_.sh` passed.
-- Canary deopt parity: `HVM_AOT_DEOPT=1 --as-c -s -T1` kept `AOT_DEOPT total=0` on sampled benches.
-- Generated C check (`gab_takl --to-c`):
-  - now emits prototype block (`static Term F_...(...)`) at top,
-  - emits direct cross-def calls (e.g. `F_mas`, `F_mas_go`, `F_len`),
-  - sampled generated programs show `aot_call_ref(` count = `0`.
+- Build: `cd clang && clang -O2 -o main main.c`
+- Tests: `./test/_all_.sh` passed after fixes.
+- Canaries (`--as-c -s -T1`, with `HVM_AOT_DEOPT=1 HVM_AOT_HEAP_ATTR=1`) stayed deopt-clean (`AOT_DEOPT total=0`) and preserved results.
 
-Current canary snapshot (`--as-c -s -T1`, single run)
-- `u32_fib`: Heap `22`, Time `2.887s`
-- `gab_takl`: Heap `232,283,370`, Time `1.010s`
-- `trie_bitwise`: Heap `777,671,484`, Time `2.040s`
-- `edit_dist`: Heap `88,048,872`, Time `0.681s`
-- `mat_mul`: Heap `18,694,767`, Time `0.275s`
-- `ray_sphere`: Heap `109,701,465`, Time `0.737s`
+Telemetry snapshot (`HVM_AOT_MAT_DP=1`)
+- `gab_takl`:
+  - `AOT_MAT_DP probes=66,111,351 hits=1 non_dp=33,057,540 sub=32,063 non_ctr=32,941,705 ext_miss=80,042 force=80,043 force_to_ctr=80,043`
+  - `WNF_DUP_NOD calls=57,850,379 nodes=231,193,148` (no practical reduction)
+- `trie_bitwise`:
+  - `AOT_MAT_DP probes=112,665 hits=21,298 non_dp=79,167 sub=0 non_ctr=0 ext_miss=12,200 force=11,211 force_to_ctr=11,211`
+  - `WNF_DUP_NOD calls=111,669,237 nodes=642,614,910` (still dominant)
+- `mat_mul`:
+  - `AOT_MAT_DP probes=18,128,241 hits=1 non_dp=9,042,593 non_ctr=9,085,439 ext_miss=208 force=208 force_to_ctr=208`
+  - `WNF_DUP_NOD` unchanged.
 
 Key lessons
-- Dispatch overhead can still matter after big allocation wins; removing `aot_call_ref` from generated code is mechanically safe with proper guards.
-- Heap-heavy outliers remain dominated by DUP/DP forcing (`WNF_DUP_NOD` class), so further speedups now require semantic DUP-path specialization, not call dispatch tweaks.
+- Match-only DP projection is semantics-safe and test-clean, but current impact is low on admission-heavy benches.
+- Large miss buckets are:
+  - non-DP scrutinees (fast path inapplicable), and
+  - DP scrutinees that force to constructor but do not match the target constructor (`ext_miss`).
+- The hottest remaining cost is still generic DUP materialization on paths outside successful match projection.
 
 Next likely steps
-1) Attack strict `MAT/SWI` on `DP0/DP1` scrutinees: avoid full generic `wnf_dup_nod` where payload-tag routing can be done safely.
-2) Add compiled telemetry for strict-force DUP outcomes (DUP-NUM vs DUP-CTR vs fallback) to target the highest-yield specialization first.
-3) Explore constructor-field lazy DP projection path in compiled case dispatch to cut `WNF_DUP_NOD` materialization pressure.
+1) Optimize `MAT` mismatch-on-DP path (after payload becomes constructor with different `ext`) to avoid paying full `wnf_dup_nod` when branch behavior can remain lazy.
+2) Add classification telemetry for where `WNF_DUP_NOD` is triggered after failed MAT probe (miss-type -> eventual interaction), to target the highest-yield miss category.
+3) Investigate whether compiled branch-1 application can accept a virtual/projection-backed constructor representation safely, avoiding eager duplicated constructor allocation.

@@ -1,15 +1,16 @@
-1) Exact semantic contract for compiled `DP` shortcutting in strict `MAT/SWI`
+1) Semantics-safe shortcut for `MAT` mismatch on `DP0/DP1` scrutinees
 
 Context:
-- Current AOT strict forcing path for scrutinees (`aot_force_strict` -> `aot_force_dup`) is conservative: for `DP0/DP1`, it may run generic DUP interactions (`wnf_dup_nod`) until a concrete WHNF appears.
-- This is correct but very expensive on key benchmarks (`gab_takl`, `trie_bitwise`), where heap attribution has shown `WNF_DUP_NOD` dominating total nodes.
-- In compiled case-tree code, many strict `MAT/SWI` checks only need the scrutinee tag and possibly constructor fields, not a fully materialized duplicated structure.
+- In AOT head-mode, we now have a strict-`MAT` fast path for `DP0/DP1` scrutinees when the DUP payload is (or can be forced to) a constructor with the same `ext` as the tested branch. In that case we skip full `wnf_dup_nod` and pass lazy projected fields (`DP0/DP1` per field) to the matched branch.
+- This is correct and test-clean, but telemetry (`HVM_AOT_MAT_DP=1`) shows a large miss bucket where the payload becomes a constructor with a *different* `ext` (`ext_miss`). On these paths we still fall back to generic strict forcing and end up paying large `WNF_DUP_NOD` cost.
+- For constructor mismatch, IC rule is `APP-MAT-CTR-MIS`: result is `(m ctr)` (default branch applied to scrutinee constructor).
 
 Question:
-- For a strict scrutinee known to be `DP0/DP1`, what is the strongest semantics-safe shortcut we can apply before full `wnf_dup_nod` materialization?
-- Specifically, can compiled code branch directly on DUP payload tag classes (NUM / CTR / others) and/or synthesize projected `DP0(field_i)` / `DP1(field_i)` bindings lazily, while preserving exact IC behavior?
-- Please state required invariants explicitly:
-  - linearity / consumption guarantees,
-  - when the DUP cell must exist physically vs can stay virtual,
-  - SUB-bit obligations,
-  - cases that must still fallback to generic interpreter interaction.
+- For this mismatch case with scrutinee originally `DP0/DP1`, can compiled code safely avoid full duplicated-constructor materialization and still preserve exact IC semantics?
+- Concretely, can we feed branch-1 a virtual/projection-backed constructor (or the original DP handle) instead of a fully materialized side-constructor, and under what invariants?
+
+Please specify required guarantees explicitly:
+- whether branch-1 must receive a concrete side-constructor value immediately,
+- whether delaying side-constructor materialization until branch-1 actually inspects fields is semantically equivalent,
+- SUB-bit / DUP-cell state transitions that must still occur for linearity and determinism,
+- any counterexample pattern where this shortcut would be unsound.
