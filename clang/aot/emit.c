@@ -412,7 +412,7 @@ fn u8 aot_emit_try_demanded_ref_call(FILE *f, u64 loc, u32 dep, const char *out,
   return 1;
 }
 
-// Emits one demanded expression. It only adds strict-safe APP(ref, ...) lowering.
+// Emits one demanded expression with strict-safe hot-path lowering.
 fn void aot_emit_node_demanded(FILE *f, u64 loc, u32 dep, const char *out, const char *pad, u32 *tmp) {
   Term term = heap_read(loc);
   switch (term_tag(term)) {
@@ -428,12 +428,42 @@ fn void aot_emit_node_demanded(FILE *f, u64 loc, u32 dep, const char *out, const
       u64 op2_loc = term_val(term);
       char lhs_n[32];
       char rhs_n[32];
+      char fb_n[32];
+      char pad1[128];
+      char pad2[128];
+      char pad3[128];
       aot_emit_tmp(lhs_n, sizeof(lhs_n), "lhs", tmp);
       aot_emit_tmp(rhs_n, sizeof(rhs_n), "rhs", tmp);
+      aot_emit_tmp(fb_n, sizeof(fb_n), "fallback", tmp);
+      aot_emit_pad_next(pad1, sizeof(pad1), pad);
+      aot_emit_pad_next(pad2, sizeof(pad2), pad1);
+      aot_emit_pad_next(pad3, sizeof(pad3), pad2);
 
-      aot_emit_node_demanded(f, op2_loc + 0, dep, lhs_n, pad, tmp);
-      aot_emit_node_demanded(f, op2_loc + 1, dep, rhs_n, pad, tmp);
-      fprintf(f, "%sTerm %s = term_new_op2(%u, %s, %s);\n", pad, out, opr, lhs_n, rhs_n);
+      fprintf(f, "%sTerm %s;\n", pad, out);
+      fprintf(f, "%sif (STEPS_ITRS_LIM == 0) {\n", pad);
+      aot_emit_node_demanded(f, op2_loc + 0, dep, lhs_n, pad1, tmp);
+      fprintf(f, "%s%s = aot_force_strict(%s, *s_pos);\n", pad1, lhs_n, lhs_n);
+      fprintf(f, "%sif (term_tag(%s) == ERA) {\n", pad1, lhs_n);
+      fprintf(f, "%s%s = wnf_op2_era();\n", pad2, out);
+      fprintf(f, "%s} else if (term_tag(%s) == NUM) {\n", pad1, lhs_n);
+      aot_emit_node_demanded(f, op2_loc + 1, dep, rhs_n, pad2, tmp);
+      fprintf(f, "%s%s = aot_force_strict(%s, *s_pos);\n", pad2, rhs_n, rhs_n);
+      fprintf(f, "%sif (term_tag(%s) == ERA) {\n", pad2, rhs_n);
+      fprintf(f, "%s%s = wnf_op2_num_era();\n", pad3, out);
+      fprintf(f, "%s} else if (term_tag(%s) == NUM) {\n", pad2, rhs_n);
+      fprintf(f, "%s%s = wnf_op2_num_num_raw(%u, (u32)term_val(%s), (u32)term_val(%s));\n", pad3, out, opr, lhs_n, rhs_n);
+      fprintf(f, "%s} else {\n", pad2);
+      fprintf(f, "%s%s = term_new_op2(%u, %s, %s);\n", pad3, out, opr, lhs_n, rhs_n);
+      fprintf(f, "%s}\n", pad2);
+      fprintf(f, "%s} else {\n", pad1);
+      fprintf(f, "%s%s = term_new_op2(%u, %s, ", pad2, out, opr, lhs_n);
+      aot_emit_alo_expr(f, op2_loc + 1, dep, AOT_DEOPT_EXPR_OP2_RHS_CAPTURE);
+      fprintf(f, ");\n");
+      fprintf(f, "%s}\n", pad1);
+      fprintf(f, "%s} else {\n", pad);
+      aot_emit_node(f, loc, dep, fb_n, 0, pad1, tmp);
+      fprintf(f, "%s%s = %s;\n", pad1, out, fb_n);
+      fprintf(f, "%s}\n", pad);
       return;
     }
     default: {

@@ -12,3 +12,13 @@ Question:
 - What is the strongest safe criterion (or set of criteria) to delay or avoid materializing non-copy-free DUP payloads in compiled mode?
 - Specifically, which DP0/DP1 usage patterns guarantee we can transform or postpone duplication without violating linearity and exact DUP/SUP interaction behavior?
 
+2) OP2 lowering policy for compiled strict paths (SUP/INC boundary)
+
+Context:
+- Round 24 changed demanded OP2 emission to force/fold strict `ERA/NUM` cases in compiled mode (when `STEPS_ITRS_LIM==0`), which removed a large `TERM_OP2` chunk on `ray_sphere`.
+- Current fast path still leaves unresolved OP2 in non-`NUM` cases by emitting `term_new_op2(...)` (often with lazy RHS capture), instead of eagerly applying `OP2-SUP` / `OP2-INC-*` interactions.
+- This choice is conservative, but `mat_mul` still shows very high `TERM_OP2`, suggesting we may need broader OP2 lowering to make real progress.
+
+Question:
+- For the case-tree AOT subset, should compiled OP2 lowering eagerly encode `OP2-SUP` / `OP2-INC-*` interactions (when tags are known after strict forcing), or is deferring to later WNF intentionally preferable for invariants/perf?
+- If eager lowering is acceptable, what guardrails are required so we do not perturb sharing/linearity behavior in DUP-heavy programs?
