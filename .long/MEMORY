@@ -1,63 +1,56 @@
-Round 15 (2026-02-27)
+Round 16 (2026-02-27)
 
 What landed
 - Files changed:
   - `clang/aot/_.c`
   - `clang/aot/emit.c`
-- Expression-mode OP2 is structural again (no eager strict eval):
-  - `emit.c` `head=0` `case OP2` now recursively emits lhs/rhs with `aot_emit_node(..., head=0)`.
-  - It then builds `term_new_op2(opr, lhs, rhs)`.
-  - Removed unconditional ALO captures for both OP2 operands in expression mode.
-- Raised environment cap:
-  - `AOT_ENV_CAP: 16 -> 64`.
-  - This removes the previous `HEAD_DUP_ENV_CAP` hotspot on `nqueens`.
-- Strict forcing loop hardening:
-  - `aot_force_strict` no longer exits early on `term == prev` for WHNF-forced tags.
-  - It is now fuel-driven for `APP/ALO/REF/OP2/USE`; DP path still exits if `aot_force_dup` makes no progress.
+- Added runtime observed-term telemetry for strict MAT mismatch sites:
+  - New per-site fields: `got_valid`, `got_tag`, `got_ext`.
+  - New helper: `aot_deopt_site_observe_term(site, got)`.
+  - `HEAD_MAT_NON_CTR` top-site output now includes observed runtime term (`got_tag/got_ext`).
+  - Added global histogram dump for `HEAD_MAT_NON_CTR` observed tags.
+- Emitter change for head MAT mismatch:
+  - Head `MAT` fallback now emits `aot_deopt_site_observe_term(site, arg)` before fallback ALO.
+  - Keeps existing site metadata (`kind=HEAD_MAT_NON_CTR`, `expect_ctr_ext`).
+- Strict DP forcing fix:
+  - `aot_force_dup` now accepts `(term, stack_top, *progress)`.
+  - On unknown/non-WNF DUP payloads, it restores payload, locally WHNF-forces once via `aot_force_whnf_local`, writes back if changed, marks progress, and lets caller retry.
+  - `aot_force_strict` now retries DP forcing when progress happened even if outer term is still DP.
+
+Why this mattered
+- Telemetry showed `HEAD_MAT_NON_CTR` was not SUP-driven; it was DP survivors:
+  - `mat_mul`: `got_tag=DP1`, `got_ext=131076/131079` at top sites.
+  - `ray_sphere`: `got_tag=DP1`, `got_ext=131084`.
+- This indicated incomplete strict scrutinee forcing across DUP indirections, not primarily missing MAT-over-SUP.
 
 Validation
-- Rebuild: `cd clang && clang -O2 -o main main.c`
-- Full suite: `./test/_all_.sh` -> all pass (interpreted + AOT).
-- Result parity spot checks (`--as-c -s`) pass:
+- Build: `cd clang && clang -O2 -o main main.c`.
+- Full suite: `./test/_all_.sh` => all pass.
+- Sequential parity spot checks (`--as-c -s`) still match:
   - `gab_tak` = 56
   - `gab_takl` = 259
   - `mat_mul` = 113238912
   - `ray_sphere` = 4011084840
   - `nqueens` = 1380080
 
-Deopt/resid telemetry (`HVM_AOT_DEOPT=1`, `--as-c -s`)
-- `gab_tak`: deopt 0, resid 4
-- `gab_takl`: deopt 0, resid 4
-- `mat_mul`:
-  - deopt 4,521,088 (all `HEAD_MAT_NON_CTR`)
-  - resid 87,571 (`EXPR_APP_ARG_CAPTURE` + 3 ctor-field captures)
-  - major change vs previous round: OP2 residual flood disappeared.
-- `ray_sphere`:
-  - deopt 1,009,200 (all `HEAD_MAT_NON_CTR`)
-  - resid 11,103,520 (almost entirely `EXPR_APP_ARG_CAPTURE`)
-- `nqueens`:
-  - deopt 0 (previous hard `HEAD_DUP_ENV_CAP` eliminated)
-  - resid 7,144,921 (all `EXPR_APP_ARG_CAPTURE`)
+Telemetry deltas (`HVM_AOT_DEOPT=1 --as-c -s`)
+- Before this round (from previous memory):
+  - `mat_mul`: deopt 4,521,088 (`HEAD_MAT_NON_CTR`)
+  - `ray_sphere`: deopt 1,009,200 (`HEAD_MAT_NON_CTR`)
+- After this round:
+  - `mat_mul`: `AOT_DEOPT total=0`; `AOT_RESID total=174,099` (`EXPR_APP_ARG_CAPTURE` 174,096 + ctor-field 3)
+  - `ray_sphere`: `AOT_DEOPT total=0`; `AOT_RESID total=13,121,920` (all `EXPR_APP_ARG_CAPTURE`)
+- `gab_tak` / `gab_takl` remained `AOT_DEOPT total=0`, `AOT_RESID total=4`.
 
-Timing spot checks (single-run local, wall clock)
-- `gab_takl`: hvmi ~1.81s, hvmc-bin ~1.94s
-- `mat_mul`: hvmi ~1.61s, hvmc-bin ~1.44s
-- `nqueens`: hvmi ~1.49s, hvmc-bin ~0.90s
-- `ray_sphere`: hvmi ~1.63s, hvmc-bin ~1.46s
-(Still far from admission target; only modest speedups.)
+Operational lessons
+- `--as-c` is not parallel-safe in this repo/tooling path: concurrent runs race on `/tmp/hvm4-aot-as-c.main.c` and can produce fake compile errors.
+- Use sequential `--as-c` runs for telemetry/parity.
 
-Key insights now
-- OP2 structural expression emission was high ROI: removed the massive OP2 residualization introduced previously.
-- `AOT_ENV_CAP=64` is enough to clear current `nqueens` hard deopts.
-- Dominant remaining hard deopt is still strict MAT mismatch (`HEAD_MAT_NON_CTR`).
-- Dominant residual class is now `EXPR_APP_ARG_CAPTURE`, especially in `ray_sphere`/`nqueens`.
-
-Operational notes
-- For bench harness, set absolute `HVM_CMD` path, e.g.:
-  - `HVM_CMD=/Users/v/t/dev/hvm-ai-aot/clang/main`
-  Relative `./clang/main` fails when `bench.ts` runs from its own repo root.
+Current bottleneck picture
+- Hard deopts on key canaries (`mat_mul`, `ray_sphere`) are now eliminated.
+- Dominant overhead shifted further to residual APP arg captures (`EXPR_APP_ARG_CAPTURE`).
 
 Next likely steps
-1. Instrument `HEAD_MAT_NON_CTR` with runtime observed `got_tag` (and maybe `got_ext`) to distinguish topology mismatches vs incomplete forcing.
-2. Based on tags, decide whether to implement compiled MAT/SWI distribution over SUP (or keep deopt boundary intentionally).
-3. Reduce `EXPR_APP_ARG_CAPTURE` by structurally emitting more APP args where semantics allow (instead of unconditional ALO capture).
+1. Reduce `EXPR_APP_ARG_CAPTURE` volume in expression APP (`fun_tag != LAM`) via structural arg emission policy (possibly guarded by size/tag heuristic).
+2. Revisit compiled-call gating in `aot_force_whnf_local` (`AOT_TRY_CALL_ENABLED=0`) to improve hot-path retention without reintroducing mismatch regressions.
+3. Add compiled-vs-interpreted interaction accounting to track true compiled coverage, not just deopt/resid counts.

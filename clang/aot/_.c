@@ -100,6 +100,10 @@ static u8  AOT_DEOPT_SITE_REASONS[AOT_DEOPT_SITE_CAP] = {0};
 static u8  AOT_DEOPT_SITE_KINDS[AOT_DEOPT_SITE_CAP] = {0};
 static u64 AOT_DEOPT_SITE_LOCS[AOT_DEOPT_SITE_CAP] = {0};
 static u32 AOT_DEOPT_SITE_AUX[AOT_DEOPT_SITE_CAP] = {0};
+static u8  AOT_DEOPT_SITE_GOT_VALID[AOT_DEOPT_SITE_CAP] = {0};
+static u8  AOT_DEOPT_SITE_GOT_TAG[AOT_DEOPT_SITE_CAP] = {0};
+static u32 AOT_DEOPT_SITE_GOT_EXT[AOT_DEOPT_SITE_CAP] = {0};
+static u64 AOT_DEOPT_MAT_GOT_TAG_COUNTS[TAG_MASK + 1] = {0};
 static u64 AOT_DEOPT_SITE_OVERFLOW = 0;
 static u64 AOT_RESID_SITE_OVERFLOW = 0;
 
@@ -282,6 +286,28 @@ fn void aot_deopt_site_define(u32 site, u32 kind, u64 loc, u32 aux) {
   __atomic_store_n(&AOT_DEOPT_SITE_AUX[site], aux, __ATOMIC_RELAXED);
 }
 
+// Records one runtime observed term for one strict deopt site.
+fn void aot_deopt_site_observe_term(u32 site, Term got) {
+  if (!aot_deopt_enabled()) {
+    return;
+  }
+  if (site >= AOT_DEOPT_SITE_CAP) {
+    return;
+  }
+
+  u8  tag = term_tag(got);
+  u32 ext = term_ext(got);
+
+  __atomic_store_n(&AOT_DEOPT_SITE_GOT_TAG[site], tag, __ATOMIC_RELAXED);
+  __atomic_store_n(&AOT_DEOPT_SITE_GOT_EXT[site], ext, __ATOMIC_RELAXED);
+  __atomic_store_n(&AOT_DEOPT_SITE_GOT_VALID[site], 1, __ATOMIC_RELAXED);
+
+  u32 kind = __atomic_load_n(&AOT_DEOPT_SITE_KINDS[site], __ATOMIC_RELAXED);
+  if (kind == AOT_DEOPT_SITE_KIND_HEAD_MAT_NON_CTR && tag <= TAG_MASK) {
+    __atomic_fetch_add(&AOT_DEOPT_MAT_GOT_TAG_COUNTS[tag], 1, __ATOMIC_RELAXED);
+  }
+}
+
 // Inserts one (site,hits) pair into descending top-k buffers.
 fn void aot_deopt_top_insert(u32 site, u64 hits, u32 *top_sites, u64 *top_hits) {
   for (u32 i = 0; i < AOT_DEOPT_TOP_K; i++) {
@@ -318,6 +344,30 @@ fn void aot_deopt_dump_reasons(FILE *f, const char *prefix, const u64 *counts) {
   }
 }
 
+// Prints runtime observed-tag histogram for HEAD_MAT_NON_CTR sites.
+fn void aot_deopt_dump_head_mat_tags(FILE *f, const char *prefix) {
+  u64 total = 0;
+  for (u32 tag = 0; tag <= TAG_MASK; tag++) {
+    total += __atomic_load_n(&AOT_DEOPT_MAT_GOT_TAG_COUNTS[tag], __ATOMIC_RELAXED);
+  }
+  if (total == 0) {
+    return;
+  }
+
+  fprintf(f, "%s head_mat_non_ctr_got_tags total=%llu\n", prefix, (unsigned long long)total);
+  for (u32 tag = 0; tag <= TAG_MASK; tag++) {
+    u64 hits = __atomic_load_n(&AOT_DEOPT_MAT_GOT_TAG_COUNTS[tag], __ATOMIC_RELAXED);
+    if (hits == 0) {
+      continue;
+    }
+    fprintf(f, "%s head_mat_non_ctr got_tag=%s(%u) hits=%llu\n",
+      prefix,
+      aot_term_tag_name(tag),
+      tag,
+      (unsigned long long)hits);
+  }
+}
+
 // Prints top emission sites for one telemetry stream.
 fn void aot_deopt_dump_top_sites(FILE *f, const char *prefix, const u64 *site_counts) {
   u32 top_sites[AOT_DEOPT_TOP_K] = {0};
@@ -344,6 +394,9 @@ fn void aot_deopt_dump_top_sites(FILE *f, const char *prefix, const u64 *site_co
     u32 kind   = __atomic_load_n(&AOT_DEOPT_SITE_KINDS[site], __ATOMIC_RELAXED);
     u64 loc    = __atomic_load_n(&AOT_DEOPT_SITE_LOCS[site], __ATOMIC_RELAXED);
     u32 aux    = __atomic_load_n(&AOT_DEOPT_SITE_AUX[site], __ATOMIC_RELAXED);
+    u32 got_ok = __atomic_load_n(&AOT_DEOPT_SITE_GOT_VALID[site], __ATOMIC_RELAXED);
+    u32 got_tag = __atomic_load_n(&AOT_DEOPT_SITE_GOT_TAG[site], __ATOMIC_RELAXED);
+    u32 got_ext = __atomic_load_n(&AOT_DEOPT_SITE_GOT_EXT[site], __ATOMIC_RELAXED);
 
     fprintf(f, "%s site[%u] hits=%llu reason=%s", prefix, site, (unsigned long long)top_hits[i], aot_deopt_reason_name(reason));
     if (kind != AOT_DEOPT_SITE_KIND_NONE || loc != 0 || aux != 0) {
@@ -352,6 +405,9 @@ fn void aot_deopt_dump_top_sites(FILE *f, const char *prefix, const u64 *site_co
         fprintf(f, " expect_num=%u", aux);
       } else if (kind == AOT_DEOPT_SITE_KIND_HEAD_MAT_NON_CTR) {
         fprintf(f, " expect_ctr_ext=%u", aux);
+        if (got_ok) {
+          fprintf(f, " got_tag=%s(%u) got_ext=%u", aot_term_tag_name(got_tag), got_tag, got_ext);
+        }
       } else if (kind == AOT_DEOPT_SITE_KIND_EXPR_UNSUPPORTED_TAG) {
         u32 expr_tag = aot_deopt_aux_unpack_tag(aux);
         u32 expr_ext = aot_deopt_aux_unpack_ext(aux);
@@ -375,6 +431,7 @@ fn void aot_deopt_dump(FILE *f) {
   if (deopt_total != 0) {
     aot_deopt_dump_reasons(f, "AOT_DEOPT", AOT_DEOPT_REASON_COUNTS);
     aot_deopt_dump_top_sites(f, "AOT_DEOPT", AOT_DEOPT_SITE_COUNTS);
+    aot_deopt_dump_head_mat_tags(f, "AOT_DEOPT");
     u64 overflow = __atomic_load_n(&AOT_DEOPT_SITE_OVERFLOW, __ATOMIC_RELAXED);
     if (overflow != 0) {
       fprintf(f, "AOT_DEOPT site_overflow=%llu cap=%u\n", (unsigned long long)overflow, AOT_DEOPT_SITE_CAP);
@@ -453,8 +510,12 @@ fn Term aot_force_whnf_local(Term term, u32 stack_top) {
 }
 
 // Tries bounded conservative DP forcing for a strict AOT scrutinee.
-// Unknown payloads are restored and returned unchanged.
-fn Term aot_force_dup(Term term) {
+// Unknown payloads are locally WHNF-forced once and then retried by caller.
+fn Term aot_force_dup(Term term, u32 stack_top, int *progress) {
+  if (progress != NULL) {
+    *progress = 0;
+  }
+
   for (u32 fuel = AOT_FORCE_DUP_FUEL; fuel > 0; --fuel) {
     u8 tm_tag = term_tag(term);
     if (tm_tag != DP0 && tm_tag != DP1) {
@@ -470,6 +531,9 @@ fn Term aot_force_dup(Term term) {
       Term val = term_sub_set(cell, 0);
       heap_set_rel(loc, cell);
       term = val;
+      if (progress != NULL) {
+        *progress = 1;
+      }
       continue;
     }
 
@@ -504,13 +568,23 @@ fn Term aot_force_dup(Term term) {
         break;
       }
       default: {
-        // Unknown/non-WNF payloads are left untouched so compiled code can deopt.
+        // Unknown/non-WNF payloads are forced once, then retried by caller fuel.
         heap_set_rel(loc, cell);
+        Term forced = aot_force_whnf_local(cell, stack_top);
+        if (forced != cell) {
+          heap_set_rel(loc, forced);
+          if (progress != NULL) {
+            *progress = 1;
+          }
+        }
         return term;
       }
     }
 
     term = next;
+    if (progress != NULL) {
+      *progress = 1;
+    }
   }
   return term;
 }
@@ -520,8 +594,9 @@ fn Term aot_force_strict(Term term, u32 stack_top) {
   for (u32 fuel = AOT_FORCE_STRICT_FUEL; fuel > 0; --fuel) {
     u8 tag = term_tag(term);
     if (tag == DP0 || tag == DP1) {
-      Term next = aot_force_dup(term);
-      if (next == term) {
+      int progress = 0;
+      Term next = aot_force_dup(term, stack_top, &progress);
+      if (!progress && next == term) {
         return term;
       }
       term = next;

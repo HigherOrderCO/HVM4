@@ -399,7 +399,12 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         fprintf(f, "%sheap_set_rel(%s + 1, %s);\n", pad, app, arg);
         fprintf(f, "%su8 %s = term_tag(%s);\n", pad, tag_n, arg);
         fprintf(f, "%sif (%s < C00 || %s > C16) {\n", pad, tag_n, tag_n);
-        aot_emit_ret_fallback_loc_meta(f, loc, dep, AOT_DEOPT_EXPR_UNSUPPORTED_TAG, AOT_DEOPT_SITE_KIND_HEAD_MAT_NON_CTR, term_ext(term), pad1);
+        u32 site = AOT_EMIT_DEOPT_SITE++;
+        aot_emit_deopt_site_note(site, AOT_DEOPT_SITE_KIND_HEAD_MAT_NON_CTR, loc, term_ext(term));
+        fprintf(f, "%saot_deopt_site_observe_term(%u, %s);\n", pad1, site, arg);
+        fprintf(f, "%sreturn aot_fallback_alo(%lluULL, %u, ", pad1, (unsigned long long)loc, dep);
+        aot_emit_env_head(f, dep);
+        fprintf(f, ", %u, %u);\n", AOT_DEOPT_EXPR_UNSUPPORTED_TAG, site);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%sif (term_ext(%s) == %u) {\n", pad, arg, term_ext(term));
         fprintf(f, "%s(*s_pos)--;\n", pad1);

@@ -1,27 +1,25 @@
-1) Strict MAT/SWI on SUP in compiled mode: intended boundary or missing interaction?
+1) Strict MAT scrutinee forcing across DUP: what is the semantic boundary for compiled mode?
 
 Context:
-- After this round, `HEAD_DUP_ENV_CAP` is gone (`AOT_ENV_CAP=64`), and OP2 residual flood is gone (expression OP2 is structural again).
-- Remaining hard deopts on key programs are almost entirely strict MAT mismatch:
-  - `mat_mul`: `AOT_DEOPT=4,521,088`, top kind `HEAD_MAT_NON_CTR`
-  - `ray_sphere`: `AOT_DEOPT=1,009,200`, top kind `HEAD_MAT_NON_CTR`
-- In both cases, compiled head MAT does `aot_force_strict` before deopting. So these are terms that still WHNF to non-constructor at that point.
+- We instrumented `HEAD_MAT_NON_CTR` with runtime observed scrutinee tags (`got_tag/got_ext`) and found the dominant mismatch was `DP1`, not `SUP`.
+  - `mat_mul` mismatches were `got_tag=DP1`, `got_ext=131076/131079`.
+  - `ray_sphere` mismatches were `got_tag=DP1`, `got_ext=131084`.
+- We then changed strict forcing (`aot_force_dup`) so that when DUP payload is unknown/non-WNF, we locally WHNF-force the payload once (`aot_force_whnf_local`), write it back, and retry. This removed hard deopts on these workloads (`AOT_DEOPT total=0`).
 
 Question:
-- In HVM semantics, when strict MAT/SWI scrutinee WHNFs to `SUP` (or another non-CTR/NUM topology), should compiled mode implement distribution/interaction (e.g. MAT-over-SUP / SWI-over-SUP) and stay compiled, or is deopt-to-ALO the intended semantic boundary?
-- If distribution is the intended path, which minimal interaction set should be prioritized first to unblock these workloads?
+- Is this forcing strategy semantically aligned with HVM’s intended strict eliminator behavior over DUP-linked scrutinees, or should compiled mode instead implement a more direct DUP-eliminator interaction path for strict MAT/SWI (rather than iterative local WHNF forcing)?
+- In other words: is “force DUP payload then retry” the right long-term model, or just a stopgap that might violate expected sharing/laziness invariants in edge cases?
 
-2) `EXPR_APP_ARG_CAPTURE` dominates residuals: is structural arg emission valid here?
+2) Reducing `EXPR_APP_ARG_CAPTURE`: should expression APP args be structural by default?
 
 Context:
-- Hard deopts dropped, but residuals are now dominated by `EXPR_APP_ARG_CAPTURE`:
-  - `ray_sphere`: `AOT_RESID=11,103,520` (mostly app-arg captures)
-  - `nqueens`: `AOT_RESID=7,144,921` (all app-arg captures)
+- After eliminating hard deopts on `mat_mul` and `ray_sphere`, dominant residual overhead is now `EXPR_APP_ARG_CAPTURE`.
 - Current expression APP lowering for `fun_tag != LAM` is:
-  - emit function structurally (`aot_emit_node(..., head=0)`)
-  - capture arg lazily via ALO
-  - build `term_new_app(fun,arg)`
+  - structural fun emission,
+  - lazy arg ALO capture,
+  - `term_new_app(fun,arg)`.
+- This preserves laziness but leaves millions of residual captures (`ray_sphere` now ~13.1M residual APP arg captures).
 
 Question:
-- Is it semantically safe (and desirable) to recursively emit the APP argument structurally in this branch (`aot_emit_node(arg, head=0)`) instead of ALO-capturing it, relying on expression-mode laziness to preserve behavior?
-- Are there invariants around sharing/substitution/sub-bit usage that require ALO capture for app arguments in this case?
+- Is it semantically safe and preferred to emit APP args structurally (`aot_emit_node(arg, head=0)`) by default in this branch, relying on expression-mode non-strictness?
+- If yes, do we have recommended guardrails (e.g. static-size threshold, tag whitelist, or per-def budget) to avoid pathological code-size growth while still reducing interpreter re-entry?
