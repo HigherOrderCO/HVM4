@@ -611,13 +611,21 @@ fn Term aot_reapply(Term head, u16 argc, const Term *args, u16 from) {
 // Returns one copy-free DUP value predicate used by generated code.
 fn int aot_is_copy_free(Term term) {
   u8 tag = term_tag(term);
-  if (tag == NUM) {
-    return 1;
+  switch (tag) {
+    case NUM:
+    case C00:
+    case ERA:
+    case ANY:
+    case NAM:
+    case BJV:
+    case BJ0:
+    case BJ1: {
+      return 1;
+    }
+    default: {
+      return 0;
+    }
   }
-  if (tag == C00) {
-    return 1;
-  }
-  return 0;
 }
 
 // Returns 1 when strict head forcing can expose a new WHNF scrutinee tag.

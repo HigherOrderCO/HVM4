@@ -1,73 +1,73 @@
-Round 17 (2026-02-27)
+Round 18 (2026-02-27)
 
 What landed
 - Files changed:
-  - `clang/aot/_.c`
   - `clang/aot/emit.c`
-- Removed compiled-path APP-frame materialization by introducing a local raw-arg ABI:
-  - `HvmAotFn` now takes `(stack, s_pos, base, a_args, a_pos)`.
-  - `aot_call_ref(...)` forwards local args through compiled->compiled calls.
-  - `aot_try_call(...)` now allocates a local `a_args[AOT_ARG_CAP]` and reifies pending args back to runtime APP frames only at the interpreter boundary.
-  - Added helpers:
-    - `aot_stack_push_arg(...)`
-    - `aot_stack_reify_args(...)`
-- Emitter (`emit.c`) now lowers head-position args to local arg stack:
-  - head `APP`: pushes arg into `a_args` instead of `aot_alloc(...APP_FRAME_HEAD)`.
-  - head `LAM`: consumes from `a_args` first, then falls back to runtime stack APP frames.
-  - head `SWI`: peeks/forces from `a_args` first; writes back forced arg into `a_args` slot.
-  - head `MAT`: peeks/forces from `a_args` first; on matched branch pushes ctor fields into `a_args` (no APP-frame heap alloc).
-  - head `REF`: calls `aot_call_ref(id, stack, s_pos, base, a_args, a_pos)`.
-  - Generated function signature updated accordingly.
-- Reduced env bind-list allocation pressure:
-  - `aot_env_get(...)` no longer calls `aot_env_head(...)` for prefix materialization.
-  - It now lazily allocates only the requested slot when missing.
-  - `aot_env_head(...)` remains for deopt/fallback list construction/rewiring.
+  - `clang/aot/_.c`
+- Goal of this round: reduce `DUP_CELL` allocations without changing deopt behavior.
+
+Emitter/runtime changes
+1) DUP binder lowering now avoids heap cell allocation for copy-free values:
+- In both head and expression DUP lowering, the old unconditional:
+  - `e = aot_alloc(2, AOT_ALLOC_DUP_CELL)`
+  - `heap_set(e+0, ...)`
+  - `env_locs[dep] = e`
+  was replaced by:
+  - if `aot_is_copy_free(x)`:
+    - `env_cells[dep] = term_sub_set(x, 1)`
+    - `env_locs[dep] = 0`
+  - else: allocate/write DUP cell exactly as before.
+
+2) DP0/DP1 expression lowering now checks local env slot before materializing bind cell:
+- Old path always called `aot_env_get(...)` then read `heap_read(loc+0)`.
+- New path:
+  - `loc = env_locs[idx]`
+  - if `loc != 0`: read heap cell
+  - else: read `env_cells[idx]`
+  - if SUB bit set: return substituted value directly
+  - else: materialize with `aot_env_get(...)` and emit `DP0/DP1` node.
+- This removes allocation for copy-free DUP values that never needed a real dup cell.
+
+3) Broadened runtime copy-free predicate:
+- `aot_is_copy_free` now returns true for `NUM`, `C00`, `ERA`, `ANY`, `NAM`, `BJV`, `BJ0`, `BJ1`.
+- This aligns with tags that already duplicate by substitution-only paths (`DUP-NAM` or arity-0 node behavior).
 
 Why
-- Round 16 telemetry showed massive allocation in `APP_FRAME_*` and `ENV_BIND` despite near-zero deopts.
-- The compiled evaluator was still emulating runtime APP/env structures eagerly.
-- This round moves compiled execution toward register/local-array argument passing, with heap representation only at boundary crossings.
+- After Round 17, explicit compiled allocations were heavily dominated by `DUP_CELL`.
+- We already had a substitution representation (`term_sub_set`) for copy-free DUP payloads; this round avoids paying cell allocation when DP consumers can read that substitution directly.
 
 Validation
 - Build: `cd clang && clang -O2 -o main main.c`.
-- Tests:
-  - Full `./test/_all_.sh` run logged to `/tmp/hvm_all_round17.log`.
-  - Exit code `0`; tail confirms `All tests passed!`.
-- Canary telemetry (`HVM_AOT_DEOPT=1 HVM_AOT_ALLOC=1 --as-c -s -T1`):
-  - `gab_deriv`: deopt/resid `0/1` (`EXPR_CTR_FIELD_CAPTURE`), result `16400000`
-    - `AOT_ALLOC total_calls=1 total_nodes=1` (`CTR_FIELDS` only)
-    - time `1.442s` (was `1.502s` in Round 16)
-  - `gab_takl`: deopt/resid `0/3` (`EXPR_APP_ARG_CAPTURE`), result `259`
-    - `AOT_ALLOC total_calls=0 total_nodes=0`
-    - time `1.676s` (was `1.854s`)
-  - `mat_mul`: deopt/resid `0/3` (`EXPR_CTR_FIELD_CAPTURE`), result `113238912`
-    - `AOT_ALLOC total_calls=18,128,243 total_nodes=36,256,483`
-    - class mix: `DUP_CELL` 18,128,240; `CTR_FIELDS` 3
-    - time `0.589s` (was `0.975s`)
-  - `ray_sphere`: deopt/resid `0/0`, result `4011084840`
-    - `AOT_ALLOC total_calls=13,458,320 total_nodes=26,916,640` (`DUP_CELL` only)
-    - time `0.976s` (was `1.260s`)
-  - `nqueens`: deopt/resid `0/0`, result `1380080`
-    - `AOT_ALLOC total_calls=19,354,763 total_nodes=38,709,526` (`DUP_CELL` only)
-    - time `0.496s` (was `0.886s`)
-  - `edit_dist`: deopt/resid `0/0`, result `1962522748`
-    - `AOT_ALLOC total_calls=25,632 total_nodes=51,264` (`DUP_CELL` only)
-    - time `1.683s` (was `1.795s`)
+- Full tests: `./test/_all_.sh` passed.
+- Canary parity (`HVM_AOT_DEOPT=1 HVM_AOT_ALLOC=1 --as-c -s -T1`), same results/deopt profile:
+  - `gab_deriv`: deopt/resid `0/1`, result `16400000`, `alloc=1`, time `1.486s`
+  - `gab_takl`: deopt/resid `0/3`, result `259`, `alloc=0`, time `1.701s`
+  - `mat_mul`: deopt/resid `0/3`, result `113238912`, `alloc=18,127,824`, time `0.605s`
+  - `ray_sphere`: deopt/resid `0/0`, result `4011084840`, `alloc=8,746,980`, time `0.987s`
+  - `nqueens`: deopt/resid `0/0`, result `1380080`, `alloc=19,354,685`, time `0.521s`
+  - `edit_dist`: deopt/resid `0/0`, result `1962522748`, `alloc=25,542`, time `1.653s`
 
-Key insight (updated)
-- APP/env materialization was indeed a dominant bottleneck on many kernels; removing it yields substantial speedups and large allocation drops.
-- After this change, explicit compiled-site allocation is often dominated by `DUP_CELL`.
-- `edit_dist` still shows huge total heap vs tiny `AOT_ALLOC`, confirming substantial allocation outside currently attributed AOT sites (likely generic runtime interactions/forcing paths).
+Delta vs Round 17 canaries
+- `mat_mul`: `18,128,243 -> 18,127,824` (`-419` calls)
+- `ray_sphere`: `13,458,320 -> 8,746,980` (`-4,711,340`, about `-35%`)
+- `nqueens`: `19,354,763 -> 19,354,685` (`-78`)
+- `edit_dist`: `25,632 -> 25,542` (`-90`)
+- Deopt/resid unchanged.
 
-Known invariants preserved
-- Deopt and residual semantics remain stable on canaries.
-- `AOT_DEOPT_CALL_DEPTH_CAP` behavior unchanged.
-- Self-tail loop logic still works with shared `a_args/a_pos` ABI.
+Important observations
+- The optimization is semantically safe under current tests and deopt telemetry.
+- Gains are workload-dependent: very large alloc drop on `ray_sphere`, minimal on `mat_mul`/`nqueens`.
+- Broadening copy-free tags beyond `NUM/C00` did not change these canary counters, implying most hit cases here were already `NUM/C00`-like.
+- `edit_dist` still has huge total heap (`~377M`) with tiny `AOT_ALLOC` (`~51k nodes`), so most allocation remains outside currently instrumented explicit AOT sites.
 
 Next steps
-1) Add compiled-context allocation attribution at allocator boundary:
-   - thread-local `AOT_IN_COMPILED` set/unset on compiled entry/exit,
-   - count all `heap_alloc` while in compiled context (optionally by size bucket/class heuristic).
-2) Investigate remaining `DUP_CELL` dominance:
-   - identify when DUP cells are semantically unavoidable vs candidates for compiled-path scalarization.
-3) Revisit direct call/trampoline for non-self recursion only after allocator attribution confirms remaining bottlenecks.
+1) Add compiled-context heap attribution at allocator boundary.
+- Introduce a thread-local compiled-depth/context flag and classify `heap_alloc` calls while in compiled execution.
+- This should explain the remaining heap gap (`edit_dist` class problem).
+
+2) Continue DUP pressure reduction beyond copy-free values.
+- Identify DUP binders where DP references do not escape compiled context (no fallback boundary crossing) and test register/local scalarization strategies.
+- Keep fallback correctness by materializing only when an escaping path is taken.
+
+3) Revisit non-self recursion/trampoline after allocation attribution.
+- Self-tail loop is already stable; next recursion work should be guided by attribution data rather than assumptions.
