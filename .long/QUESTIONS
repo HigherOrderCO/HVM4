@@ -1,22 +1,14 @@
-1) Safe specialization for nested `DP0/DP1` scrutinees in strict `MAT`
+1) Semantics boundary for MAT-DP probe forcing nested DP payloads
 
 Context:
-- We added a strict-`MAT` probe (`aot_try_mat_dp_ctr_match`) that fast-paths when scrutinee is `DP0/DP1` over a constructor payload.
-- We also added an ext-mismatch shortcut (direct branch-1) and validated semantics/test correctness.
-- Current telemetry still shows the dominant miss source is `non_ctr_pre[tag=3/4]` (payload is another `DP0/DP1`):
-  - `gab_takl`: `non_ctr_pre[tag=3]=23,001,425`, `[tag=4]=9,940,280`
-  - `mat_mul`: `non_ctr_pre[tag=3]=9,041,967`, `[tag=4]=43,472`
-- This implies nested DUP projections are blocking MAT fast path and still driving `WNF_DUP_NOD`.
-
-Goal:
-- Add a bounded probe specialization that can look through `DP`-over-`DP` payload chains and still decide MAT branch / project fields lazily when safe.
+- In Round 30, we changed strict-MAT DP probing so `aot_try_mat_dp_ctr_match(...)` can locally WHNF-force payloads tagged `DP0/DP1` (via `aot_force_whnf_local`) before deciding probe result.
+- This converted large `non_ctr_pre[tag=3/4]` populations into probe `hits`/`ext_miss` and substantially reduced `WNF_DUP_NOD` on `gab_takl`.
+- Current approach still relies on full `wnf` for that payload force step; we did not implement explicit DP-on-DP projection composition.
 
 Question:
-- Under IC semantics, is it sound to compose nested projections without materializing intermediate side terms?
-- Concretely, for scrutinee shape `DPs(labA, sideA, locA)` whose payload cell is another `DPt(labB, sideB, locB)` (possibly repeated), can we compute an equivalent final projection descriptor and continue probing/matching constructor payload directly?
+- Is this “local force nested-DP payload once, then probe constructor/ext” strategy semantically safe for all strict-MAT contexts in HVM’s IC runtime model, or only for a subset?
 
-Please clarify invariants we must preserve:
-- Required SUB-bit transitions while traversing nested DUP cells.
-- Whether `heap_take/heap_set` ordering constraints exist for determinism/races (single-threaded AOT path still uses shared heap primitives).
-- Whether there are counterexamples where DP composition changes observable behavior (e.g., interaction counts allowed to differ, but term/linearity must remain identical).
-- If composition is valid only for a subset, which tag/configuration boundaries should force fallback immediately.
+Please clarify with concrete invariants/counterexamples:
+- Which heap-state mutations on DUP cells (SUB-bit transitions and `heap_take`/`heap_set_rel` ordering) are required to preserve linearity when probing this way.
+- Whether probe-time forcing may accidentally alter observable behavior in corner cases (other than interaction count differences), e.g. when the sibling projection is later demanded.
+- If not universally safe, what syntactic/runtime preconditions must hold before enabling this optimization.

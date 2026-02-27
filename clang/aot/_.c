@@ -990,6 +990,8 @@ fn int aot_try_mat_dp_ctr_match(Term term, u32 ctr_ext, u32 stack_top, u8 *side_
 // Returns 1 when strict head forcing can expose a new WHNF scrutinee tag.
 fn int aot_can_force_strict_tag(u8 tag) {
   switch (tag) {
+    case DP0:
+    case DP1:
     case APP:
     case ALO:
     case REF: {
