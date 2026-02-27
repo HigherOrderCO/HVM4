@@ -1,92 +1,93 @@
-Round 19 (2026-02-27)
+Round 20 (2026-02-27)
 
 What landed
 - Files changed:
-  - `clang/aot/_.c`
-  - `clang/heap/alloc.c`
-  - `clang/runtime/eval_main.c`
-- Goal of this round: attribute global heap allocation traffic caused during compiled execution, not just explicit `aot_alloc(...)` sites.
+  - `clang/aot/emit.c`
+- Goal of this round: start eliminating expression-position APP churn by lowering strict-safe `APP* -> REF` spines to direct compiled calls.
 
-Runtime/instrumentation changes
-1) Added global compiled-context heap attribution (`HVM_AOT_HEAP_ATTR`):
-- New TLS compiled-depth marker:
-  - `AOT_HEAP_COMPILED_DEPTH`
-  - entered/exited in both compiled dispatch paths:
-    - `aot_call_ref(...)`
-    - `aot_try_call(...)`
-- New accounting hook in allocator boundary:
-  - `heap_alloc(...)` now calls `aot_heap_alloc_note(size)` after successful allocation.
-- New counters in `aot/_.c`:
-  - `AOT_HEAP total_calls/total_nodes`
-  - size histogram buckets:
-    - `1`, `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9-16`, `17+`
-- New dump path in runtime:
-  - `runtime_eval_main(...)` now prints `aot_heap_attr_dump(stderr)`.
+Emitter/runtime behavior changes
+1) Added strict-demand expression helper in emitter:
+- New helpers:
+  - `aot_emit_collect_ref_spine(...)`
+  - `aot_emit_try_demanded_ref_call(...)`
+  - `aot_emit_node_demanded(...)`
+- New lowering rule:
+  - In demanded expression contexts, if the static term is `APP(...APP(REF f, aN)..., a1)`, emit local direct call code:
+    - Build local arg array (`call_args`) in APP-spine order expected by AOT ABI (outer->inner slots).
+    - Evaluate args in original structural order (inner->outer), then store into fixed indexes.
+    - Call `aot_call_ref(f, stack, s_pos, call_base=*s_pos, call_args, &call_pos)`.
+    - Rebuild residual APPs from remaining args in reverse index order (`j = call_pos .. 1`) so term shape matches interpreter APP discipline exactly.
+- Safety guard:
+  - The fast path is emitted under `if (STEPS_ITRS_LIM == 0)`.
+  - Else branch falls back to existing structural emission for identical step-by-step behavior.
 
-2) Existing explicit AOT site telemetry remains unchanged:
-- `HVM_AOT_ALLOC` still reports only explicit emitted/wrapper classes (`APP_FRAME_*`, `DUP_CELL`, `CTR_FIELDS`, `ENV_BIND`).
-- New `AOT_HEAP` complements it by covering all `heap_alloc` during compiled context.
+2) Demand-context wiring (kept conservative):
+- Head `OP2` strict operand emission now uses `aot_emit_node_demanded(...)` for lhs/rhs.
+- `aot_emit_node_demanded(...)` also recurses through nested `OP2` terms, so strictness propagates through OP2 trees only.
+- Lazy contexts (constructor fields, generic APP in non-demanded positions, etc.) keep old behavior.
 
 Why this matters
-- It resolves the major observability gap: previous `AOT_ALLOC` undercounted real heap traffic (especially `edit_dist`) because most allocations came from generic runtime constructors/helpers invoked while compiled code was active.
+- Previous telemetry showed compiled-mode heap dominated by size-2 allocations.
+- This change removes APP materialization for a strict-safe subset (OP2-demanded `REF` app spines) while preserving laziness in non-demanded contexts.
+- The call uses isolated base (`call_base=*s_pos`) and local args, preventing accidental consumption of caller-owned runtime APP frames.
 
 Validation
-- Build: `cd clang && clang -O2 -o main main.c`
+- Build: `cd clang && clang -O2 -o main main.c`.
 - Full tests: `./test/_all_.sh` passed.
-- Canary parity (`HVM_AOT_DEOPT=1 HVM_AOT_ALLOC=1 HVM_AOT_HEAP_ATTR=1 --as-c -s -T1`) preserved outputs/deopt profile.
+- Canary parity command: `HVM_AOT_DEOPT=1 HVM_AOT_ALLOC=1 HVM_AOT_HEAP_ATTR=1 --as-c -s -T1`.
 
-Canary results (key fields)
+Canary results (current round)
 - `gab_deriv`:
-  - deopt/resid `0/1`, result `16400000`
+  - result `16400000`, deopt/resid `0/1`
   - `AOT_ALLOC total_nodes=1`
-  - `AOT_HEAP total_nodes=388,400,000`
-  - `Heap=388,800,183`
-- `gab_tak`:
-  - deopt/resid `0/0`, result `56`
-  - `AOT_ALLOC total_nodes=150`
-  - `AOT_HEAP total_nodes=157,945`
-  - `Heap=158,219`
+  - `AOT_HEAP total_nodes=167,200,000`
+  - `Heap=167,600,183`
 - `gab_takl`:
-  - deopt/resid `0/3`, result `259`
+  - result `259`, deopt/resid `0/3`
   - `AOT_ALLOC total_nodes=0`
-  - `AOT_HEAP total_nodes=647,079,318`
-  - `Heap=647,080,264`
+  - `AOT_HEAP total_nodes=647,075,444`
+  - `Heap=647,076,390`
 - `mat_mul`:
-  - deopt/resid `0/3`, result `113238912`
+  - result `113238912`, deopt/resid `0/3`
   - `AOT_ALLOC total_nodes=36,255,645`
   - `AOT_HEAP total_nodes=145,024,874`
   - `Heap=145,025,641`
 - `ray_sphere`:
-  - deopt/resid `0/0`, result `4011084840`
+  - result `4011084840`, deopt/resid `0/0`
   - `AOT_ALLOC total_nodes=17,493,960`
   - `AOT_HEAP total_nodes=241,571,185`
   - `Heap=241,571,425`
 - `nqueens`:
-  - deopt/resid `0/0`, result `1380080`
+  - result `1380080`, deopt/resid `0/0`
   - `AOT_ALLOC total_nodes=38,709,370`
   - `AOT_HEAP total_nodes=96,824,342`
   - `Heap=96,824,628`
 - `edit_dist`:
-  - deopt/resid `0/0`, result `1962522748`
+  - result `1962522748`, deopt/resid `0/0`
   - `AOT_ALLOC total_nodes=51,084`
   - `AOT_HEAP total_nodes=377,580,459`
   - `Heap=377,582,825`
 
-Important observations
-- `AOT_HEAP` is now very close to total runtime heap on canaries (difference is tiny), proving most heap traffic is generated while executing compiled code paths, not only at explicit `aot_alloc` sites.
-- `edit_dist` gap is explained: not an attribution bug anymore; the compiled path itself is allocating heavily through generic constructors/helpers (`size=1/2` dominated histogram).
-- Remaining performance work should prioritize reducing expression-level term materialization (especially repeated size-2 node allocation patterns), not further micro-optimizing only explicit `DUP_CELL` counters.
-- `env_locs[idx] == 0` sentinel remains safe with current allocator initialization (`heap_init_slices`: thread 0 starts at 1).
+Observed deltas vs Round 19
+- Big win on `gab_deriv` heap traffic:
+  - `AOT_HEAP total_nodes: 388,400,000 -> 167,200,000` (~57% drop).
+- Most other canaries are effectively unchanged; size-2 pressure remains dominant there.
+- Interpretation: demanded OP2-path lowering works and is semantically stable, but current coverage is too narrow to move the whole suite.
+
+Key lessons
+- Correct residual reconstruction order is critical: leftover args must be reapplied from `a_pos-1` down to `0`.
+- For expression direct calls, `base=*s_pos` isolation avoids stealing caller stack frames and preserves boundary invariants.
+- Preserving old arg evaluation order (inner->outer) avoids subtle env/DUP behavior drift.
 
 Next steps
-1) Increase expression-level compiled lowering coverage.
-- Prioritize direct compiled call lowering for expression-position static `REF` apps to avoid reifying `term_new_app(...)` in hot loops.
-- Keep boundary invariant: any compiled->interpreted boundary must reconstruct stack/app shape exactly as interpreter expects.
+1) Extend demanded-context lowering coverage safely.
+- Thread explicit demand through emitter (instead of OP2-only helper) so strict contexts beyond OP2 can use the same direct-call path.
+- Candidate strict contexts: branch tails already head-compiled; remaining strict scrutinee/primitive sites should be mapped explicitly.
 
-2) Use new `AOT_HEAP` histogram while developing direct-call/app-spine changes.
-- Target reduction in `size=2` dominance on `edit_dist`, `gab_takl`, `ray_sphere`.
-- Keep deopt/resid parity unchanged.
+2) Add low-overhead heap-kind attribution for compiled context.
+- Current histogram is size-only; remaining size-2 hot path may still be mixed APP/DP/OP2/ctor sources.
+- Minimal kind split at allocator callsites would prevent optimizing the wrong source.
 
-3) Then resume recursion architecture work.
-- Self-tail loop is stable.
-- Next recursion milestone remains non-self SCC/trampoline dispatch, but only after expression-lowering reduces heap churn materially.
+3) Keep recursion architecture roadmap.
+- Self-tail loop and demanded direct-call are stable.
+- After broader demand lowering, revisit SCC/non-self tail trampoline.

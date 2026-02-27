@@ -1,22 +1,30 @@
-1) Expression-position direct compiled call wrapper semantics (REF APP chains)
+1) Safe demand propagation boundaries for direct `APP* -> REF` lowering
 
 Context:
-- Round 19 telemetry now shows `AOT_HEAP` almost equals total `Heap` on key canaries (for `edit_dist`, `AOT_HEAP ~377.58M` vs `Heap ~377.58M`), with size-2 allocations dominating.
-- This indicates we are still materializing many APP-like intermediate nodes inside compiled execution, even when `deopt=0` and `resid=0`.
-- Next planned optimization is: in expression mode, when we statically see application of a `REF` head (possibly with an app spine), call compiled code directly with raw args (worker-style) instead of building `term_new_app(...)` chains.
+- Round 20 added a conservative demanded lowering: in strict `OP2` operands, if expression is static `APP*` with `REF` head, we call compiled worker directly with local args and isolated `base=*s_pos`, then rebuild residual APPs from leftover args.
+- This is correct on tests and gives a large heap reduction on `gab_deriv` (~57% fewer `AOT_HEAP` nodes), but most canaries remain unchanged, implying strict-context coverage is still narrow.
+- To avoid changing lazy semantics, we intentionally did not apply this in constructor fields or generic stored/pass-through expressions.
 
 Question:
-- For correctness, is this wrapper strategy valid: call compiled worker with local args; if worker cannot fully consume (missing compiled body/depth cap/fallback), rebuild exactly the residual head+remaining args term before returning?
-- Are there known interaction-net sharing pitfalls where this changes behavior versus building APP nodes first (especially with DUP-bound values that may later force)?
+- Can you define a precise “safe demanded context” checklist for this runtime, beyond OP2, where this lowering is semantically equivalent to building APP nodes then reducing?
+- Specifically, are these safe to mark demanded in compiled emission: `SWI/MAT` scrutinee-producing subexpressions, `DUP` bodies in head paths, strict primitive operands, and immediate-return branch tails that are not currently head-compiled?
+- If any of these are unsafe, please point to the concrete interaction/sharing counterexample pattern (e.g., DUP/SUP timing or lambda capture case).
 
-2) Priority between direct REF-call lowering vs constructor registerization
+2) Dominant source of remaining size-2 allocations in hot canaries
 
 Context:
-- New attribution shows heavy compiled-context allocation in small node sizes, but not which syntactic source dominates.
-- Two candidate reductions are ready:
-  A) direct expression REF-call/app-spine lowering;
-  B) delayed constructor field materialization (registerize `C01..C16` fields until escape boundary).
+- After Round 20, these are still essentially unchanged:
+  - `edit_dist` `AOT_HEAP total_nodes=377,580,459`
+  - `ray_sphere` `AOT_HEAP total_nodes=241,571,185`
+  - `mat_mul` `AOT_HEAP total_nodes=145,024,874`
+- Histograms are still heavily size-2, but current attribution is size-only, not kind-specific.
+- We can add kind attribution, but if domain knowledge already identifies the dominant interaction families, we can prioritize implementation faster.
 
 Question:
-- Given typical HVM case-tree benchmarks (`edit_dist`, `mat_mul`, `nqueens`), which should be prioritized first for maximal speedup per engineering effort?
-- If there is a known ordering dependency (one unlocks/simplifies the other semantically), please point that out.
+- In these workloads, do you expect size-2 allocations to be primarily:
+  A) APP spine materialization,
+  B) DUP/DP cell traffic,
+  C) OP2/equality temporary nodes,
+  D) arity-2 constructor fields,
+  E) another known hotspot?
+- If you can rank likely sources for `edit_dist` vs `mat_mul` specifically, we can sequence the next redesign step with much less instrumentation churn.
