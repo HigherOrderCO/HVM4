@@ -1,62 +1,63 @@
-Round 14 (2026-02-27)
+Round 15 (2026-02-27)
 
-What changed this round (landed)
-- Landed code changes in:
+What landed
+- Files changed:
   - `clang/aot/_.c`
   - `clang/aot/emit.c`
-- Added expression-mode OP2 coverage (head=0 emitter path).
-  - New `case OP2` in expression emission builds `term_new_op2(opr, lhs, rhs)`.
-  - Both operands are captured lazily as ALO terms (no strict eval in expression mode).
-  - Added residual reason `AOT_DEOPT_EXPR_OP2_LHS_CAPTURE` and kept `..._RHS_CAPTURE`.
-  - This converts prior hard `EXPR_UNSUPPORTED_TAG` deopts at OP2 expression sites into `AOT_RESID` captures.
-- Strengthened strict forcing used by compiled SWI/MAT scrutinees.
-  - New limit: `AOT_FORCE_STRICT_FUEL=64`.
-  - `aot_can_force_strict_tag` now includes `OP2` and `USE` (in addition to `APP/ALO/REF`).
-  - `aot_force_strict` is now iterative:
-    - repeatedly handles DP via `aot_force_dup`,
-    - repeatedly WHNF-forces forceable tags via `aot_force_whnf_local`,
-    - exits on no-progress or non-forceable tag.
-  - Head-mode SWI/MAT emission now always calls `aot_force_strict(arg, *s_pos)` and writes back to the APP arg slot; it no longer gates forcing behind a fixed tag pre-check.
+- Expression-mode OP2 is structural again (no eager strict eval):
+  - `emit.c` `head=0` `case OP2` now recursively emits lhs/rhs with `aot_emit_node(..., head=0)`.
+  - It then builds `term_new_op2(opr, lhs, rhs)`.
+  - Removed unconditional ALO captures for both OP2 operands in expression mode.
+- Raised environment cap:
+  - `AOT_ENV_CAP: 16 -> 64`.
+  - This removes the previous `HEAD_DUP_ENV_CAP` hotspot on `nqueens`.
+- Strict forcing loop hardening:
+  - `aot_force_strict` no longer exits early on `term == prev` for WHNF-forced tags.
+  - It is now fuel-driven for `APP/ALO/REF/OP2/USE`; DP path still exits if `aot_force_dup` makes no progress.
 
 Validation
-- Rebuilt: `cd clang && clang -O2 -o main main.c`
-- Full suite passes: `./test/_all_.sh` (interpreted + AOT)
-- Parity checks (result line) pass:
-  - `gab_tak`: `56 == 56`
-  - `gab_takl`: `259 == 259`
-  - `mat_mul`: `113238912 == 113238912`
-  - `ray_sphere`: `4011084840 == 4011084840`
-  - `nqueens`: `1380080 == 1380080`
+- Rebuild: `cd clang && clang -O2 -o main main.c`
+- Full suite: `./test/_all_.sh` -> all pass (interpreted + AOT).
+- Result parity spot checks (`--as-c -s`) pass:
+  - `gab_tak` = 56
+  - `gab_takl` = 259
+  - `mat_mul` = 113238912
+  - `ray_sphere` = 4011084840
+  - `nqueens` = 1380080
 
-Deopt/resid spot checks (`HVM_AOT_DEOPT=1`, serial `--as-c -s`)
-- `gab_tak`: deopt 0, resid 4 (unchanged)
-- `gab_takl`: deopt 0, resid 4 (unchanged)
+Deopt/resid telemetry (`HVM_AOT_DEOPT=1`, `--as-c -s`)
+- `gab_tak`: deopt 0, resid 4
+- `gab_takl`: deopt 0, resid 4
 - `mat_mul`:
-  - deopt `22,584,224 -> 4,521,088` (major drop)
-  - resid `87,571 -> 36,213,843` (expected OP2 captures)
-  - top hard-deopt now `HEAD_MAT_NON_CTR` only
+  - deopt 4,521,088 (all `HEAD_MAT_NON_CTR`)
+  - resid 87,571 (`EXPR_APP_ARG_CAPTURE` + 3 ctor-field captures)
+  - major change vs previous round: OP2 residual flood disappeared.
 - `ray_sphere`:
-  - deopt `9,419,780 -> 1,009,200` (major drop)
-  - resid `11,103,520 -> 27,924,680` (expected OP2 captures)
-  - top hard-deopt now `HEAD_MAT_NON_CTR` only
+  - deopt 1,009,200 (all `HEAD_MAT_NON_CTR`)
+  - resid 11,103,520 (almost entirely `EXPR_APP_ARG_CAPTURE`)
 - `nqueens`:
-  - deopt `4,058,698 -> 1,023,113`
-  - resid `3,052,469 -> 9,123,639` (expected OP2 captures)
-  - remaining hard-deopt is entirely `HEAD_DUP_ENV_CAP` at one hotspot
+  - deopt 0 (previous hard `HEAD_DUP_ENV_CAP` eliminated)
+  - resid 7,144,921 (all `EXPR_APP_ARG_CAPTURE`)
+
+Timing spot checks (single-run local, wall clock)
+- `gab_takl`: hvmi ~1.81s, hvmc-bin ~1.94s
+- `mat_mul`: hvmi ~1.61s, hvmc-bin ~1.44s
+- `nqueens`: hvmi ~1.49s, hvmc-bin ~0.90s
+- `ray_sphere`: hvmi ~1.63s, hvmc-bin ~1.46s
+(Still far from admission target; only modest speedups.)
 
 Key insights now
-- Expression OP2 no longer appears as a dominant hard-deopt class; it is now residualized intentionally.
-- Remaining true-deopt classes are concentrated and actionable:
-  - strict MAT mismatch sites (`HEAD_MAT_NON_CTR`) on `mat_mul`/`ray_sphere`,
-  - env-cap bailout (`HEAD_DUP_ENV_CAP`) on `nqueens`.
-- The strict forcing loop reduced hard deopts substantially without breaking tests/parity.
+- OP2 structural expression emission was high ROI: removed the massive OP2 residualization introduced previously.
+- `AOT_ENV_CAP=64` is enough to clear current `nqueens` hard deopts.
+- Dominant remaining hard deopt is still strict MAT mismatch (`HEAD_MAT_NON_CTR`).
+- Dominant residual class is now `EXPR_APP_ARG_CAPTURE`, especially in `ray_sphere`/`nqueens`.
 
 Operational notes
-- `--as-c` output path remains deterministic: `/tmp/hvm4-aot-as-c.main.c`; benchmark probes should stay serial.
-- No GNU `timeout` on host; use:
-  - `perl -e 'alarm shift; exec @ARGV' <sec> <cmd> ...`
+- For bench harness, set absolute `HVM_CMD` path, e.g.:
+  - `HVM_CMD=/Users/v/t/dev/hvm-ai-aot/clang/main`
+  Relative `./clang/main` fails when `bench.ts` runs from its own repo root.
 
 Next likely steps
-1. Reduce `HEAD_MAT_NON_CTR` further: add stricter continuation in MAT/SWI mismatch paths (explicit full-WHNF fallback contract before deopt).
-2. Remove `HEAD_DUP_ENV_CAP` as a hard bailout path (`nqueens`), likely via higher/per-def env sizing or dynamic env storage.
-3. Revisit expression OP2 lowering strategy (lazy capture vs partial structural emission) only after hard-deopt classes are mostly eliminated.
+1. Instrument `HEAD_MAT_NON_CTR` with runtime observed `got_tag` (and maybe `got_ext`) to distinguish topology mismatches vs incomplete forcing.
+2. Based on tags, decide whether to implement compiled MAT/SWI distribution over SUP (or keep deopt boundary intentionally).
+3. Reduce `EXPR_APP_ARG_CAPTURE` by structurally emitting more APP args where semantics allow (instead of unconditional ALO capture).

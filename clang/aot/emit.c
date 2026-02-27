@@ -568,12 +568,8 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       aot_emit_tmp(lhs_n, sizeof(lhs_n), "lhs", tmp);
       aot_emit_tmp(rhs_n, sizeof(rhs_n), "rhs", tmp);
 
-      fprintf(f, "%sTerm %s = ", pad, lhs_n);
-      aot_emit_alo_expr(f, op2_loc + 0, dep, AOT_DEOPT_EXPR_OP2_LHS_CAPTURE);
-      fprintf(f, ";\n");
-      fprintf(f, "%sTerm %s = ", pad, rhs_n);
-      aot_emit_alo_expr(f, op2_loc + 1, dep, AOT_DEOPT_EXPR_OP2_RHS_CAPTURE);
-      fprintf(f, ";\n");
+      aot_emit_node(f, op2_loc + 0, dep, lhs_n, 0, pad, tmp);
+      aot_emit_node(f, op2_loc + 1, dep, rhs_n, 0, pad, tmp);
       fprintf(f, "%sTerm %s = term_new_op2(%u, %s, %s);\n", pad, out, opr, lhs_n, rhs_n);
       return;
     }

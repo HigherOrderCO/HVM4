@@ -36,7 +36,7 @@ static HvmAotFn AOT_FNS[BOOK_CAP] = {0};
 
 // AOT runtime limits.
 #define AOT_ARG_CAP   64
-#define AOT_ENV_CAP   16
+#define AOT_ENV_CAP   64
 #define AOT_MAX_DEPTH 4096
 #define AOT_TRY_CALL_MAX_DEPTH 1024
 #define AOT_FORCE_DUP_FUEL 32
@@ -518,20 +518,17 @@ fn Term aot_force_dup(Term term) {
 // Tries conservative strict forcing for compiled SWI/MAT scrutinees.
 fn Term aot_force_strict(Term term, u32 stack_top) {
   for (u32 fuel = AOT_FORCE_STRICT_FUEL; fuel > 0; --fuel) {
-    Term prev = term;
     u8 tag = term_tag(term);
     if (tag == DP0 || tag == DP1) {
-      term = aot_force_dup(term);
-      if (term == prev) {
+      Term next = aot_force_dup(term);
+      if (next == term) {
         return term;
       }
+      term = next;
       continue;
     }
     if (aot_can_force_strict_tag(tag)) {
       term = aot_force_whnf_local(term, stack_top);
-      if (term == prev) {
-        return term;
-      }
       continue;
     }
     return term;

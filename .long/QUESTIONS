@@ -1,23 +1,27 @@
-1) Strict MAT/SWI mismatch after full local WHNF: deopt vs inline interaction?
+1) Strict MAT/SWI on SUP in compiled mode: intended boundary or missing interaction?
 
 Context:
-- Current AOT head paths for `SWI`/`MAT` now call iterative `aot_force_strict` (DP forcing + local `wnf` loops for `APP/ALO/REF/OP2/USE`).
-- This reduced hard deopts a lot, but `mat_mul`/`ray_sphere` still have large `HEAD_MAT_NON_CTR` counts.
-- These remaining cases are terms that are still not `C00..C16`/`NUM` after strict forcing in compiled mode.
+- After this round, `HEAD_DUP_ENV_CAP` is gone (`AOT_ENV_CAP=64`), and OP2 residual flood is gone (expression OP2 is structural again).
+- Remaining hard deopts on key programs are almost entirely strict MAT mismatch:
+  - `mat_mul`: `AOT_DEOPT=4,521,088`, top kind `HEAD_MAT_NON_CTR`
+  - `ray_sphere`: `AOT_DEOPT=1,009,200`, top kind `HEAD_MAT_NON_CTR`
+- In both cases, compiled head MAT does `aot_force_strict` before deopting. So these are terms that still WHNF to non-constructor at that point.
 
 Question:
-- When strict scrutinee WHNF is still non-constructor/non-number, do you want compiled code to always deopt to ALO (current behavior), or should we inline the corresponding runtime strict interaction path instead (for example, dispatch to the same logic interpreter MAT/SWI would take on that WHNF tag) and continue compiled execution when possible?
-- In other words: is deopt the intended semantic boundary for strict mismatch, or should compiled mode attempt one more semantic step using runtime interaction helpers before deopting?
+- In HVM semantics, when strict MAT/SWI scrutinee WHNFs to `SUP` (or another non-CTR/NUM topology), should compiled mode implement distribution/interaction (e.g. MAT-over-SUP / SWI-over-SUP) and stay compiled, or is deopt-to-ALO the intended semantic boundary?
+- If distribution is the intended path, which minimal interaction set should be prioritized first to unblock these workloads?
 
-2) `HEAD_DUP_ENV_CAP` elimination strategy: acceptable shape for AOT environment storage?
+2) `EXPR_APP_ARG_CAPTURE` dominates residuals: is structural arg emission valid here?
 
 Context:
-- After OP2 residualization and stricter forcing, `nqueens` hard deopts are now dominated by a single reason/site: `HEAD_DUP_ENV_CAP` (currently `AOT_ENV_CAP=16`).
-- This cap is now the main blocker for true-deopt reduction on that benchmark.
+- Hard deopts dropped, but residuals are now dominated by `EXPR_APP_ARG_CAPTURE`:
+  - `ray_sphere`: `AOT_RESID=11,103,520` (mostly app-arg captures)
+  - `nqueens`: `AOT_RESID=7,144,921` (all app-arg captures)
+- Current expression APP lowering for `fun_tag != LAM` is:
+  - emit function structurally (`aot_emit_node(..., head=0)`)
+  - capture arg lazily via ALO
+  - build `term_new_app(fun,arg)`
 
 Question:
-- Which approach is preferred for long-term AOT design?
-  A) raise global `AOT_ENV_CAP` substantially,
-  B) emit per-definition env capacity from compile-time depth analysis,
-  C) move env cells to dynamically sized storage for compiled frames.
-- If B is preferred: is “max binder depth along compiled head paths” sufficient, or are there runtime interactions that can exceed static lexical depth and require dynamic spill anyway?
+- Is it semantically safe (and desirable) to recursively emit the APP argument structurally in this branch (`aot_emit_node(arg, head=0)`) instead of ALO-capturing it, relying on expression-mode laziness to preserve behavior?
+- Are there invariants around sharing/substitution/sub-bit usage that require ALO capture for app arguments in this case?
