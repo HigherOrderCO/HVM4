@@ -1,32 +1,23 @@
-1) Strict forcing over DUP-linked scrutinees: is the current model canonical or transitional?
+1) What is the intended semantic boundary for a “no-allocation case-tree spine” in compiled mode?
 
 Context:
-- We eliminated `HEAD_MAT_NON_CTR` hard deopts by changing strict forcing so DP-linked scrutinees are locally WHNF-forced and retried (`aot_force_dup` + `aot_force_whnf_local` progress loop).
-- On canaries this is very effective (`mat_mul`/`ray_sphere` hard deopt now 0), and observed mismatches were DP survivors, not SUP.
+- We now have very low hard-deopt rates on key canaries, and several benchmark wins, but we are still far from the admission target (~10x speedup on each listed workload).
+- Current emitted AOT code still reconstructs many dynamic terms (APP/CTR/env cells) even when control-flow shape is statically known.
+- This likely means we optimized fallback behavior but not the main cost model.
 
 Question:
-- Is this “force DUP payload then retry strict eliminator” strategy considered semantically canonical for HVM compiled mode, or should we plan a direct compiled interaction path for strict MAT/SWI over DUP (to avoid relying on iterative local forcing)?
-- Any known corner cases where this approach can violate intended sharing/laziness behavior under HVM semantics?
+- For HVM semantics, which interactions are considered safe to execute in fully allocation-light style (direct stack/frame/register manipulation) without materializing intermediate nodes?
+- Specifically, in strict case-tree paths (LAM/MAT/SWI/OP2/REF recursion), should compiled code aim to avoid constructing expression-spine APP/CTR terms unless it must deopt or preserve sharing across branches?
+- Any canonical examples of interactions where allocating is semantically required (not just convenient) in compiled mode?
 
-2) Beta-inline APP arg policy (`fun_tag == LAM`): keep lazy ALO capture or structurally emit?
+2) Preferred direction for eliminating `CALL_DEPTH_CAP` without risking C stack overflow
 
 Context:
-- We now structurally emit expression APP args for `fun_tag != LAM` under depth/node guards, which removed the APP residual flood on key canaries.
-- Remaining APP arg capture is mostly from beta-inline path (`fun_tag == LAM`), where we still do:
-  - `x_dep = aot_fallback_alo(arg_loc, ...)`
-  - env extension
-  - inline body emission
+- `gab_deriv` still reports `CALL_DEPTH_CAP` deopts in telemetry (97 hits in current run).
+- We currently execute compiled recursion with native C calls and depth caps (`AOT_MAX_DEPTH` / `AOT_TRY_CALL_MAX_DEPTH`).
+- Raising caps alone is risky and probably not enough for long-term coverage.
 
 Question:
-- For LET-heavy case-tree code (desugared as APP-LAM), should compiled mode also structurally emit this argument under a similar budget guard, or is preserving ALO capture here important for expected laziness/sharing behavior?
-- If structural emission is acceptable, what guardrail would you consider safest (depth cap, node budget, tag whitelist, or combination)?
-
-3) `CALL_DEPTH_CAP` policy for deep recursive workloads
-
-Context:
-- With current `AOT_MAX_DEPTH=4096`, `gab_deriv` still reports `CALL_DEPTH_CAP` deopts (`97` hits), while many other canaries are now `AOT_DEOPT=0`.
-- This cap prevents runaway recursion but may eject hot paths from compiled mode.
-
-Question:
-- Should we treat this as expected safety behavior, or as a coverage bug to eliminate?
-- Preferred direction: raise cap, add better tail-recursive/trampoline compiled calling, or keep cap and optimize around it?
+- Should we prioritize emitter-level tail-call conversion for self-recursive calls first, then move to a general trampoline/dispatcher for mutual recursion?
+- Is there a preferred runtime shape for this project (e.g., return a “next call” packet/tag vs loop around `aot_try_call`) that better preserves current stack/heap invariants?
+- Any known pitfalls with DUP/SUP sharing when compiled recursion is trampolined?

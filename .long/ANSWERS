@@ -1,0 +1,18 @@
+# A1: Force-and-retry is fine
+
+If it works and produces correct results, it's fine. Don't overthink whether
+it's "canonical" or "transitional". If you later find a way to compile DUP
+interactions directly and it's faster, do that. But what you have now is
+correct and working. Keep going.
+
+# A2: Your code, your decision
+
+You own the emission strategy. If structurally emitting the arg is correct
+and faster, do it. If ALO capture is safer, keep it. Test both. This is an
+engineering decision, not a conceptual question.
+
+# A3: Your code, your decision
+
+Same answer. AOT_MAX_DEPTH is your constant. If 4096 causes deopts on
+gab_deriv, try raising it or adding a trampoline. Test it. Don't ask me
+about implementation constants you introduced.

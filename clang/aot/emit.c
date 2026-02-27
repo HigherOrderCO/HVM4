@@ -22,7 +22,8 @@ fn int aot_emit_counting(const AotBuildCfg *cfg) {
   if (cfg == NULL) {
     return 1;
   }
-  return cfg->eval.stats || cfg->eval.silent || cfg->eval.step_by_step;
+  // `-S` is throughput-oriented; keep counting for `-s`/`-D` observability.
+  return cfg->eval.stats || cfg->eval.step_by_step;
 }
 
 // Emits one `aot_itrs_inc()` line if counting is enabled.
@@ -332,10 +333,14 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
       }
 
       case LAM: {
+        u32 lam_ext = term_ext(term);
+        u8  lam_era = (lam_ext & LAM_ERA_MASK) != 0;
         char frm[32];
         char app[32];
         aot_emit_tmp(frm, sizeof(frm), "frm", tmp);
-        aot_emit_tmp(app, sizeof(app), "app", tmp);
+        if (!lam_era) {
+          aot_emit_tmp(app, sizeof(app), "app", tmp);
+        }
 
         fprintf(f, "%sif (*s_pos <= base) {\n", pad);
         aot_emit_ret_head(f, loc, dep, pad1, tmp);
@@ -349,10 +354,15 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_ret_head(f, loc, dep, pad1, tmp);
         fprintf(f, "%s}\n", pad);
         fprintf(f, "%s(*s_pos)--;\n", pad);
-        fprintf(f, "%su64 %s = term_val(%s);\n", pad, app, frm);
-        fprintf(f, "%sTerm x%u = heap_read(%s + 1);\n", pad, dep, app);
-        fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
-        fprintf(f, "%sheap_set(e%u + 0, term_sub_set(x%u, 1));\n", pad, dep, dep);
+        if (lam_era) {
+          fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
+          fprintf(f, "%sheap_set(e%u + 0, term_sub_set(term_new_era(), 1));\n", pad, dep);
+        } else {
+          fprintf(f, "%su64 %s = term_val(%s);\n", pad, app, frm);
+          fprintf(f, "%sTerm x%u = heap_read(%s + 1);\n", pad, dep, app);
+          fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
+          fprintf(f, "%sheap_set(e%u + 0, term_sub_set(x%u, 1));\n", pad, dep, dep);
+        }
         if (dep == 0) {
           fprintf(f, "%sheap_set(e%u + 1, term_new(0, NUM, 0, 0ULL));\n", pad, dep);
         } else {
@@ -661,12 +671,16 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         fprintf(f, ";\n");
         return;
       }
-
-      fprintf(f, "%sTerm x%u = ", pad, dep);
-      aot_emit_alo_expr(f, app_loc + 1, dep, AOT_DEOPT_EXPR_APP_ARG_CAPTURE);
-      fprintf(f, ";\n");
-      fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
-      fprintf(f, "%sheap_set(e%u + 0, term_sub_set(x%u, 1));\n", pad, dep, dep);
+      if ((term_ext(fun) & LAM_ERA_MASK) != 0) {
+        fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
+        fprintf(f, "%sheap_set(e%u + 0, term_sub_set(term_new_era(), 1));\n", pad, dep);
+      } else {
+        fprintf(f, "%sTerm x%u = ", pad, dep);
+        aot_emit_alo_expr(f, app_loc + 1, dep, AOT_DEOPT_EXPR_APP_ARG_CAPTURE);
+        fprintf(f, ";\n");
+        fprintf(f, "%su64 e%u = heap_alloc(2);\n", pad, dep);
+        fprintf(f, "%sheap_set(e%u + 0, term_sub_set(x%u, 1));\n", pad, dep, dep);
+      }
       if (dep == 0) {
         fprintf(f, "%sheap_set(e%u + 1, term_new(0, NUM, 0, 0ULL));\n", pad, dep);
       } else {
