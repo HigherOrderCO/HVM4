@@ -1,31 +1,22 @@
-1) Sound criterion for non-copy-free DUP scalarization in compiled mode
+1) Expression-position direct compiled call wrapper semantics (REF APP chains)
 
 Context:
-- Round 18 removed DUP heap-cell allocation for copy-free payloads (`NUM/C00/...`) by storing `term_sub_set(...)` in `env_cells` and letting DP0/DP1 read it directly.
-- This is correct and tested, but major kernels (`mat_mul`, `nqueens`) are still dominated by non-copy-free `DUP_CELL` allocations.
-- We want to go further and avoid allocating DUP cells when DP references stay entirely in compiled code paths.
+- Round 19 telemetry now shows `AOT_HEAP` almost equals total `Heap` on key canaries (for `edit_dist`, `AOT_HEAP ~377.58M` vs `Heap ~377.58M`), with size-2 allocations dominating.
+- This indicates we are still materializing many APP-like intermediate nodes inside compiled execution, even when `deopt=0` and `resid=0`.
+- Next planned optimization is: in expression mode, when we statically see application of a `REF` head (possibly with an app spine), call compiled code directly with raw args (worker-style) instead of building `term_new_app(...)` chains.
 
 Question:
-- What is the strongest practical criterion to prove a DUP binder must be materialized as a heap cell vs can be scalarized in locals?
-- In particular, is “no DP escape across deopt/fallback boundaries + no need for SUP-sensitive runtime interaction” sufficient, or are there other IC invariants that require a real location even when execution appears compiled-only?
+- For correctness, is this wrapper strategy valid: call compiled worker with local args; if worker cannot fully consume (missing compiled body/depth cap/fallback), rebuild exactly the residual head+remaining args term before returning?
+- Are there known interaction-net sharing pitfalls where this changes behavior versus building APP nodes first (especially with DUP-bound values that may later force)?
 
-2) Best instrumentation point to explain the `edit_dist` heap gap
+2) Priority between direct REF-call lowering vs constructor registerization
 
 Context:
-- After Round 17/18, explicit AOT allocation counters are very small on `edit_dist` (`AOT_ALLOC total_nodes ~51k`) while runtime heap is still huge (`~377M`) with deopt/resid both zero.
-- This strongly suggests allocation is happening in non-attributed runtime helpers/interactions reached from compiled strict forcing.
+- New attribution shows heavy compiled-context allocation in small node sizes, but not which syntactic source dominates.
+- Two candidate reductions are ready:
+  A) direct expression REF-call/app-spine lowering;
+  B) delayed constructor field materialization (registerize `C01..C16` fields until escape boundary).
 
 Question:
-- For high-signal attribution, should we instrument `heap_alloc` globally with a thread-local compiled-context depth flag (set around compiled entry/calls), or start with narrower instrumentation around `aot_force_*` + `wnf_*` paths first?
-- If global `heap_alloc` instrumentation is preferred, where should compiled-context enter/exit boundaries be placed to avoid double-counting under nested compiled->runtime->compiled transitions?
-
-3) SCC dispatch with raw-arg ABI: semantic pitfalls to watch
-
-Context:
-- We already have self-tail loop restart and raw local arg passing (`a_args/a_pos`) across compiled calls.
-- Non-self recursion still consumes C stack via `aot_call_ref` depth accounting.
-- Next likely step is SCC-local dispatch/trampoline to remove recursion depth limits and call overhead.
-
-Question:
-- For HVM semantics, what are the key pitfalls when moving to SCC dispatch while args remain in local raw form (not reified as APP frames)?
-- Any known corner cases where delayed reification interacts badly with DUP/MAT strict forcing or fallback ALO reconstruction?
+- Given typical HVM case-tree benchmarks (`edit_dist`, `mat_mul`, `nqueens`), which should be prioritized first for maximal speedup per engineering effort?
+- If there is a known ordering dependency (one unlocks/simplifies the other semantically), please point that out.

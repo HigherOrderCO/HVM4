@@ -48,6 +48,112 @@ static HvmAotFn AOT_FNS[BOOK_CAP] = {0};
 static _Thread_local u32 AOT_CALL_DEPTH = 0;
 static _Thread_local u8  AOT_TRY_CALL_ENABLED = 1;
 
+// Heap attribution tracks allocator traffic caused while compiled code runs.
+#define AOT_HEAP_BUCKET_COUNT 10
+static int AOT_HEAP_ATTR_ENABLED = -1;
+static u64 AOT_HEAP_CALLS = 0;
+static u64 AOT_HEAP_NODES = 0;
+static u64 AOT_HEAP_BUCKET_CALLS[AOT_HEAP_BUCKET_COUNT] = {0};
+static u64 AOT_HEAP_BUCKET_NODES[AOT_HEAP_BUCKET_COUNT] = {0};
+static _Thread_local u32 AOT_HEAP_COMPILED_DEPTH = 0;
+
+// Returns 1 when global heap attribution is enabled via HVM_AOT_HEAP_ATTR.
+fn int aot_heap_attr_enabled(void) {
+  int enabled = __atomic_load_n(&AOT_HEAP_ATTR_ENABLED, __ATOMIC_RELAXED);
+  if (enabled >= 0) {
+    return enabled;
+  }
+
+  const char *env = getenv("HVM_AOT_HEAP_ATTR");
+  enabled = env != NULL && env[0] != '\0' && strcmp(env, "0") != 0;
+  __atomic_store_n(&AOT_HEAP_ATTR_ENABLED, enabled, __ATOMIC_RELAXED);
+  return enabled;
+}
+
+// Maps one allocation size to one fixed histogram bucket index.
+fn u32 aot_heap_bucket(u64 size) {
+  if (size <= 8) {
+    return (u32)(size - 1);
+  }
+  if (size <= 16) {
+    return 8;
+  }
+  return 9;
+}
+
+// Returns one human-readable label for one heap-size histogram bucket.
+fn const char *aot_heap_bucket_name(u32 bucket) {
+  switch (bucket) {
+    case 0: return "1";
+    case 1: return "2";
+    case 2: return "3";
+    case 3: return "4";
+    case 4: return "5";
+    case 5: return "6";
+    case 6: return "7";
+    case 7: return "8";
+    case 8: return "9-16";
+    case 9: return "17+";
+    default: return "?";
+  }
+}
+
+// Marks entry into compiled execution for allocator attribution.
+fn void aot_heap_compiled_enter(void) {
+  AOT_HEAP_COMPILED_DEPTH++;
+}
+
+// Marks exit from compiled execution for allocator attribution.
+fn void aot_heap_compiled_leave(void) {
+  if (AOT_HEAP_COMPILED_DEPTH > 0) {
+    AOT_HEAP_COMPILED_DEPTH--;
+  }
+}
+
+// Attributes one heap allocation performed while compiled code is active.
+fn void aot_heap_alloc_note(u64 size) {
+  if (!aot_heap_attr_enabled()) {
+    return;
+  }
+  if (AOT_HEAP_COMPILED_DEPTH == 0) {
+    return;
+  }
+  if (size == 0) {
+    return;
+  }
+
+  u32 bucket = aot_heap_bucket(size);
+  __atomic_fetch_add(&AOT_HEAP_CALLS, 1, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&AOT_HEAP_NODES, size, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&AOT_HEAP_BUCKET_CALLS[bucket], 1, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&AOT_HEAP_BUCKET_NODES[bucket], size, __ATOMIC_RELAXED);
+}
+
+// Prints compiled-context heap allocation counters when enabled.
+fn void aot_heap_attr_dump(FILE *f) {
+  if (!aot_heap_attr_enabled()) {
+    return;
+  }
+
+  u64 calls = __atomic_load_n(&AOT_HEAP_CALLS, __ATOMIC_RELAXED);
+  u64 nodes = __atomic_load_n(&AOT_HEAP_NODES, __ATOMIC_RELAXED);
+  fprintf(f, "AOT_HEAP total_calls=%llu total_nodes=%llu\n",
+    (unsigned long long)calls,
+    (unsigned long long)nodes);
+
+  for (u32 i = 0; i < AOT_HEAP_BUCKET_COUNT; i++) {
+    u64 bcalls = __atomic_load_n(&AOT_HEAP_BUCKET_CALLS[i], __ATOMIC_RELAXED);
+    u64 bnodes = __atomic_load_n(&AOT_HEAP_BUCKET_NODES[i], __ATOMIC_RELAXED);
+    if (bcalls == 0 && bnodes == 0) {
+      continue;
+    }
+    fprintf(f, "AOT_HEAP size[%s] calls=%llu nodes=%llu\n",
+      aot_heap_bucket_name(i),
+      (unsigned long long)bcalls,
+      (unsigned long long)bnodes);
+  }
+}
+
 // Counts one interaction on compiled paths.
 fn void aot_itrs_inc(void) {
   if (ITRS_ENABLED) {
@@ -783,7 +889,9 @@ fn Term aot_call_ref(u32 ref_id, Term *stack, u32 *s_pos, u32 base, Term *a_args
   }
 
   AOT_CALL_DEPTH++;
+  aot_heap_compiled_enter();
   Term out = fun(stack, s_pos, base, a_args, a_pos);
+  aot_heap_compiled_leave();
   AOT_CALL_DEPTH--;
 
   return out;
@@ -818,7 +926,9 @@ fn int aot_try_call(u32 id, Term *stack, u32 *s_pos, u32 base, Term *out) {
   Term a_args[AOT_ARG_CAP] = {0};
   u32  a_pos = 0;
   AOT_CALL_DEPTH++;
+  aot_heap_compiled_enter();
   *out = fun(stack, s_pos, base, a_args, &a_pos);
+  aot_heap_compiled_leave();
   AOT_CALL_DEPTH--;
   if (a_pos > 0) {
     aot_stack_reify_args(stack, s_pos, a_args, a_pos, AOT_ALLOC_APP_FRAME_HEAD);

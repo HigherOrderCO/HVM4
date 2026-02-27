@@ -1,3 +1,5 @@
+fn void aot_heap_alloc_note(u64 size);
+
 fn u64 heap_alloc(u64 size) {
   u32 tid  = WNF_TID;
   u64 idx  = (u64)tid * HEAP_STRIDE;
@@ -5,6 +7,7 @@ fn u64 heap_alloc(u64 size) {
   u64 next = at + size;
   if (__builtin_expect(next <= HEAP_END[idx] && next >= at, 1)) {
     HEAP_NEXT[idx] = next;
+    aot_heap_alloc_note(size);
     return at;
   }
   fprintf(stderr,
