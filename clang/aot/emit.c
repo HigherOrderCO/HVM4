@@ -363,13 +363,24 @@ fn u8 aot_emit_try_demanded_ref_call(FILE *f, u64 loc, u32 dep, const char *out,
   u64 arg_locs[AOT_ARG_CAP] = {0};
   u32 ref_id = 0;
   u32 arg_len = 0;
+  u8 self_ref = 0;
+  char self_fun[256] = {0};
 
   if (!aot_emit_collect_ref_spine(loc, &ref_id, arg_locs, &arg_len)) {
     return 0;
   }
+  if (ref_id == AOT_EMIT_DEF_ID) {
+    char *self_name = table_get(ref_id);
+    if (self_name != NULL) {
+      aot_emit_fun_name(self_fun, sizeof(self_fun), self_name);
+      self_ref = 1;
+    }
+  }
 
   char pad1[128];
+  char pad2[128];
   aot_emit_pad_next(pad1, sizeof(pad1), pad);
+  aot_emit_pad_next(pad2, sizeof(pad2), pad1);
 
   char args_n[32];
   char pos_n[32];
@@ -400,7 +411,20 @@ fn u8 aot_emit_try_demanded_ref_call(FILE *f, u64 loc, u32 dep, const char *out,
     fprintf(f, "%s%s[%u] = %s;\n", pad1, args_n, idx, arg_n);
   }
   fprintf(f, "%su32 %s = *s_pos;\n", pad1, base_n);
-  fprintf(f, "%sTerm %s = aot_call_ref(%u, stack, s_pos, %s, %s, &%s);\n", pad1, head_n, ref_id, base_n, args_n, pos_n);
+  if (self_ref) {
+    fprintf(f, "%sTerm %s;\n", pad1, head_n);
+    fprintf(f, "%sif (aot_call_depth() >= AOT_MAX_DEPTH) {\n", pad1);
+    fprintf(f, "%s%s = term_new_ref(%u);\n", pad2, head_n, ref_id);
+    fprintf(f, "%s} else {\n", pad1);
+    fprintf(f, "%sAOT_CALL_DEPTH++;\n", pad2);
+    fprintf(f, "%saot_heap_compiled_enter();\n", pad2);
+    fprintf(f, "%s%s = %s(stack, s_pos, %s, %s, &%s);\n", pad2, head_n, self_fun, base_n, args_n, pos_n);
+    fprintf(f, "%saot_heap_compiled_leave();\n", pad2);
+    fprintf(f, "%sAOT_CALL_DEPTH--;\n", pad2);
+    fprintf(f, "%s}\n", pad1);
+  } else {
+    fprintf(f, "%sTerm %s = aot_call_ref(%u, stack, s_pos, %s, %s, &%s);\n", pad1, head_n, ref_id, base_n, args_n, pos_n);
+  }
   fprintf(f, "%s%s = %s;\n", pad1, out, head_n);
   fprintf(f, "%sfor (u32 j = %s; j > 0; j--) {\n", pad1, pos_n);
   fprintf(f, "%s  %s = term_new_app(%s, %s[j - 1]);\n", pad1, out, out, args_n);

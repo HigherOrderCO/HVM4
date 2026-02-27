@@ -1,24 +1,23 @@
-1) Safe boundary to reduce `WNF_DUP_NOD` / `AOT_DUP_CELL` without semantic drift
+1) Semantics-safe shortcut for `DP` scrutinees in strict `MAT/SWI`
 
 Context:
-- After OP2 reductions, major remaining heap cost in several admission benches is DUP-related.
-- Example (`HVM_AOT_DEOPT=1 HVM_AOT_ALLOC=1 HVM_AOT_HEAP_ATTR=1 --as-c -s -T1`):
-  - `gab_takl`: `WNF_DUP_NOD=231,193,148` nodes (dominant)
-  - `trie_bitwise`: `WNF_DUP_NOD=642,614,910` nodes (dominant)
-  - `mat_mul` after Round 25 still has `AOT_DUP_CELL=87,360`, `WNF_DUP_NOD=18,170,880`
-- Current compiled DUP handling only avoids cell allocation for `aot_is_copy_free(...)`; everything else allocates DUP cells and often ends in `wnf_dup_nod`.
+- After direct self-call lowering, some benches are much faster but still heap-dominated by duplication:
+  - `gab_takl`: `WNF_DUP_NOD` is still dominant (`231,193,148` nodes in prior heap-kind runs).
+  - `trie_bitwise`: `WNF_DUP_NOD` is still dominant (`642,614,910` nodes).
+- Current strict forcing (`aot_force_strict` -> `aot_force_dup`) fully materializes DUP interactions to expose scrutinee tags for compiled `MAT/SWI`.
+- This is semantically conservative but very expensive.
 
 Question:
-- What is the strongest safe static criterion to avoid or delay non-copy-free DUP cell materialization in compiled mode?
-- Concretely, which DP0/DP1 usage shapes are guaranteed linear-safe for specialization (or for late materialization) without changing IC behavior?
+- For a `DP0/DP1` scrutinee in strict `MAT/SWI`, is there a semantics-safe criterion to inspect/route on the dup payload tag without fully running `DUP-NOD` first?
+- If yes, what exact invariants must hold (linearity, side effects, SUB bit state, payload tag class) to keep IC behavior unchanged?
 
-2) Contract for eager non-demanded primitive folding in AOT
+2) Contract for emitting direct compiled calls across defs (not just self)
 
 Context:
-- Round 25 added non-head OP2 folding when operands are already WHNF (`NUM/ERA`) and `STEPS_ITRS_LIM==0`.
-- This gave large wins (`mat_mul` heap `145M -> 18.7M`, `u32_fib` heap `252M -> 22`) with passing tests and parity spot checks.
-- This fold does not force operands, but it does evaluate an OP2 earlier than lazy runtime would.
+- Round 26 safely lowered demanded self-recursive `APP(REF_self, ...)` to direct `F_<self>(...)` calls, keeping depth/heap guards and preserving leftover-arg reapply.
+- This reduced runtime significantly on recursion-heavy canaries while keeping heap and deopt profiles stable.
+- Next obvious extension is direct calls to other known compiled refs (cross-def), instead of `aot_call_ref` table dispatch.
 
 Question:
-- Is “eager fold only when operands are already WHNF values” considered semantically acceptable as a general AOT rule for strict primitives (with step-limited mode excluded)?
-- Any hidden invariants (stats/interaction accounting/debug expectations) that should block extending this pattern to other primitives (`EQL`, `AND`, `OR`, etc.)?
+- Is there any runtime invariant that forbids direct `F_<callee>(...)` calls across defs when we preserve the same depth/heap guards and `a_pos` semantics?
+- Or is it valid to generalize this as long as symbol/prototype ordering is handled and fallback behavior (`term_new_ref` on depth cap + arg reapply) is unchanged?

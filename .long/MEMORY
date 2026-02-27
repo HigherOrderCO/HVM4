@@ -1,48 +1,44 @@
-Round 25 (2026-02-27)
+Round 26 (2026-02-27)
 
 What landed
 - Files changed:
   - `clang/aot/emit.c`
-- Added an expression-level OP2 fold path (non-head `aot_emit_node(..., OP2)`):
-  - still emits structural lhs/rhs terms;
-  - when `STEPS_ITRS_LIM == 0`, if tags are already WHNF:
-    - `ERA` lhs -> `wnf_op2_era()`
-    - `NUM` lhs + `ERA` rhs -> `wnf_op2_num_era()`
-    - `NUM` lhs + `NUM` rhs -> `wnf_op2_num_num_raw(...)`
-    - otherwise keep `term_new_op2(...)`
-  - when `STEPS_ITRS_LIM != 0`, preserves old structural `term_new_op2(...)`.
+- Added a demanded self-call lowering in `aot_emit_try_demanded_ref_call(...)`:
+  - when an `APP(...REF...)` spine targets the currently emitted def (`ref_id == AOT_EMIT_DEF_ID`), generated code now calls `F_<self>(...)` directly instead of `aot_call_ref(...)`;
+  - preserves the same guards as runtime dispatch:
+    - depth cap check via `aot_call_depth() >= AOT_MAX_DEPTH` -> `term_new_ref(ref_id)`;
+    - `AOT_CALL_DEPTH++/--` and `aot_heap_compiled_enter()/leave()` around the direct call;
+  - preserves leftover-arg reapply loop exactly as before (`for (j=call_pos; j>0; j--) term_new_app(...)`), so partial/deopt behavior stays identical;
+  - still gated under `STEPS_ITRS_LIM == 0`; step-limited mode keeps old structural fallback.
 
 Why this mattered
-- Round 24 only reduced demanded OP2 materialization; `mat_mul` stayed dominated by expression `TERM_OP2`.
-- Many OP2 sites already had NUM/ERA operands at runtime, but we still allocated OP2 nodes.
+- Compiled demanded recursion (notably `u32_fib`, `gab_takl`, `trie_bitwise`) was still paying `aot_call_ref` dispatch overhead on every recursive call.
+- Heap totals already showed these paths were dispatch-bound in compiled mode, not allocation-bound.
 
 Validation
 - Build: `cd clang && clang -O2 -o main main.c`
 - Tests: `./test/_all_.sh` passed.
-- Admission-set sweep (`HVM_AOT_DEOPT=1 ... --as-c -s -T1`) stayed deopt-clean:
-  - `AOT_DEOPT total=0` on all sampled admission benches.
-  - Residuals unchanged/small (`mat_mul` still 3 `EXPR_CTR_FIELD_CAPTURE`; `gab_takl` still 3 residual captures).
-- Output parity spot checks (interpreted vs `--as-c`) matched on:
-  - `mat_mul`, `u32_fib`, `graph_color`, `prime_sieve`, `tree_fold`, `ray_sphere`.
+- Deopt parity: admission canaries stayed deopt-clean where previously clean (`AOT_DEOPT total=0`), with unchanged small residual captures on `gab_takl`.
+- Generated C check (`u32_fib --to-c`): demanded recursive call sites now emit direct `F_u32_fib(...)` with depth/heap guards.
 
-Key deltas (before -> after)
-- `mat_mul` (major):
-  - `AOT_HEAP total_nodes`: `145,024,874 -> 18,694,000`
-  - `TERM_OP2`: `90,249,536 -> 86,944`
-  - runtime heap/time (`--as-c -s -T1`): `145,025,641 / 0.730s -> 18,694,767 / 0.305s`
-- `graph_color`: heap `428,696,118 -> 193,799,054`, time `2.438s -> 1.616s`
-- `prime_sieve`: heap `63,967,872 -> 41,289,272`, time `0.452s -> 0.330s`
-- `tree_fold`: heap `65,011,755 -> 44,040,247`, time `0.485s -> 0.414s`
-- `u32_fib`: heap `252,983,962 -> 22`, time `3.877s -> 2.993s`
-- `ray_sphere`: modest additional reduction (`110,375,185 -> 109,701,465`)
-- `edit_dist`: modest additional reduction (`88,466,686 -> 88,048,872`)
+Key deltas (before -> after on this machine)
+- `u32_fib` (`--as-c -s -T1`):
+  - time `~2.936s -> 2.814s` (heap remains `22`)
+- `gab_takl`:
+  - time `~1.315s -> 0.998s` (heap remains `232,283,370`)
+- `trie_bitwise`:
+  - time `~3.060s -> 1.935s` (heap remains `777,671,484`)
+- `edit_dist`:
+  - time `~0.692s -> 0.667s`
+- `mat_mul`:
+  - time `~0.305s -> 0.298s`
 
 Key lessons
-- A huge share of compiled OP2 churn was from expression paths with already WHNF operands, not only demanded strict contexts.
-- Step-limited gating (`STEPS_ITRS_LIM==0`) remains the safe boundary for eager fold behavior.
-- Remaining large costs now skew toward `WNF_DUP_NOD` and some DUP-cell traffic, not OP2 in `mat_mul`.
+- There was still meaningful pure-call overhead in compiled mode even after OP2/heap optimizations.
+- Removing runtime ref-table dispatch from hot recursive demanded calls can yield large wins without changing heap behavior.
+- Remaining heavy cases still show dominant `WNF_DUP_NOD`/DUP pressure; this change improves dispatch cost, not duplication semantics.
 
 Next likely steps
-1) Apply the same “already-WHNF fold” idea to other strict primitives where safe (without forcing).
-2) Attack `WNF_DUP_NOD` with stronger compiled DUP specialization criteria.
-3) Remove residual ALO captures (`EXPR_CTR_FIELD_CAPTURE` / `EXPR_APP_ARG_CAPTURE`) where structural emission is provably safe.
+1) Extend direct-call emission beyond self-calls (known compiled refs) by adding safe forward declarations/prototype emission.
+2) Apply the same direct-call policy in head-position REF paths where semantically equivalent.
+3) Attack `WNF_DUP_NOD` with semantics-aware specialization (likely DP/MAT paths), since heap remains the dominant cost on `trie_bitwise`/`gab_takl`.
