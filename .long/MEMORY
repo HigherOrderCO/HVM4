@@ -1,56 +1,49 @@
-Round 16 (2026-02-27)
+Round 17 (2026-02-27)
 
 What landed
 - Files changed:
-  - `clang/aot/_.c`
   - `clang/aot/emit.c`
-- Added runtime observed-term telemetry for strict MAT mismatch sites:
-  - New per-site fields: `got_valid`, `got_tag`, `got_ext`.
-  - New helper: `aot_deopt_site_observe_term(site, got)`.
-  - `HEAD_MAT_NON_CTR` top-site output now includes observed runtime term (`got_tag/got_ext`).
-  - Added global histogram dump for `HEAD_MAT_NON_CTR` observed tags.
-- Emitter change for head MAT mismatch:
-  - Head `MAT` fallback now emits `aot_deopt_site_observe_term(site, arg)` before fallback ALO.
-  - Keeps existing site metadata (`kind=HEAD_MAT_NON_CTR`, `expect_ctr_ext`).
-- Strict DP forcing fix:
-  - `aot_force_dup` now accepts `(term, stack_top, *progress)`.
-  - On unknown/non-WNF DUP payloads, it restores payload, locally WHNF-forces once via `aot_force_whnf_local`, writes back if changed, marks progress, and lets caller retry.
-  - `aot_force_strict` now retries DP forcing when progress happened even if outer term is still DP.
+- Implemented bounded structural APP-arg emission for expression-mode non-LAM APP:
+  - Added static-shape eligibility checker:
+    - `aot_emit_expr_can_structuralize(loc, depth, *budget)`
+    - Bounds: `AOT_EMIT_EXPR_APP_ARG_DEPTH_CAP=64`, `AOT_EMIT_EXPR_APP_ARG_NODE_CAP=4096`.
+    - Accepts structural expression tags (`APP`, `OP2`, `DUP`, vars/dps/refs/nums/ctors); rejects unsupported tags.
+  - Added wrapper `aot_emit_app_arg_structural(loc)`.
+  - In expression `APP` with `fun_tag != LAM`, arg path is now:
+    - structural `aot_emit_node(...head=0)` when eligible;
+    - fallback ALO capture (`EXPR_APP_ARG_CAPTURE`) only when over budget / unsupported.
 
 Why this mattered
-- Telemetry showed `HEAD_MAT_NON_CTR` was not SUP-driven; it was DP survivors:
-  - `mat_mul`: `got_tag=DP1`, `got_ext=131076/131079` at top sites.
-  - `ray_sphere`: `got_tag=DP1`, `got_ext=131084`.
-- This indicated incomplete strict scrutinee forcing across DUP indirections, not primarily missing MAT-over-SUP.
+- Previous round removed hard deopts (`HEAD_MAT_NON_CTR`), leaving residual APP arg captures as dominant overhead:
+  - `mat_mul`: residual 174,099 (mostly `EXPR_APP_ARG_CAPTURE`)
+  - `ray_sphere`: residual 13,121,920 (`EXPR_APP_ARG_CAPTURE`)
+- This patch attacks that exact source while keeping guardrails against emitter/code-size pathologies.
 
 Validation
 - Build: `cd clang && clang -O2 -o main main.c`.
 - Full suite: `./test/_all_.sh` => all pass.
-- Sequential parity spot checks (`--as-c -s`) still match:
-  - `gab_tak` = 56
-  - `gab_takl` = 259
-  - `mat_mul` = 113238912
-  - `ray_sphere` = 4011084840
-  - `nqueens` = 1380080
-
-Telemetry deltas (`HVM_AOT_DEOPT=1 --as-c -s`)
-- Before this round (from previous memory):
-  - `mat_mul`: deopt 4,521,088 (`HEAD_MAT_NON_CTR`)
-  - `ray_sphere`: deopt 1,009,200 (`HEAD_MAT_NON_CTR`)
-- After this round:
-  - `mat_mul`: `AOT_DEOPT total=0`; `AOT_RESID total=174,099` (`EXPR_APP_ARG_CAPTURE` 174,096 + ctor-field 3)
-  - `ray_sphere`: `AOT_DEOPT total=0`; `AOT_RESID total=13,121,920` (all `EXPR_APP_ARG_CAPTURE`)
-- `gab_tak` / `gab_takl` remained `AOT_DEOPT total=0`, `AOT_RESID total=4`.
+- Sequential telemetry/parity (`HVM_AOT_DEOPT=1 --as-c -s`):
+  - `gab_tak`: deopt 0, resid 3 (`EXPR_CTR_FIELD_CAPTURE` only), result 56
+  - `gab_takl`: deopt 0, resid 3 (`EXPR_CTR_FIELD_CAPTURE` only), result 259
+  - `mat_mul`: deopt 0, resid 3 (`EXPR_CTR_FIELD_CAPTURE` only), result 113238912
+  - `ray_sphere`: deopt 0, resid 0, result 4011084840
+  - `nqueens`: deopt 0, resid 0, result 1380080
+  - `edit_dist`: deopt 0, resid 0, result 1962522748
+- Extra observation:
+  - `gab_deriv`: deopt 97 (`CALL_DEPTH_CAP`), resid 1 (`EXPR_CTR_FIELD_CAPTURE`), result 16400000.
 
 Operational lessons
-- `--as-c` is not parallel-safe in this repo/tooling path: concurrent runs race on `/tmp/hvm4-aot-as-c.main.c` and can produce fake compile errors.
-- Use sequential `--as-c` runs for telemetry/parity.
+- `--as-c` remains non-parallel-safe (temp-file race on `/tmp/hvm4-aot-as-c.main.c`); keep telemetry runs serialized.
 
 Current bottleneck picture
-- Hard deopts on key canaries (`mat_mul`, `ray_sphere`) are now eliminated.
-- Dominant overhead shifted further to residual APP arg captures (`EXPR_APP_ARG_CAPTURE`).
+- On key canaries, hard deopts are eliminated and APP-arg residual flood is effectively gone.
+- Remaining residual on these canaries is tiny ctor-field capture (`EXPR_CTR_FIELD_CAPTURE`).
+- Non-canary pressure now likely shifts to:
+  - `CALL_DEPTH_CAP` on deep recursion workloads (seen on `gab_deriv`);
+  - remaining residual classes outside this canary set.
 
 Next likely steps
-1. Reduce `EXPR_APP_ARG_CAPTURE` volume in expression APP (`fun_tag != LAM`) via structural arg emission policy (possibly guarded by size/tag heuristic).
-2. Revisit compiled-call gating in `aot_force_whnf_local` (`AOT_TRY_CALL_ENABLED=0`) to improve hot-path retention without reintroducing mismatch regressions.
-3. Add compiled-vs-interpreted interaction accounting to track true compiled coverage, not just deopt/resid counts.
+1. Decide policy for beta-inline (`fun_tag == LAM`) APP arg capture: keep lazy ALO vs bounded structural emission.
+2. Evaluate whether ctor field capture should be partially structuralized under similar budget guard.
+3. Investigate `CALL_DEPTH_CAP` mitigation (safe cap change vs better compiled recursion model).
+4. Revisit compiled-call gating inside strict forcing (`AOT_TRY_CALL_ENABLED`) with telemetry guards.

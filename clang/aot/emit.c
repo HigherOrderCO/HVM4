@@ -13,6 +13,9 @@ static u32 AOT_EMIT_DEOPT_SITE = 0;
 static u8  AOT_EMIT_DEOPT_KIND[AOT_DEOPT_SITE_CAP] = {0};
 static u64 AOT_EMIT_DEOPT_LOC[AOT_DEOPT_SITE_CAP] = {0};
 static u32 AOT_EMIT_DEOPT_AUX[AOT_DEOPT_SITE_CAP] = {0};
+// Bounds structural expression APP-arg emission to avoid emitter/code-size blowups.
+#define AOT_EMIT_EXPR_APP_ARG_DEPTH_CAP 64
+#define AOT_EMIT_EXPR_APP_ARG_NODE_CAP  4096
 
 // Returns 1 when this AOT build needs interaction counting.
 fn int aot_emit_counting(const AotBuildCfg *cfg) {
@@ -228,6 +231,60 @@ fn void aot_emit_ret_fallback_loc_meta(FILE *f, u64 loc, u32 dep, u32 reason, u3
 // - `head=1`: consumes APP frames from `stack/*s_pos` and returns from F_<def>.
 // - `head=0`: materializes one lazy expression into local `Term <out>`.
 fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const char *pad, u32 *tmp);
+
+// Returns 1 when one expression subtree is safe to emit structurally for APP args.
+fn u8 aot_emit_expr_can_structuralize(u64 loc, u32 depth, u32 *budget) {
+  if (depth >= AOT_EMIT_EXPR_APP_ARG_DEPTH_CAP) {
+    return 0;
+  }
+  if (*budget == 0) {
+    return 0;
+  }
+  *budget = *budget - 1;
+
+  Term term = heap_read(loc);
+  switch (term_tag(term)) {
+    case NUM:
+    case NAM:
+    case ERA:
+    case ANY:
+    case C00:
+    case C01 ... C16:
+    case REF:
+    case VAR:
+    case BJV:
+    case DP0:
+    case BJ0:
+    case DP1:
+    case BJ1: {
+      return 1;
+    }
+    case OP2: {
+      u64 op2_loc = term_val(term);
+      return aot_emit_expr_can_structuralize(op2_loc + 0, depth + 1, budget)
+          && aot_emit_expr_can_structuralize(op2_loc + 1, depth + 1, budget);
+    }
+    case APP: {
+      u64 app_loc = term_val(term);
+      return aot_emit_expr_can_structuralize(app_loc + 0, depth + 1, budget)
+          && aot_emit_expr_can_structuralize(app_loc + 1, depth + 1, budget);
+    }
+    case DUP: {
+      u64 dup_loc = term_val(term);
+      return aot_emit_expr_can_structuralize(dup_loc + 0, depth + 1, budget)
+          && aot_emit_expr_can_structuralize(dup_loc + 1, depth + 1, budget);
+    }
+    default: {
+      return 0;
+    }
+  }
+}
+
+// Returns 1 when one APP arg should use structural expression emission.
+fn u8 aot_emit_app_arg_structural(u64 loc) {
+  u32 budget = AOT_EMIT_EXPR_APP_ARG_NODE_CAP;
+  return aot_emit_expr_can_structuralize(loc, 0, &budget);
+}
 
 // Returns current head term without consuming pending APP frames.
 fn void aot_emit_ret_head(FILE *f, u64 loc, u32 dep, const char *pad, u32 *tmp) {
@@ -588,9 +645,13 @@ fn void aot_emit_node(FILE *f, u64 loc, u32 dep, const char *out, u8 head, const
         aot_emit_tmp(fun_n, sizeof(fun_n), "fun", tmp);
         aot_emit_tmp(arg_n, sizeof(arg_n), "arg", tmp);
         aot_emit_node(f, app_loc + 0, dep, fun_n, 0, pad, tmp);
-        fprintf(f, "%sTerm %s = ", pad, arg_n);
-        aot_emit_alo_expr(f, app_loc + 1, dep, AOT_DEOPT_EXPR_APP_ARG_CAPTURE);
-        fprintf(f, ";\n");
+        if (aot_emit_app_arg_structural(app_loc + 1)) {
+          aot_emit_node(f, app_loc + 1, dep, arg_n, 0, pad, tmp);
+        } else {
+          fprintf(f, "%sTerm %s = ", pad, arg_n);
+          aot_emit_alo_expr(f, app_loc + 1, dep, AOT_DEOPT_EXPR_APP_ARG_CAPTURE);
+          fprintf(f, ";\n");
+        }
         fprintf(f, "%sTerm %s = term_new_app(%s, %s);\n", pad, out, fun_n, arg_n);
         return;
       }

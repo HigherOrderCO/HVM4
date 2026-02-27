@@ -1,25 +1,32 @@
-1) Strict MAT scrutinee forcing across DUP: what is the semantic boundary for compiled mode?
+1) Strict forcing over DUP-linked scrutinees: is the current model canonical or transitional?
 
 Context:
-- We instrumented `HEAD_MAT_NON_CTR` with runtime observed scrutinee tags (`got_tag/got_ext`) and found the dominant mismatch was `DP1`, not `SUP`.
-  - `mat_mul` mismatches were `got_tag=DP1`, `got_ext=131076/131079`.
-  - `ray_sphere` mismatches were `got_tag=DP1`, `got_ext=131084`.
-- We then changed strict forcing (`aot_force_dup`) so that when DUP payload is unknown/non-WNF, we locally WHNF-force the payload once (`aot_force_whnf_local`), write it back, and retry. This removed hard deopts on these workloads (`AOT_DEOPT total=0`).
+- We eliminated `HEAD_MAT_NON_CTR` hard deopts by changing strict forcing so DP-linked scrutinees are locally WHNF-forced and retried (`aot_force_dup` + `aot_force_whnf_local` progress loop).
+- On canaries this is very effective (`mat_mul`/`ray_sphere` hard deopt now 0), and observed mismatches were DP survivors, not SUP.
 
 Question:
-- Is this forcing strategy semantically aligned with HVM’s intended strict eliminator behavior over DUP-linked scrutinees, or should compiled mode instead implement a more direct DUP-eliminator interaction path for strict MAT/SWI (rather than iterative local WHNF forcing)?
-- In other words: is “force DUP payload then retry” the right long-term model, or just a stopgap that might violate expected sharing/laziness invariants in edge cases?
+- Is this “force DUP payload then retry strict eliminator” strategy considered semantically canonical for HVM compiled mode, or should we plan a direct compiled interaction path for strict MAT/SWI over DUP (to avoid relying on iterative local forcing)?
+- Any known corner cases where this approach can violate intended sharing/laziness behavior under HVM semantics?
 
-2) Reducing `EXPR_APP_ARG_CAPTURE`: should expression APP args be structural by default?
+2) Beta-inline APP arg policy (`fun_tag == LAM`): keep lazy ALO capture or structurally emit?
 
 Context:
-- After eliminating hard deopts on `mat_mul` and `ray_sphere`, dominant residual overhead is now `EXPR_APP_ARG_CAPTURE`.
-- Current expression APP lowering for `fun_tag != LAM` is:
-  - structural fun emission,
-  - lazy arg ALO capture,
-  - `term_new_app(fun,arg)`.
-- This preserves laziness but leaves millions of residual captures (`ray_sphere` now ~13.1M residual APP arg captures).
+- We now structurally emit expression APP args for `fun_tag != LAM` under depth/node guards, which removed the APP residual flood on key canaries.
+- Remaining APP arg capture is mostly from beta-inline path (`fun_tag == LAM`), where we still do:
+  - `x_dep = aot_fallback_alo(arg_loc, ...)`
+  - env extension
+  - inline body emission
 
 Question:
-- Is it semantically safe and preferred to emit APP args structurally (`aot_emit_node(arg, head=0)`) by default in this branch, relying on expression-mode non-strictness?
-- If yes, do we have recommended guardrails (e.g. static-size threshold, tag whitelist, or per-def budget) to avoid pathological code-size growth while still reducing interpreter re-entry?
+- For LET-heavy case-tree code (desugared as APP-LAM), should compiled mode also structurally emit this argument under a similar budget guard, or is preserving ALO capture here important for expected laziness/sharing behavior?
+- If structural emission is acceptable, what guardrail would you consider safest (depth cap, node budget, tag whitelist, or combination)?
+
+3) `CALL_DEPTH_CAP` policy for deep recursive workloads
+
+Context:
+- With current `AOT_MAX_DEPTH=4096`, `gab_deriv` still reports `CALL_DEPTH_CAP` deopts (`97` hits), while many other canaries are now `AOT_DEOPT=0`.
+- This cap prevents runaway recursion but may eject hot paths from compiled mode.
+
+Question:
+- Should we treat this as expected safety behavior, or as a coverage bug to eliminate?
+- Preferred direction: raise cap, add better tail-recursive/trampoline compiled calling, or keep cap and optimize around it?
