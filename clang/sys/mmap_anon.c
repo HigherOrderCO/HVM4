@@ -1,3 +1,17 @@
+#if defined(__EMSCRIPTEN__) || defined(HVM_NO_MMAP)
+
+#include <stdlib.h>
+
+// Fallback for platforms without mmap (WASM, embedded).
+// Uses calloc to preserve mmap's zero-initialization guarantee.
+// Note: unlike mmap, calloc does not support lazy page allocation,
+// so HEAP_CAP should be reduced on these platforms.
+fn void *sys_mmap_anon(size_t bytes) {
+  return calloc(1, bytes);
+}
+
+#else
+
 #include <sys/mman.h>
 
 #ifndef MAP_ANONYMOUS
@@ -17,3 +31,5 @@ fn void *sys_mmap_anon(size_t bytes) {
   }
   return map;
 }
+
+#endif
