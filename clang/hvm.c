@@ -155,10 +155,18 @@ typedef struct {
 // Capacities
 // ==========
 
-#define HEAP_CAP (1ULL << 38)
+#ifndef HEAP_CAP_BITS
+#define HEAP_CAP_BITS 38
+#endif
+#if HEAP_CAP_BITS > VAL_BITS
+#error "HEAP_CAP_BITS must be <= VAL_BITS (heap addresses must fit in term VAL field)"
+#endif
+#define HEAP_CAP (1ULL << HEAP_CAP_BITS)
 #define BOOK_CAP (1ULL << 24)
 #define WNF_CAP  (1ULL << 32)
+#ifndef MAX_THREADS
 #define MAX_THREADS 64
+#endif
 
 // Thread Globals
 // ==============
