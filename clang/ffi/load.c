@@ -1,3 +1,15 @@
+#if defined(__EMSCRIPTEN__) || defined(HVM_NO_DLOPEN)
+
+fn void ffi_load(const char *path) {
+  (void)path;
+  fprintf(stderr,
+    "ERROR: dynamic FFI loading not available on this platform.\n"
+    "  Register primitives at compile time instead.\n");
+  exit(1);
+}
+
+#else
+
 #include <dlfcn.h>
 
 #define HVM_RUNTIME
@@ -44,3 +56,5 @@ fn void ffi_load(const char *path) {
   ffi_handles_push(handle);
   init(ffi_api());
 }
+
+#endif
