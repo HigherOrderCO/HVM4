@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define ABI_VERSION 1
+#define ABI_VERSION 2
 
 #ifndef HVM_RUNTIME
 typedef uint8_t  u8;
@@ -38,20 +38,29 @@ typedef struct {
   Term (*term_new_lam_at)(u64 loc, Term body);
   Term (*term_new_lam)(Term body);
   Term (*term_new_var)(u64 loc);
+  Term (*term_new_era)(void);
+  Term (*term_new_ref)(u32 name);
+  Term (*term_new_mat)(u32 name, Term hit, Term miss);
 
   // accessors
   u8   (*term_tag)(Term t);
   u32  (*term_ext)(Term t);
   u64  (*term_val)(Term t);
+  u32  (*term_arity)(Term t);
+  u8   (*term_sub_get)(Term t);
+  Term (*term_sub_set)(Term t, u8 sub);
 
   // heap
   Term (*heap_read)(u64 loc);
   void (*heap_set)(u64 loc, Term t);
   u64  (*heap_alloc)(u64 words);
 
-  // names
-  u32  (*table_find)(const char *name, u32 len);
-  u32  (*name_from_str)(const char *name, u32 len);
+  // book / names
+  u32    (*table_find)(const char *name, u32 len);
+  u32    (*name_from_str)(const char *name, u32 len);
+  char  *(*table_get)(u32 id);
+  u64    (*book_get)(u32 id);
+  void   (*book_set)(u32 id, u64 loc);
 
   // errors
   void (*runtime_error)(const char *msg);
