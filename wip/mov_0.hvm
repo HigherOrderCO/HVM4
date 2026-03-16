@@ -1,0 +1,33 @@
+// GOAL: uncomment @name_mov and ensure it runs under 50k interactions
+
+@bin = λ{
+  0n: λn. λo. λi. λe. e;
+  1n+: λ&l. λ&n. (λ{
+    0: λo. λi. λe. o(@bin(l, n/2))
+    1: λo. λi. λe. i(@bin(l, n/2))
+  })(n % 2)
+}
+
+@rep = λxs.
+  ! O = λp. λ&f. λx. @rep(p, λk. f(f(k)), x)
+  ! I = λp. λ&f. λx. @rep(p, λk. f(f(k)), f(x))
+  ! E = λf. λx. x
+  xs(O, I, E)
+
+@show_bool = λb.
+  b(#T{}, #F{})
+
+@T = λt. λf. t
+@F = λt. λf. f
+
+@clr_dup = λx. λt. λ&f. x(f, f)
+
+//@clr_mov = λx. λt. λf.
+//  % k = f
+//  x(k, k)
+
+@not_clr = λx. λt. λf. x(f, t)
+
+@clr_lam = λx. λt. λf. x(λk.k, λk.k)(f)
+
+@main = @show_bool(@rep(@bin(32n,200000), @clr_lam, @T))

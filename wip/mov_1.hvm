@@ -1,0 +1,40 @@
+// GOAL: uncomment @name_mov and ensure it runs under 50k interactions
+
+@O = λp. λo. λi. λe. o(p)
+@I = λp. λo. λi. λe. i(p)
+@E =     λo. λi. λe. e
+
+@bin = λ{
+  0n: λn. λo. λi. λe. e;
+  1n+: λ&l. λ&n. (λ{
+    0: λo. λi. λe. o(@bin(l, n/2))
+    1: λo. λi. λe. i(@bin(l, n/2))
+  })(n % 2)
+}
+
+@rep = λxs.
+  ! O = λp. λ&f. λx. @rep(p, λk. f(f(k)), x)
+  ! I = λp. λ&f. λx. @rep(p, λk. f(f(k)), f(x))
+  ! E = λf. λx. x
+  xs(O, I, E)
+
+@view = λxs.
+  ! O = λp. #O{@view(p)}
+  ! I = λp. #I{@view(p)}
+  ! E = #E
+  xs(O, I, E)
+
+@clr_dup = λx. λ&o. λi. λe.
+  x(λp.o(@clr_dup(p)), λp.o(@clr_dup(p)), e)
+
+//@clr_mov = λx. λo. λi. λe.
+//  % f = o
+//  x(λp.f(@clr_mov(p)), λp.f(@clr_mov(p)), e)
+
+@not_clr = λx. λo. λi. λe.
+  x(λp.i(@not_clr(p)), λp.o(@not_clr(p)), e)
+
+@clr_lam = λx. λo. λi. λe.
+  x(λp.λo.o(@clr_lam(p)), λp.λo.o(@clr_lam(p)), λo.e, o)
+
+@main = @view(@rep(@bin(32n,1030), @clr_lam, @bin(32n,0)))

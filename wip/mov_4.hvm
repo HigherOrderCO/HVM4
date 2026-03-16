@@ -1,0 +1,56 @@
+// GOAL: uncomment @name_mov and ensure it runs under 50k interactions
+
+@O = λp. λo. λi. λe. o(p)
+@I = λp. λo. λi. λe. i(p)
+@E =     λo. λi. λe. e
+
+@bin = λ{
+  0n: λn. λo. λi. λe. e;
+  1n+: λ&l. λ&n. (λ{
+    0: λo. λi. λe. o(@bin(l, n/2))
+    1: λo. λi. λe. i(@bin(l, n/2))
+  })(n % 2)
+}
+
+@rep = λxs.
+  ! O = λp. λ&f. λx. @rep(p, λk. f(f(k)), x)
+  ! I = λp. λ&f. λx. @rep(p, λk. f(f(k)), f(x))
+  ! E = λf. λx. x
+  xs(O, I, E)
+
+@view = λxs.
+  ! O = λp. #O{@view(p)}
+  ! I = λp. #I{@view(p)}
+  ! E = #E
+  xs(O, I, E)
+
+@stripe_dup = λx. λo. λi. λe.
+  @stripe0_dup(x, o, i, e)
+
+@stripe0_dup = λx. λ&o. λi. λe.
+  x(λp.o(@stripe1_dup(p)), λp.o(@stripe1_dup(p)), e)
+
+@stripe1_dup = λx. λo. λ&i. λe.
+  x(λp.i(@stripe0_dup(p)), λp.i(@stripe0_dup(p)), e)
+
+//@stripe_mov = λx. λo. λi. λe.
+//  @stripe0_mov(x, o, i, e)
+//
+//@stripe0_mov = λx. λo. λi. λe.
+//  % f = o
+//  x(λp.f(@stripe1_mov(p)), λp.f(@stripe1_mov(p)), e)
+//
+//@stripe1_mov = λx. λo. λi. λe.
+//  % f = i
+//  x(λp.f(@stripe0_mov(p)), λp.f(@stripe0_mov(p)), e)
+
+@stripe_lam = λx. λo. λi. λe.
+  @stripe0_lam(x, o, i, e)
+
+@stripe0_lam = λx. λo. λi. λe.
+  x(λp.λo.o(@stripe1_lam(p)), λp.λo.o(@stripe1_lam(p)), λo.e, o)
+
+@stripe1_lam = λx. λo. λi. λe.
+  x(λp.λi.i(@stripe0_lam(p)), λp.λi.i(@stripe0_lam(p)), λi.e, i)
+
+@main = @view(@rep(@bin(32n,1030), @stripe_lam, @bin(32n,0)))

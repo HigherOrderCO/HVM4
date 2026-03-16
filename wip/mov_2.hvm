@@ -1,0 +1,72 @@
+// GOAL: uncomment @name_mov and ensure it runs under 50k interactions
+
+@O = λp. λo. λi. λe. o(p)
+@I = λp. λo. λi. λe. i(p)
+@E =     λo. λi. λe. e
+@N = @E
+
+@bin = λ{
+  0n: λn. λo. λi. λe. e;
+  1n+: λ&l. λ&n. (λ{
+    0: λo. λi. λe. o(@bin(l, n/2))
+    1: λo. λi. λe. i(@bin(l, n/2))
+  })(n % 2)
+}
+
+@rep = λxs.
+  ! O = λp. λ&f. λx. @rep(p, λk. f(f(k)), x)
+  ! I = λp. λ&f. λx. @rep(p, λk. f(f(k)), f(x))
+  ! E = λf. λx. x
+  xs(O, I, E)
+
+@view = λxs.
+  ! O = λp. #O{@view(p)}
+  ! I = λp. #I{@view(p)}
+  ! E = #E
+  xs(O, I, E)
+
+@insert_dup = λn.
+  ! O = &{}
+  ! I = (λ&p. λxs. λ&o. λi. λe.
+    ! O = λxs. o(@insert_dup(p, xs))
+    ! I = λxs. i(@insert_dup(p, xs))
+    ! E = o(@insert_dup(p, @N))
+    xs(O, I, E))
+  ! E = λxs. λo. λ&i. λe.
+    ! O = λxs. i(xs)
+    ! I = λxs. i(xs)
+    ! E = i(@N)
+    xs(O, I, E)
+  n(O, I, E)
+
+//@insert_mov = λn.
+//  ! O = &{}
+//  ! I = (λ&p. λxs. λo. λi. λe.
+//    % f = o
+//    ! O = λxs. f(@insert_mov(p, xs))
+//    ! I = λxs. i(@insert_mov(p, xs))
+//    ! E = f(@insert_mov(p, @N))
+//    xs(O, I, E))
+//  ! E = λxs. λo. λi. λe.
+//    % k = i
+//    ! O = λxs. k(xs)
+//    ! I = λxs. k(xs)
+//    ! E = k(@N)
+//    xs(O, I, E)
+//  n(O, I, E)
+
+@insert_lam = λn.
+  ! O = &{}
+  ! I = (λ&p. λxs. λo. λi. λe.
+    ! O = λxs. λo. o(@insert_lam(p, xs))
+    ! I = λxs. λo. i(@insert_lam(p, xs))
+    ! E = λo. o(@insert_lam(p, @N))
+    xs(O, I, E, o))
+  ! E = λxs. λo. λi. λe.
+    ! O = λxs. λi. i(xs)
+    ! I = λxs. λi. i(xs)
+    ! E = λi. i(@N)
+    xs(O, I, E, i)
+  n(O, I, E)
+
+@main = @view(@rep(@bin(16n,8192), @insert_lam(@I(@I(@I(@I(@E))))), @O(@O(@O(@O(@O(@O(@E))))))))

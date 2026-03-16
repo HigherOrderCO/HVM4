@@ -1,3 +1,14 @@
+Previous invalid MOV sketches moved here for reference.
+
+===== old mov_3.hvm4 =====
+
+@main =
+  ! G &R = λy.y;
+  ! F &L = λx. x(G₀, G₁)
+  F₀(λa.λb.a)(F₁(λc.λd.d))
+
+===== old mov_4.hvm4 =====
+
 //% g      = f
 //! G & L = λx.λt.λf.x(g,g);
 //λv.G₀(G₁(v))

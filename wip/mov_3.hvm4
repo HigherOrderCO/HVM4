@@ -1,4 +1,0 @@
-@main =
-  ! G &R = λy.y; 
-  ! F &L = λx. x(G₀, G₁)
-  F₀(λa.λb.a)(F₁(λc.λd.d))
