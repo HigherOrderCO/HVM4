@@ -3,7 +3,7 @@
 ## What Exists
 
 ### Files
-- `cuda/hvm.cu` — GPU evaluator (~1475 lines). Shares interaction rules from `clang/` via
+- `cuda/hvm.cu` — GPU evaluator (~1500 lines). Shares interaction rules from `clang/` via
   `#include`. Contains: compatibility layer, heap/stack ops, WNF evaluator, two kernels
   (single-thread `eval_kernel`, parallel `par_eval_kernel`), and host main.
 - `cuda/dump.c` — CPU-side parser → binary dump (HEAP + BOOK + main_id). Includes
@@ -20,6 +20,10 @@ nvcc -O2 -arch=sm_89 -I../clang -w -o hvm_cuda hvm.cu
 ./dump bench_fast.hvm bench_fast.bin
 ./hvm_cuda bench_fast.bin -p 1     # 2 threads
 ./hvm_cuda bench_tree.bin -p 16    # 65536 threads
+
+# Circular heap build (for benchmarks where split_depth == tree_depth):
+nvcc -O2 -arch=sm_89 -I../clang -w -DCIRCULAR_HEAP -o hvm_cuda_circ hvm.cu
+./hvm_cuda_circ bench_tree.bin -p 16 -r 64   # 64 KB region per warp
 ```
 
 ### RTX Machine
@@ -30,27 +34,55 @@ nvcc -O2 -arch=sm_89 -I../clang -w -o hvm_cuda hvm.cu
 
 ## Current Performance
 
-| Threads | Old MIPS | New MIPS   | Change   |
-|---------|----------|------------|----------|
-| 1       | 0.77     | 0.85       | +10%     |
-| 2       | 1.53     | 1.70       | +11%     |
-| 1,024   | 335      | **681**    | +103%    |
-| 4,096   | 1,313    | **2,750**  | +110%    |
-| 16,384  | 3,847    | **10,674** | +177%    |
-| 32,768  | —        | **18,634** | —        |
-| 65,536  | 3,971    | **22,713** | **+472%**|
+| Threads | Standard MIPS | Circular MIPS | Change   |
+|---------|---------------|---------------|----------|
+| 1       | 0.85          | —             | —        |
+| 1,024   | 682           | —             | —        |
+| 16,384  | 10,661        | —             | —        |
+| 32,768  | 18,749        | —             | —        |
+| 65,536  | **22,713**    | **23,620**    | **+4.0%**|
 
 CPU baselines: Ryzen 77 MIPS/thread, M4 Max 184 MIPS/thread.
 
-**22.7 GIPS peak at 65K threads (5.7x over prior 4 GIPS).** Per-thread scaling efficiency
-at 65K: 41% (was 7.9%). Theoretical max: 0.85 × 65536 = 55.7 GIPS. Sweet spot is 32K
-threads (18.6 GIPS); 65K still scales due to latency hiding despite DRAM saturation.
+**23.6 GIPS peak at 65K threads with circular heap (`-DCIRCULAR_HEAP -r 64`).** Standard
+build peaks at 22.7 GIPS. Per-thread scaling efficiency at 65K: 43% (circular) / 41%
+(standard). Theoretical max: 0.85 × 65536 = 55.7 GIPS.
 
 ### Register / Occupancy Profile
-- `par_eval_kernel`: 58 registers, 384 bytes stack, 0 spills → 8 blocks/SM (1024 threads,
-  32 warps) at block_size=128.
-- `eval_kernel`: 47 registers, 128 bytes stack, 0 spills.
-- `heap_alloc_coop`: noinline, ~20 registers. Keeps warp shuffle/vote logic out of wnf().
+- `par_eval_kernel` (standard): 60 registers, 384 bytes stack, 0 spills → 8 blocks/SM.
+- `par_eval_kernel` (circular): 61 registers, 384 bytes stack, 0 spills → 8 blocks/SM.
+- `eval_kernel`: 46 registers, 128 bytes stack, 0 spills.
+- `heap_alloc_coop`: noinline, ~20 registers.
+
+### Nsight Compute Profile (65K threads, bench_tree, standard build)
+- DRAM reads: 61 MB (near-zero — reads fully cached in L2).
+- DRAM writes: 11.8 GB (dirty line evictions from heap allocations).
+- L1 load hit rate: 84.4%.
+- Active warps: 31.24% of peak (16 warps/SM, limited by thread count not registers).
+- Instructions: 32.2 per interaction.
+- Effective DRAM write bandwidth: ~655 GB/s (~65% of peak 1 TB/s).
+- **Bottleneck**: occupancy (31%), not bandwidth. Only 16 warps/SM = 4 warps per scheduler.
+  Can't fully hide L1 memory latency (~28 cycles) with 4 warps and ~5 instructions between
+  memory ops.
+
+## Circular Heap Allocation
+
+Compile-time feature (`-DCIRCULAR_HEAP`). Caps per-warp heap region to a fixed size and
+wraps the bump pointer when it reaches the region end. Improves L2 locality by confining
+the working set to a small address range instead of spreading across 10 MB per warp.
+
+**How it works**: shared memory `S_WARP_BASE` stores each warp's region start. When
+`S_WARP_HEAP` exceeds `S_WARP_END`, the leader resets it to `S_WARP_BASE`. All allocations
+within a warp remain contiguous (coalesced).
+
+**Safety constraint**: only safe when each thread's entire reduction stays within the
+circular region's safety margin. For @spin-like workloads: alive data is from the last 2-3
+steps (~10 KB), so a 64 KB region (18 steps before wrap) has ~6x safety margin.
+
+**Limitation**: must use `split_depth == tree_depth` (1 leaf per thread). With deeper splits
+or multi-leaf-per-thread workloads, tree nodes allocated during the split phase can be
+overwritten before other warps read them. A global barrier after the split would fix this
+but isn't implemented yet.
 
 ## Code Architecture (hvm.cu layout, top-to-bottom)
 
@@ -70,7 +102,8 @@ s_hot[0..255]   = S_ITRS       per-thread interaction counter
 s_hot[256..511] = S_MAX_DEPTH   per-thread max stack depth
 s_hot[512..519] = S_WARP_HEAP   per-warp heap bump pointer (next)
 s_hot[520..527] = S_WARP_END    per-warp heap region end
-Total: 528 u64 = 4224 bytes per block.
+s_hot[528..535] = S_WARP_BASE   per-warp heap region start (for circular wrap)
+Total: 536 u64 = 4288 bytes per block.
 ```
 - `d_itrs` macro = `s_hot[S_ITRS + threadIdx.x]`.
 - `c_arity[48]`: device-const arity lookup table, replaces 40-case switch.
@@ -79,12 +112,15 @@ Total: 528 u64 = 4224 bytes per block.
 Two-tier design:
 1. **`heap_alloc(size)`** (forceinline): calls `__activemask()`, checks `__popc(mask)`.
    If count==1 (single active thread): simple shared-memory bump. Otherwise → coop path.
+   With `CIRCULAR_HEAP`: both paths check for region wrap.
 2. **`heap_alloc_coop(size)`** (noinline): warp-cooperative allocation.
    - Gets fresh `__activemask()` inside (critical for SM89 independent thread scheduling —
      passing a stale mask from the caller causes illegal memory access).
    - Uniform-size fast path: leader bumps per-warp pointer by `count * size`, broadcasts
      base via `__shfl_sync`, each thread gets `base + rank * size`. All warp allocations
      are contiguous → writes coalesce into ~4 cache lines instead of 32.
+   - With `CIRCULAR_HEAP`: leader checks if bump exceeds `S_WARP_END`; if so, resets to
+     `S_WARP_BASE`.
    - Non-uniform fallback: per-thread `atomicAdd` on shared memory (correct but not coalesced).
 
 **Critical correctness note**: `heap_alloc_coop` MUST call `__activemask()` itself, not
@@ -128,7 +164,6 @@ All others (~50 rules). Keeps wnf() code size small for icache.
 - **WHNF fast-path**: in VAR and DP0/DP1 enter cases, after resolving a substitution, checks
   `(WHNF_MASK >> term_tag(next)) & 1`. If true, jumps directly to `apply` without
   re-entering the switch. Saves ~380 cycles per instance (~3 per @spin step).
-- **aot_try_call stub**: returns 0 (no AOT yet). Signature: `(u32 id, u32 *s_pos, u32 base, Term *out)`.
 
 ### wnf_at + is_whnf_tag (lines 1094–1104)
 - `is_whnf_tag(tag)`: `(WHNF_MASK >> tag) & 1`. Single-instruction check.
@@ -141,7 +176,8 @@ covering the full heap. Returns result term + itrs + max_depth + heap_next.
 ### par_eval_kernel (lines 1164–1210)
 Parallel SNF evaluation via static binary-tree split:
 1. **Heap init**: per-warp regions. `tpr` (threads per region) = 32 if block_size≥32, else 1.
-   `n_regions = n_threads / tpr`. Each region gets `heap_size / n_regions` words.
+   `n_regions = n_threads / tpr`. Each region gets `heap_size / n_regions` words (optionally
+   capped by `max_region` for circular allocation).
    `__syncthreads()` after init (needed because different warps' lane-0 threads init their
    warp's pointers and all threads must see them).
 2. **Split loop**: for depth 0..split_depth-1, owner thread (lowest matching bits) calls
@@ -151,11 +187,13 @@ Parallel SNF evaluation via static binary-tree split:
 4. **`seq_snf(loc)`**: iterative SNF with 32-entry work stack. Calls wnf_at on each subterm.
 5. Results: `atomicAdd` for total itrs, `atomicMax` for max depth.
 
-### Host Code (lines 1220–1475)
+### Host Code (lines 1220–1490)
 - `run_eval()`: single-thread mode. Allocates 6 GB heap, 128 MB book, 1 GB WNF stack.
 - `run_par_eval()`: parallel mode. Block size: 1 for ≤32 threads, 128 for >32.
-  Stack: 1024 entries/thread (interleaved). Heap: fills available VRAM minus overhead.
+  Stack: 1024 entries/thread for ≤65K, 64 for >65K (interleaved). Heap: fills available
+  VRAM minus overhead.
 - `-p DEPTH` flag: `n_threads = 1 << depth`, `split_depth = depth`.
+- `-r REGION_KB` flag: caps per-warp heap region to REGION_KB × 1024 bytes (circular mode).
 
 ## Why Per-Thread Rate Drops at Scale
 
@@ -169,24 +207,26 @@ Parallel SNF evaluation via static binary-tree split:
 
 ~20 heap accesses per step, ~8 heap_alloc calls per step (including term_new_alo calls).
 
-### Memory Traffic Analysis (65K threads, bench_tree)
-- Per step per warp: ~20 heap ops × 128 bytes/cache-line × (coalesced or random)
-- Total steps/s: 65K × (22.7M itrs/s / 65K) / 6 ≈ 575M steps/s
-- DRAM bandwidth wall: 1 TB/s. With ~60-70% L2 hit rate, DRAM demand ≈ 0.8-1 TB/s.
-- Warp-cooperative allocator coalesces freshly allocated cells (biggest traffic source).
-  Remaining random traffic: BOOK body reads, substitution lookups to older allocations.
+### Bottleneck Analysis (65K threads)
+Primary bottleneck is **occupancy** (31%), not DRAM bandwidth (65% utilized):
+- 65K threads / 128 SMs = 512 threads/SM = 16 warps/SM
+- 4 warp schedulers per SM → 4 warps per scheduler
+- With ~5 instructions between memory ops and ~28-cycle L1 latency:
+  4 warps hide only 20 cycles, leaving 8 cycles exposed per memory access
+- DRAM write traffic: 11.8 GB (dirty evictions), ~655 GB/s → 65% of peak
+- DRAM read traffic: 61 MB → near zero (fully cached in L2)
+- More threads would help but the benchmark has exactly 65K leaves
 
-### Why 32K ≈ 65K Throughput
-- 58 regs → 1024 threads/SM max → 128 SMs × 1024 = 131K slots. Both 32K and 65K fit.
-- At 32K: each thread does 2x work (403M/32K vs 403M/65K interactions). More L2-resident
-  working set per thread → higher per-thread rate → same total throughput.
-- At 65K: per-thread rate drops (more L2 pressure), but more parallelism compensates.
-  Net result: ~same total MIPS.
+### Memory Liveness in @spin
+Per step: ~14 words allocated, but only last 2-3 steps' data (~10 KB/warp) is alive.
+Over 2048 steps per leaf: total allocation is 7 MB/warp, of which 99.8% is dead.
+With linear allocation, dead data occupies L2 cache lines until evicted. Circular
+allocation reclaims dead space, confining the working set and reducing eviction traffic.
 
 ## What Was Tried and Didn't Help (or Marginal)
 
 - **`__launch_bounds__(128, 4)`** — forced 128 regs, 4 blocks/SM. Helped 65K (+10%) but hurt
-  32K (-7%) due to 156-byte spills. Removed; noinline heap_alloc_coop achieves 58 regs
+  32K (-7%) due to 156-byte spills. Removed; noinline heap_alloc_coop achieves 60 regs
   without spills.
 - **`__launch_bounds__(128, 3)`** — 168 regs, spills, worse at 65K. Discarded.
 - **`st.global.wb` explicit stores** — default is already WB on SM89, no change.
@@ -199,41 +239,65 @@ Parallel SNF evaluation via static binary-tree split:
 - **Passing `mask` parameter to noinline heap_alloc_coop** — caused illegal memory access on
   SM89. The mask from `__activemask()` in the inline caller goes stale before the noinline
   callee's `__shfl_sync`. Fixed by getting fresh mask inside the noinline function.
+- **Register stack cache (4 entries)** — tried sc[4] array (went to local memory = DRAM, 50%
+  regression at 65K) and named registers sc0-sc3 (70 regs, icache pressure, 48% regression).
+  The stack already hits L1 (84% hit rate) so register caching saves at most 28 cycles/access.
+  Not worth the register pressure / icache cost on this GPU.
+- **WHNF fast-paths in enter cases (APP, DUP, OP2, etc.)** — added `(WHNF_MASK >> tag) & 1`
+  check after each heap_read. Increased registers from 60 → 70 (+10!), causing 48% regression
+  at 65K. The wnf() function's compiler-generated code is extremely sensitive to control-flow
+  changes — even small additions cascade into register allocation changes.
+- **ALO dispatch shortcuts (WHNF results → goto apply)** — sending ALO-LAM, ALO-NOD(MAT),
+  etc. directly to `goto apply` instead of `goto enter`. Improved 1T-32K by 5-7%, but caused
+  48% regression at 65K. Same compiler sensitivity issue. The SASS layout changes unpredictably.
+- **`__ldg` for book term reads in ALO** — neutral effect. Book data is immutable but the
+  L1/texture cache is unified on SM89, so `__ldg` doesn't help.
+- **`-O3` flag** — worse than `-O2` at all thread counts. Device code optimization is controlled
+  by ptxas, not nvcc optimization level.
+- **`--maxrregcount=48-56`** — small spills, marginal changes (±1%). At 52 regs with 48-byte
+  spills: +1.1%. Not worth the fragility.
+- **Vectorized 128-bit stores** — requires 16-byte alignment. Mixed 1-word and 2-word
+  allocations make alignment unpredictable. Padding wastes 50% of 1-word allocs.
 
 ## What Would Further Improve Performance
 
-1. **AOT compilation via `aot_try_call()`** — eliminates the interpreter loop entirely.
-   Each @spin step's ~21 switch dispatches collapse to direct function calls. The hook exists
-   in wnf(). When the unified AOT compiler emits `fn`/`heap_*`/`ITRS_INC`-based functions,
-   they compile on both CPU and GPU unchanged. Expected 3-5x per-thread improvement.
+1. **Higher occupancy via more leaves** — the 65K benchmark is occupancy-limited at 31%.
+   With 131K+ threads (deeper tree): each SM gets 32+ warps/SM = 67% occupancy. This requires
+   circular heap allocation AND a global barrier after the split phase to prevent cross-warp
+   data corruption. Current implementation only supports split_depth == tree_depth.
 
-2. **Vectorized heap writes** — pair adjacent `heap_set` calls into 128-bit stores
-   (`ulonglong2`) where alignment permits (e.g., ALO-LAM's two writes to bind_loc).
-   Halves write transactions for 2-cell allocations.
+2. **Reduce heap words per interaction** — currently ~14 words allocated per @spin step.
+   Fusing adjacent interactions (e.g., REF→ALO→LAM→APP-LAM as one unit) would eliminate
+   intermediate heap cells. This is conceptually close to AOT but could be done as
+   pattern-specific interpreter fast-paths.
 
-3. **Tighter heap layout** — dynamically size per-warp regions based on actual allocation
-   needs (currently each warp gets heap_size/n_warps regardless of workload). Would improve
-   L2 utilization for irregular workloads where some warps allocate much more than others.
+3. **Prefetching APP arg** — when entering APP, prefetch `HEAP[loc+1]` (the arg needed later
+   in apply). Currently the arg load and fun load are at different times. Prefetching would
+   pipeline them. However, they're usually in the same 128B cache line (adjacent 8B words),
+   so the arg is already in L1 from the fun load. Marginal expected benefit.
 
-4. **Compact heap via smaller per-warp chunks** — cap per-warp heap at estimated need
-   (e.g., 8 MB) rather than equal-dividing the full 20 GB. Threads in neighboring warps
-   would be closer in address space → better L2 set utilization. Requires knowing per-thread
-   allocation bound at launch time.
+4. **Per-thread arena allocation** — each thread bumps a register-local pointer instead of
+   going through warp-cooperative `heap_alloc_coop`. Eliminates `__activemask` + `__shfl_sync`
+   overhead per allocation (~50 cycles/call). But allocations from different threads wouldn't
+   coalesce (different address ranges), increasing cache line count by 32x for writes. Net
+   effect is negative at scale due to bandwidth.
 
 ## Architecture Notes
 
 - **Heap**: flat `u64[]` global memory, per-warp bump alloc (warp-cooperative, contiguous
   within warp). `heap_alloc` inline fast-path for count==1, noinline `heap_alloc_coop` for
   warp-cooperative path with `__shfl_sync` rank assignment + `atomicAdd` fallback.
+  With `CIRCULAR_HEAP`: wraps to `S_WARP_BASE` when `S_WARP_HEAP` exceeds `S_WARP_END`.
 - **Book**: `u64[2^24]` read-only, `__ldg` for lookups.
 - **Stacks**: global memory, depth-major interleaved: `stacks[depth * n_threads + tid]`.
   `d_wnf_stride` = n_threads (1 for eval_kernel, n_threads for par_eval_kernel).
-- **Hot state**: shared memory `s_hot[528]`:
+- **Hot state**: shared memory `s_hot[536]`:
   - `[0..255]` ITRS per-thread, `[256..511]` MAX_DEPTH per-thread.
   - `[512..519]` WARP_HEAP per-warp, `[520..527]` WARP_END per-warp.
+  - `[528..535]` WARP_BASE per-warp (circular heap region start).
 - **Split model**: static path mapping by thread ID bits. Owner reduces + `__threadfence`,
   others `spin_until_whnf` (volatile reads + `__nanosleep(100)` after 64 polls).
   `__syncwarp` after split for reconvergence.
 - **Block size**: 1 for ≤32 threads (no intra-warp divergence), 128 for >32.
 - **Memory budget**: ~21 GB heap, 128 MB book, per-thread 1024-entry WNF stacks (interleaved),
-  S_HOT_BYTES = 4224 bytes shared memory per block.
+  S_HOT_BYTES = 4288 bytes shared memory per block.

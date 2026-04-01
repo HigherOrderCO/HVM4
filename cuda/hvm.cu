@@ -174,7 +174,8 @@ extern __shared__ u64 s_hot[];
 #define S_MAX_DEPTH 256   // per-thread (256 max)
 #define S_WARP_HEAP 512   // per-warp (8 max): bump next
 #define S_WARP_END  520   // per-warp (8 max): region end
-#define S_HOT_WORDS 528
+#define S_WARP_BASE 528   // per-warp (8 max): region start (for circular wrap)
+#define S_HOT_WORDS 536
 #define S_HOT_BYTES (S_HOT_WORDS * sizeof(u64))
 
 #define d_itrs (s_hot[S_ITRS + threadIdx.x])
@@ -218,7 +219,13 @@ __device__ __noinline__ u64 heap_alloc_coop(u64 size) {
     u64 base;
     if (lane == leader) {
       base = s_hot[S_WARP_HEAP + warp];
-      s_hot[S_WARP_HEAP + warp] = base + (u64)count * size;
+      u64 need = (u64)count * size;
+#ifdef CIRCULAR_HEAP
+      if (base + need > s_hot[S_WARP_END + warp]) {
+        base = s_hot[S_WARP_BASE + warp];
+      }
+#endif
+      s_hot[S_WARP_HEAP + warp] = base + need;
     }
     base = __shfl_sync(mask, base, leader);
     return base + (u64)rank * size;
@@ -232,6 +239,11 @@ fn u64 heap_alloc(u64 size) {
   if (__popc(mask) == 1) {
     u32 warp = threadIdx.x >> 5;
     u64 at = s_hot[S_WARP_HEAP + warp];
+#ifdef CIRCULAR_HEAP
+    if (at + size > s_hot[S_WARP_END + warp]) {
+      at = s_hot[S_WARP_BASE + warp];
+    }
+#endif
     s_hot[S_WARP_HEAP + warp] = at + size;
     return at;
   }
@@ -1114,6 +1126,7 @@ __global__ void eval_kernel(u64 *heap, u64 *book, Term *wnf_stacks,
   d_wnf_stacks = wnf_stacks;
   d_wnf_stride = 1;
   d_itrs = 0;
+  s_hot[S_WARP_BASE + 0] = heap_start;
   s_hot[S_WARP_HEAP + 0] = heap_start;
   s_hot[S_WARP_END  + 0] = heap_end_val;
   s_hot[S_MAX_DEPTH + threadIdx.x] = 0;
@@ -1162,8 +1175,8 @@ fn void seq_snf(u64 loc) {
 }
 
 __global__ void par_eval_kernel(u64 *heap, u64 *book, Term *wnf_stacks,
-                                u64 root_loc, u64 heap_start, u64 heap_end_val,
-                                u32 tree_depth, u32 split_depth, u64 *results) {
+                     u64 root_loc, u64 heap_start, u64 heap_end_val,
+                     u32 tree_depth, u32 split_depth, u64 max_region, u64 *results) {
   u32 tid = threadIdx.x + blockIdx.x * blockDim.x;
   u32 n_threads = blockDim.x * gridDim.x;
 
@@ -1176,11 +1189,14 @@ __global__ void par_eval_kernel(u64 *heap, u64 *book, Term *wnf_stacks,
   u32 tpr = (blockDim.x >= 32) ? 32 : 1;
   u32 n_regions = n_threads / tpr;
   u64 region_chunk = heap_size / (u64)n_regions;
+  if (max_region > 0 && region_chunk > max_region) region_chunk = max_region;
   u32 region_global = tid / tpr;
   u32 region_local  = threadIdx.x / tpr;
   if (threadIdx.x % tpr == 0) {
-    s_hot[S_WARP_HEAP + region_local] = heap_start + (u64)region_global * region_chunk;
-    s_hot[S_WARP_END  + region_local] = heap_start + (u64)(region_global + 1) * region_chunk;
+    u64 base = heap_start + (u64)region_global * region_chunk;
+    s_hot[S_WARP_BASE + region_local] = base;
+    s_hot[S_WARP_HEAP + region_local] = base;
+    s_hot[S_WARP_END  + region_local] = base + region_chunk;
   }
   d_itrs = 0;
   s_hot[S_MAX_DEPTH + threadIdx.x] = 0;
@@ -1235,6 +1251,8 @@ __global__ void par_eval_kernel(u64 *heap, u64 *book, Term *wnf_stacks,
     exit(1);                                                           \
   }                                                                    \
 } while(0)
+
+static u64 g_region_words = 0;
 
 static const char *tag_name(u8 tag) {
   switch (tag) {
@@ -1383,7 +1401,7 @@ static int run_par_eval(const char *dump_path, u32 tree_depth, cudaDeviceProp *p
   if (n_threads < block_size) block_size = n_threads;
   u32 n_blocks = n_threads / block_size;
 
-  size_t stack_per_thread = 1024;
+  size_t stack_per_thread = (n_threads <= 65536) ? 1024 : 64;
   size_t book_bytes = book_cap * sizeof(u64);
   size_t stack_bytes = (size_t)n_threads * stack_per_thread * sizeof(Term);
   size_t reserved = 3ULL << 30;
@@ -1417,9 +1435,10 @@ static int run_par_eval(const char *dump_path, u32 tree_depth, cudaDeviceProp *p
   CUDA_CHECK(cudaEventCreate(&t1));
 
   CUDA_CHECK(cudaEventRecord(t0));
+  u64 max_region = g_region_words;
   par_eval_kernel<<<n_blocks, block_size, S_HOT_BYTES>>>(
     d_heap, d_book, d_stacks, root_loc, alloc_start, heap_words,
-    tree_depth, split_depth, d_results);
+    tree_depth, split_depth, max_region, d_results);
   CUDA_CHECK(cudaEventRecord(t1));
   CUDA_CHECK(cudaEventSynchronize(t1));
 
@@ -1459,16 +1478,23 @@ int main(int argc, char **argv) {
          prop.totalGlobalMem / (1024 * 1024));
 
   if (argc < 2) {
-    fprintf(stderr, "Usage: %s <dump.bin> [-p DEPTH]\n", argv[0]);
+    fprintf(stderr, "Usage: %s <dump.bin> [-p DEPTH] [-r REGION_KB]\n", argv[0]);
     return 1;
   }
 
+  u32 par_depth = 0;
+  int has_par = 0;
+  u64 region_kb = 0;
   for (int i = 2; i < argc; i++) {
     if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
-      u32 depth = atoi(argv[++i]);
-      return run_par_eval(argv[1], depth, &prop);
+      par_depth = atoi(argv[++i]);
+      has_par = 1;
+    } else if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
+      region_kb = atoll(argv[++i]);
     }
   }
+  g_region_words = region_kb * 128;
+  if (has_par) return run_par_eval(argv[1], par_depth, &prop);
 
   return run_eval(argv[1]);
 }
