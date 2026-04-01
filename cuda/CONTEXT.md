@@ -3,14 +3,17 @@
 ## What Exists
 
 ### Files
-- `cuda/hvm.cu` — GPU evaluator (~1500 lines). Shares interaction rules from `clang/` via
-  `#include`. Contains: compatibility layer, heap/stack ops, WNF evaluator, two kernels
-  (single-thread `eval_kernel`, parallel `par_eval_kernel`), and host main.
+- `cuda/hvm.cu` — GPU evaluator (~1630 lines). Shares interaction rules from `clang/` via
+  `#include`. Contains: compatibility layer, heap/stack ops, WNF evaluator, three kernel
+  variants (single-thread `eval_kernel`, parallel `par_eval_kernel`, two-kernel
+  `split_tree_kernel`+`eval_leaves_kernel`), and host main.
 - `cuda/dump.c` — CPU-side parser → binary dump (HEAP + BOOK + main_id). Includes
   `../clang/hvm.c` for the full CPU runtime, then serializes the parsed book.
 - `cuda/bench_tree.hvm` — depth 16, 65536 leaves, seq 2048. 403M interactions.
+- `cuda/bench_tree17.hvm` — depth 17, 131072 leaves, seq 1024. ~403M interactions.
 - `cuda/bench_fast.hvm` — depth 1, 2 leaves, seq 200K. ~1.2M interactions, ~1.4s/1 GPU thread.
 - `cuda/bench_8leaf.hvm` — depth 3, 8 leaves, seq 50K.
+- `cuda/bench.sh` — automated build+test harness for all experiment variants.
 
 ### Build (`ssh rtx`)
 ```bash
@@ -21,9 +24,16 @@ nvcc -O2 -arch=sm_89 -I../clang -w -o hvm_cuda hvm.cu
 ./hvm_cuda bench_fast.bin -p 1     # 2 threads
 ./hvm_cuda bench_tree.bin -p 16    # 65536 threads
 
-# Circular heap build (for benchmarks where split_depth == tree_depth):
-nvcc -O2 -arch=sm_89 -I../clang -w -DCIRCULAR_HEAP -o hvm_cuda_circ hvm.cu
-./hvm_cuda_circ bench_tree.bin -p 16 -r 64   # 64 KB region per warp
+# Best known config:
+nvcc -O2 -arch=sm_89 -I../clang -w -DCIRCULAR_HEAP -DNO_MAX_DEPTH -o hvm_best hvm.cu
+./hvm_best bench_tree.bin -p 16 -r 48
+
+# All compile flags:
+#   -DCIRCULAR_HEAP        wrap per-warp bump pointer (requires -r)
+#   -DNO_MAX_DEPTH         remove max stack-depth tracking (saves 1 reg in circ mode)
+#   -DNO_WHNF_FASTPATH     remove WHNF shortcut in VAR/DP enter (neutral)
+#   -DSPLIT_KERNEL          two-kernel split/eval (for 128K+ threads)
+#   -DLAUNCH_BOUNDS=N       set __launch_bounds__(128, N) on par_eval_kernel
 ```
 
 ### RTX Machine
@@ -226,6 +236,171 @@ Parallel SNF evaluation via static binary-tree split:
   VRAM minus overhead.
 - `-p DEPTH` flag: `n_threads = 1 << depth`, `split_depth = depth`.
 - `-r REGION_KB` flag: caps per-warp heap region to REGION_KB × 1024 bytes (circular mode).
+
+## Detailed @spin Evaluation Trace (One Step)
+
+The benchmark function:
+```
+@spin = λ{0: 0; λx. @spin(x - 1)}
+```
+Desugars to (de Bruijn book representation):
+```
+@spin = LAM(body)     body → APP(MAT #0 {hit, miss}, VAR(1))
+  hit  = NUM(0)
+  miss = LAM(APP(REF(@spin), OP2(SUB, VAR(1), NUM(1))))
+```
+The book stores these as static terms at fixed addresses. ALO lazily copies them to the heap
+with substitutions. One full @spin step (n > 0) traces through wnf() as follows.
+
+### Precondition
+`next = APP(REF(@spin), <arg>)` where `<arg>` will eventually produce NUM(n).
+Stack: `s_pos = base` (empty). The APP is on the heap at some `app0_loc`.
+
+### Trace (showing goto labels, heap ops, stack ops)
+
+```
+ENTER APP [app0_loc]                                          ← dispatch #1
+  fun = heap_read(app0_loc + 0)       → REF(@spin)           [L2 read]
+  PUSH(APP(app0_loc))                                         [L2 write: stack]
+  next = fun; goto enter
+
+ENTER REF(@spin)                                              ← dispatch #2
+  bv = __ldg(&BOOK[@spin])            → book_loc              [L2 read: book, cached]
+  next = ALO(len=0, val=book_loc)     ← register only, no heap
+  goto enter
+
+ENTER ALO (len=0)                                             ← dispatch #3
+  tm_loc = book_loc                   ← from term_val, register
+  book_term = heap_read(book_loc)     → LAM(lam_ext, body_idx) [L2 read: book data]
+  tag == LAM → call wnf_alo_lam(alo_loc=0, ls_loc=0, len=0, book_term)
+
+  wnf_alo_lam:
+    bind_loc = heap_alloc(2)                                   [shmem: bump]
+    loc      = heap_alloc(1)                                   [shmem: bump]
+    alo = term_new_alo_at(loc, bind_loc, 1, body_idx)
+      → heap_set(loc, pack(bind_loc, body_idx))               [L2 write: alo pair]
+    heap_set(bind_loc + 0, alo)                                [L2 write: body slot] ← (A)
+    heap_set(bind_loc + 1, NUM(0, ls_loc=0))                   [L2 write: ls link]
+    return LAM(lam_ext, bind_loc)
+
+  next = LAM(lam_ext, bind_loc)       ← LAM is WHNF
+  goto enter → but tag is LAM → falls through to default
+  whnf = next; goto apply
+
+APPLY: pop APP(app0_loc)                                      ← dispatch #4
+  POP() → APP(app0_loc)                                       [L2 read: stack]
+  arg = heap_read(app0_loc + 1)       → <arg>                 [L2 read]
+  whnf tag == LAM → call wnf_app_lam(LAM(bind_loc), arg)
+
+  wnf_app_lam:
+    body = heap_read(bind_loc + 0)    → alo                   [L2 read] ← (B) reads (A)
+    heap_subst_var(bind_loc + 0, arg)
+      → heap_set(bind_loc + 0, SUB(arg))                      [L2 write: substitution]
+    return body (= alo)
+
+  next = alo = ALO(len=1, val=loc); goto enter
+
+ENTER ALO (len=1)                                             ← dispatch #5
+  alo_loc = loc
+  pair = heap_read(loc)               → pack(bind_loc, body_idx)  [L2 read: alo pair]
+  ls_loc = bind_loc, tm_loc = body_idx
+  book_term = heap_read(body_idx)     → APP(mat_idx, var_idx)     [L2 read: book data]
+  tag == APP → call wnf_alo_nod(alo_loc=loc, ls=bind_loc, len=1, book_term)
+
+  wnf_alo_nod (APP, ari=2):
+    args[0] = term_new_alo_at(loc, bind_loc, 1, mat_idx)
+      → heap_set(loc, pack(bind_loc, mat_idx))                [L2 write: reuse loc]
+    args[1] = term_new_alo(bind_loc, 1, var_idx)
+      → alo1_loc = heap_alloc(1)                              [shmem: bump]
+      → heap_set(alo1_loc, pack(bind_loc, var_idx))           [L2 write: new alo pair]
+    mat_loc = heap_alloc(2)                                    [shmem: bump]
+    heap_set(mat_loc + 0, ALO(1, loc))                         [L2 write: app slot 0]
+    heap_set(mat_loc + 1, ALO(1, alo1_loc))                    [L2 write: app slot 1]
+    return APP(0, mat_loc)
+
+  next = APP(0, mat_loc); goto enter
+
+ENTER APP [mat_loc]                                           ← dispatch #6
+  fun = heap_read(mat_loc + 0)        → ALO(1, loc)           [L2 read]
+  PUSH(APP(mat_loc))                                           [L2 write: stack]
+  next = ALO(1, loc); goto enter
+
+ENTER ALO (len=1)  [the MAT expansion]                        ← dispatch #7
+  pair = heap_read(loc)               → pack(bind_loc, mat_idx)  [L2 read: alo pair]
+  book_term = heap_read(mat_idx)      → MAT(#0, ...)             [L2 read: book data]
+  tag == MAT → call wnf_alo_nod(..., MAT, ari=2)
+
+  wnf_alo_nod (MAT, ari=2):
+    args[0] = term_new_alo_at(loc, bind_loc, 1, hit_idx)      [L2 write: reuse loc]
+    args[1] = term_new_alo(bind_loc, 1, miss_idx)
+      → alo2_loc = heap_alloc(1)                              [shmem: bump]
+      → heap_set(alo2_loc, pack(bind_loc, miss_idx))          [L2 write]
+    mat2_loc = heap_alloc(2)                                   [shmem: bump]
+    heap_set(mat2_loc + 0, ALO(1, loc))                        [L2 write]
+    heap_set(mat2_loc + 1, ALO(1, alo2_loc))                   [L2 write]
+    return MAT(#0, mat2_loc)
+
+  next = MAT(#0, mat2_loc)            ← MAT is WHNF
+  whnf = next; goto apply
+
+APPLY: pop APP(mat_loc)                                       ← dispatch #8
+  POP()                                                        [L2 read: stack]
+  arg = heap_read(mat_loc + 1)        → ALO(1, alo1_loc)      [L2 read]
+  whnf tag == MAT → PUSH(MAT whnf), enter arg
+  PUSH(MAT(#0, mat2_loc))                                     [L2 write: stack]
+  next = ALO(1, alo1_loc); goto enter
+
+ENTER ALO (len=1)  [the VAR resolution]                       ← dispatch #9
+  pair = heap_read(alo1_loc)          → pack(bind_loc, var_idx)  [L2 read]
+  book_term = heap_read(var_idx)      → VAR(level=1)             [L2 read: book data]
+  tag == VAR → call wnf_alo_var(ls=bind_loc, len=1, VAR(1))
+
+  wnf_alo_var:
+    lvl=1, len=1, idx = len - lvl = 0
+    loop 0 times → it = bind_loc
+    return VAR(bind_loc)              ← register only
+
+  next = VAR(bind_loc); goto enter
+
+ENTER VAR [bind_loc]                                          ← dispatch #10
+  cell = heap_read(bind_loc)          → SUB(arg)              [L2 read: substitution]
+  sub bit set → next = arg (with sub cleared)
+  WHNF fast-path: if arg is NUM → whnf = arg; goto apply      [fast-path fires here]
+
+APPLY: pop MAT(#0, mat2_loc)                                  ← dispatch #11
+  POP()                                                        [L2 read: stack]
+  whnf = NUM(n), tag == NUM
+  → call wnf_app_mat_num(MAT(#0, mat2_loc), NUM(n))
+
+  wnf_app_mat_num (n > 0 → mismatch):
+    g = heap_read(mat2_loc + 1)       → ALO(1, alo2_loc)      [L2 read: miss arm]
+    APP at mat2_loc = term_new_app_at(mat2_loc, g, NUM(n))
+      → heap_set(mat2_loc + 0, g)                             [L2 write: reuse slot]
+      → heap_set(mat2_loc + 1, NUM(n))                         [L2 write: reuse slot]
+    return APP(0, mat2_loc)
+
+  next = APP(0, mat2_loc); goto enter
+
+... [continues: ENTER APP → ENTER ALO(miss) → alo_lam → APPLY APP-LAM →
+     body = ALO(APP(REF(@spin), OP2(SUB, VAR, NUM(1)))) →
+     ENTER ALO → alo_nod(APP) → ENTER APP → ENTER ALO(REF) → REF(@spin) →
+     ENTER ALO(OP2) → alo_nod(OP2) → ENTER OP2 → ENTER ALO(VAR) → alo_var → NUM(n) →
+     APPLY OP2+NUM → read y → OP2-NUM-NUM → NUM(n-1) →
+     APPLY APP: arg=NUM(n-1), fun=REF(@spin) → falls through to next step]
+```
+
+### Summary of heap operations per step
+
+Marks ← (A)/(B) show write-then-read pairs eliminable by super-ops.
+
+- **L2 reads**: ~12 (book data, alo pairs, stack pops, substitution, APP slots)
+- **L2 writes**: ~12 (alo pairs, bind slots, APP/MAT slots, stack pushes, substitution)
+- **Shmem ops**: ~5 (heap_alloc bump pointer)
+- **Total L2 transactions**: ~24
+
+The alo_lam (A)→app_lam (B) pair is a write at bind_loc+0 immediately followed by a read at
+bind_loc+0. REF-CALL super-op eliminates both. Similar pairs exist at the MAT allocation
+(alo_nod writes MAT slots, APP+MAT immediately reads them back) — ALO-NOD-CONSUME target.
 
 ## Why Per-Thread Rate Drops at Scale
 
@@ -469,6 +644,44 @@ Fused:      heap_subst_var(bind_loc, arg);  next = alo;  // skip write+read of b
 
 Saves: 2 L2 transactions (1 write + 1 read of bind_loc+0). Also saves 2 dispatch cycles
 (ALO enter + APP apply). Implementation: ~15 lines added to REF enter case.
+
+Pseudo-code (in REF enter, after book lookup):
+```c
+case REF: {
+  u32 nam = term_ext(next);
+  if (BOOK != NULL) {
+    u64 bv = __ldg(&BOOK[nam]);
+    if (bv != 0) {
+      // --- super-op: REF-CALL ---
+      Term bk = heap_read(bv);                    // 1 L2 read (book root)
+      if (term_tag(bk) == LAM && s_pos > base) {
+        Term fr = d_wnf_stacks[(u64)(s_pos-1) * nt + tid];  // peek stack (register)
+        if (term_tag(fr) == APP) {
+          s_pos--;                                 // pop
+          u64 app_loc = term_val(fr);
+          Term arg = heap_read(app_loc + 1);       // 1 L2 read  (arg)
+          u64 bind = heap_alloc(2);                // shmem
+          u64 loc  = heap_alloc(1);                // shmem
+          u64 body = term_val(bk);
+          Term alo = term_new_alo_at(loc, bind, 1, body);  // 1 L2 write (alo pair)
+          // fused: skip heap_set(bind+0, alo) + heap_read(bind+0)
+          if (!(term_ext(bk) & LAM_ERA_MASK))
+            heap_subst_var(bind, arg);             // 1 L2 write (substitution)
+          heap_set(bind + 1, term_new(0, NUM, 0, 0));  // 1 L2 write (ls link)
+          d_itrs += 2;                             // ALO-LAM + APP-LAM
+          next = alo;
+          goto enter;
+        }
+      }
+      // --- fallback: standard path ---
+      next = term_new_alo(0, 0, bv);
+      goto enter;
+    }
+  }
+  whnf = next; goto apply;
+}
+```
+Net ops: 2 reads + 3 writes + 2 shmem = 5 L2 txns (vs 7 non-fused).
 
 **2. ALO-NOD-CONSUME: ALO→alo_nod + immediate consumption**
 
