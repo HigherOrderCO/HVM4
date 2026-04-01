@@ -32,6 +32,7 @@ typedef struct {
   int   version;
   int   as_c;
   int   to_c;
+  int   gc_heap_kb;       // 0 = disabled, >0 = GC heap size in KB
   char *output;
   u32            ffi_loads_len;
   RuntimeFfiLoad ffi_loads[RUNTIME_FFI_MAX];
@@ -152,6 +153,7 @@ fn CliOpts parse_opts(int argc, char **argv) {
     .version = 0,
     .as_c = 0,
     .to_c = 0,
+    .gc_heap_kb = 0,
     .output = NULL,
     .ffi_loads_len = 0,
     .file = NULL
@@ -210,6 +212,12 @@ fn CliOpts parse_opts(int argc, char **argv) {
       opts.threads = atoi(num);
       if (opts.threads > MAX_THREADS) {
         fprintf(stderr, "Error: --threads value (%d) exceeds MAX_THREADS (%d)\n", opts.threads, MAX_THREADS);
+        exit(1);
+      }
+    } else if (strncmp(argv[i], "-G", 2) == 0 && argv[i][2] != '\0') {
+      opts.gc_heap_kb = atoi(argv[i] + 2);
+      if (opts.gc_heap_kb <= 0) {
+        fprintf(stderr, "Error: invalid GC heap size '%s'\n", argv[i] + 2);
         exit(1);
       }
     } else if (strcmp(argv[i], "--to-c") == 0) {
@@ -391,6 +399,13 @@ int main(int argc, char **argv) {
   }
 
   free(src);
+
+  if (opts.gc_heap_kb > 0) {
+    u64 total_words = (u64)opts.gc_heap_kb * 1024 / sizeof(Term);
+    u64 space_words = total_words / 2;
+    if (space_words < 512) space_words = 512;
+    gc_init(space_words);
+  }
 
   // Evaluate and print stats using shared runtime behavior.
   RuntimeEvalCfg eval_cfg = {

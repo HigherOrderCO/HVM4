@@ -79,6 +79,16 @@ __attribute__((hot)) fn Term wnf(Term term) {
   Term whnf;
 
   enter: {
+    if (__builtin_expect(GC_NEEDED, 0)) {
+      return wnf_rebuild(next, stack, s_pos, base);
+    }
+    if (__builtin_expect(GC_ENABLED, 0)) {
+      u64 idx = (u64)WNF_TID * HEAP_STRIDE;
+      if (HEAP_NEXT[idx] + GC_MARGIN >= HEAP_END[idx]) {
+        GC_NEEDED = 1;
+        return wnf_rebuild(next, stack, s_pos, base);
+      }
+    }
     if (__builtin_expect(STEPS_ITRS_LIM != 0, 0) && ITRS >= STEPS_ITRS_LIM) {
       return wnf_rebuild(next, stack, s_pos, base);
     }
@@ -303,6 +313,9 @@ __attribute__((hot)) fn Term wnf(Term term) {
     }
 
     while (s_pos > base) {
+      if (__builtin_expect(GC_NEEDED, 0)) {
+        return wnf_rebuild(whnf, stack, s_pos, base);
+      }
       if (__builtin_expect(STEPS_ITRS_LIM != 0, 0) && ITRS >= STEPS_ITRS_LIM) {
         return wnf_rebuild(whnf, stack, s_pos, base);
       }

@@ -283,6 +283,7 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 #include "heap/set.c"
 #include "heap/set_rel.c"
 #include "heap/init_slices.c"
+#include "heap/collect.c"
 
 // Term Constructors
 // =================
