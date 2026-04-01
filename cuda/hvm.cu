@@ -97,6 +97,14 @@ typedef struct {
 #define BJ1 44
 #define PRI 45
 
+// Bitmask of tags already in weak head normal form (single-instruction check)
+#define WHNF_MASK ( \
+  (1ULL << LAM) | (1ULL << SUP) | (1ULL << NAM) | (1ULL << DRY) | \
+  (1ULL << ERA) | (1ULL << MAT) | (1ULL << NUM) | (1ULL << SWI) | \
+  (1ULL << USE) | (1ULL << INC) | (1ULL << ANY) | \
+  (1ULL << BJV) | (1ULL << BJ0) | (1ULL << BJ1) | \
+  ((1ULL << (C16 + 1)) - (1ULL << C00)) )
+
 // LAM Ext Flags
 #define LAM_ERA_MASK 0x20000
 
@@ -162,14 +170,21 @@ __device__ u32 SYM_CON = 0;
 // Hot per-thread state lives in shared memory (5 cycles vs 200+ for global RMW).
 // Layout: 4 banks of 256 u64 slots each.  Block size must be <= 256.
 extern __shared__ u64 s_hot[];
-#define S_ITRS      0
-#define S_HEAP_NEXT 256
-#define S_HEAP_END  512
-#define S_MAX_DEPTH 768
-#define S_HOT_WORDS 1024
+#define S_ITRS      0     // per-thread (256 max)
+#define S_MAX_DEPTH 256   // per-thread (256 max)
+#define S_WARP_HEAP 512   // per-warp (8 max): bump next
+#define S_WARP_END  520   // per-warp (8 max): region end
+#define S_HOT_WORDS 528
 #define S_HOT_BYTES (S_HOT_WORDS * sizeof(u64))
 
 #define d_itrs (s_hot[S_ITRS + threadIdx.x])
+
+// Tag → arity lookup table (replaces 40-case switch, hits L1/constant cache)
+__device__ const u8 c_arity[48] = {
+  2, 0, 1, 0, 0, 2, 2, 0, 0, 0, 2, 0, 2,
+  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+  0, 2, 1, 2, 3, 3, 2, 2, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0
+};
 
 // ============================================================
 // Term Operations (shared with CPU -- pure bit manipulation)
@@ -191,18 +206,36 @@ fn u32 gpu_tid() {
   return threadIdx.x + blockIdx.x * blockDim.x;
 }
 
-fn u64 heap_alloc(u64 size) {
-  u32 idx = threadIdx.x;
-  u64 at = s_hot[S_HEAP_NEXT + idx];
-  u64 next = at + size;
-  if (next > s_hot[S_HEAP_END + idx]) {
-    printf("GPU HEAP OVERFLOW: tid=%u at=%llu size=%llu end=%llu\n",
-           idx, (unsigned long long)at, (unsigned long long)size,
-           (unsigned long long)s_hot[S_HEAP_END + idx]);
-    asm("trap;");
+__device__ __noinline__ u64 heap_alloc_coop(u64 size) {
+  unsigned mask = __activemask();
+  u32 warp = threadIdx.x >> 5;
+  u32 lane = threadIdx.x & 31;
+  u32 leader = __ffs(mask) - 1;
+  u32 count = __popc(mask);
+  u32 rank = __popc(mask & ((1u << lane) - 1));
+  u64 leader_size = __shfl_sync(mask, size, leader);
+  if (__all_sync(mask, size == leader_size)) {
+    u64 base;
+    if (lane == leader) {
+      base = s_hot[S_WARP_HEAP + warp];
+      s_hot[S_WARP_HEAP + warp] = base + (u64)count * size;
+    }
+    base = __shfl_sync(mask, base, leader);
+    return base + (u64)rank * size;
   }
-  s_hot[S_HEAP_NEXT + idx] = next;
-  return at;
+  return (u64)atomicAdd((unsigned long long*)&s_hot[S_WARP_HEAP + warp],
+                        (unsigned long long)size);
+}
+
+fn u64 heap_alloc(u64 size) {
+  unsigned mask = __activemask();
+  if (__popc(mask) == 1) {
+    u32 warp = threadIdx.x >> 5;
+    u64 at = s_hot[S_WARP_HEAP + warp];
+    s_hot[S_WARP_HEAP + warp] = at + size;
+    return at;
+  }
+  return heap_alloc_coop(size);
 }
 
 fn Term heap_read(u64 loc) {
@@ -264,41 +297,7 @@ fn void heap_set_rel(u64 loc, Term val) {
 // ============================================================
 
 fn u32 term_arity(Term t) {
-  u8 tag = term_tag(t);
-  switch (tag) {
-    case APP: return 2;
-    case VAR: return 0;
-    case LAM: return 1;
-    case DP0: return 0;
-    case DP1: return 0;
-    case SUP: return 2;
-    case DUP: return 2;
-    case ALO: return 0;
-    case REF: return 0;
-    case NAM: return 0;
-    case DRY: return 2;
-    case ERA: return 0;
-    case MAT: return 2;
-    case NUM: return 0;
-    case SWI: return 2;
-    case USE: return 1;
-    case OP2: return 2;
-    case DSU: return 3;
-    case DDU: return 3;
-    case EQL: return 2;
-    case AND: return 2;
-    case OR:  return 2;
-    case UNS: return 1;
-    case ANY: return 0;
-    case INC: return 1;
-    case BJV: return 0;
-    case BJ0: return 0;
-    case BJ1: return 0;
-    case PRI: return 0;
-    default:
-      if (tag >= C00 && tag <= C16) return tag - C00;
-      return 0;
-  }
+  return c_arity[term_tag(t)];
 }
 
 // ============================================================
@@ -390,28 +389,30 @@ fn u32 term_arity(Term t) {
 __device__ Term *d_wnf_stacks;
 __device__ u64   d_wnf_stride;
 
-fn int aot_try_call(u32 id, Term *stack, u32 *s_pos, u32 base, Term *out) {
+fn int aot_try_call(u32 id, u32 *s_pos, u32 base, Term *out) {
   return 0;
 }
 
 __device__ __noinline__ Term wnf(Term term) {
   u32 tid = gpu_tid();
-  Term *stack = d_wnf_stacks + (u64)tid * d_wnf_stride;
+  u64 nt  = d_wnf_stride;
   u32  s_pos = 0;
   u32  base  = 0;
+  u32  max_d = 0;
   Term next  = term;
   Term whnf;
-  u64  stride = d_wnf_stride;
+
+  #define PUSH(v) do { d_wnf_stacks[(u64)s_pos * nt + tid] = (v); s_pos++; } while(0)
+  #define POP()   (--s_pos, d_wnf_stacks[(u64)s_pos * nt + tid])
 
   enter: {
-    if ((u64)s_pos > s_hot[S_MAX_DEPTH + threadIdx.x])
-      s_hot[S_MAX_DEPTH + threadIdx.x] = (u64)s_pos;
     switch (term_tag(next)) {
       case VAR: {
         u64 loc = term_val(next);
         Term cell = heap_read(loc);
         if (term_sub_get(cell)) {
           next = term_sub_set(cell, 0);
+          if ((WHNF_MASK >> term_tag(next)) & 1) { whnf = next; goto apply; }
           goto enter;
         }
         whnf = next;
@@ -424,9 +425,11 @@ __device__ __noinline__ Term wnf(Term term) {
         Term cell = heap_take(loc);
         if (term_sub_get(cell)) {
           next = term_sub_set(cell, 0);
+          if ((WHNF_MASK >> term_tag(next)) & 1) { whnf = next; goto apply; }
           goto enter;
         }
-        stack[s_pos++] = next;
+        PUSH(next);
+        if (s_pos > max_d) max_d = s_pos;
         next = cell;
         goto enter;
       }
@@ -434,7 +437,8 @@ __device__ __noinline__ Term wnf(Term term) {
       case APP: {
         u64  loc = term_val(next);
         Term fun = heap_read(loc);
-        stack[s_pos++] = next;
+        PUSH(next);
+        if (s_pos > max_d) max_d = s_pos;
         next = fun;
         goto enter;
       }
@@ -454,7 +458,7 @@ __device__ __noinline__ Term wnf(Term term) {
       case REF: {
         u32 nam = term_ext(next);
         Term aot_out;
-        if (aot_try_call(nam, stack, &s_pos, base, &aot_out)) {
+        if (aot_try_call(nam, &s_pos, base, &aot_out)) {
           next = aot_out;
           goto enter;
         }
@@ -539,7 +543,6 @@ __device__ __noinline__ Term wnf(Term term) {
             goto enter;
           }
           default: {
-            // Handle C00..C16
             if (term_tag(book) >= C00 && term_tag(book) <= C16) {
               next = wnf_alo_nod(alo_loc, ls_loc, len, book);
               goto enter;
@@ -553,7 +556,8 @@ __device__ __noinline__ Term wnf(Term term) {
       case OP2: {
         u64  loc = term_val(next);
         Term x   = heap_read(loc + 0);
-        stack[s_pos++] = next;
+        PUSH(next);
+        if (s_pos > max_d) max_d = s_pos;
         next = x;
         goto enter;
       }
@@ -561,7 +565,8 @@ __device__ __noinline__ Term wnf(Term term) {
       case EQL: {
         u64  loc = term_val(next);
         Term a   = heap_read(loc + 0);
-        stack[s_pos++] = next;
+        PUSH(next);
+        if (s_pos > max_d) max_d = s_pos;
         next = a;
         goto enter;
       }
@@ -569,7 +574,8 @@ __device__ __noinline__ Term wnf(Term term) {
       case AND: {
         u64  loc = term_val(next);
         Term a   = heap_read(loc + 0);
-        stack[s_pos++] = next;
+        PUSH(next);
+        if (s_pos > max_d) max_d = s_pos;
         next = a;
         goto enter;
       }
@@ -577,7 +583,8 @@ __device__ __noinline__ Term wnf(Term term) {
       case OR: {
         u64  loc = term_val(next);
         Term a   = heap_read(loc + 0);
-        stack[s_pos++] = next;
+        PUSH(next);
+        if (s_pos > max_d) max_d = s_pos;
         next = a;
         goto enter;
       }
@@ -585,7 +592,8 @@ __device__ __noinline__ Term wnf(Term term) {
       case DSU: {
         u64  loc = term_val(next);
         Term lab = heap_read(loc + 0);
-        stack[s_pos++] = next;
+        PUSH(next);
+        if (s_pos > max_d) max_d = s_pos;
         next = lab;
         goto enter;
       }
@@ -593,7 +601,8 @@ __device__ __noinline__ Term wnf(Term term) {
       case DDU: {
         u64  loc = term_val(next);
         Term lab = heap_read(loc + 0);
-        stack[s_pos++] = next;
+        PUSH(next);
+        if (s_pos > max_d) max_d = s_pos;
         next = lab;
         goto enter;
       }
@@ -607,7 +616,7 @@ __device__ __noinline__ Term wnf(Term term) {
 
   apply: {
     while (s_pos > base) {
-      Term frame = stack[--s_pos];
+      Term frame = POP();
 
       switch (term_tag(frame)) {
         case APP: {
@@ -644,20 +653,26 @@ __device__ __noinline__ Term wnf(Term term) {
             }
             case MAT:
             case SWI: {
-              stack[s_pos++] = whnf;
+              PUSH(whnf);
+              if (s_pos > max_d) max_d = s_pos;
               next = arg;
               goto enter;
             }
             case USE: {
-              stack[s_pos++] = whnf;
+              PUSH(whnf);
+              if (s_pos > max_d) max_d = s_pos;
               next = arg;
               goto enter;
             }
             case NUM: {
+              if ((u64)max_d > s_hot[S_MAX_DEPTH + threadIdx.x])
+                s_hot[S_MAX_DEPTH + threadIdx.x] = (u64)max_d;
               return whnf;
             }
             default: {
               if (term_tag(whnf) >= C00 && term_tag(whnf) <= C16) {
+                if ((u64)max_d > s_hot[S_MAX_DEPTH + threadIdx.x])
+                  s_hot[S_MAX_DEPTH + threadIdx.x] = (u64)max_d;
                 return whnf;
               }
               heap_set(app_loc + 0, whnf);
@@ -796,7 +811,8 @@ __device__ __noinline__ Term wnf(Term term) {
                 whnf = wnf_op2_num_num_raw(opr, (u32)term_val(whnf), (u32)term_val(y));
                 continue;
               }
-              stack[s_pos++] = term_new(0, F_OP2_NUM, opr, term_val(whnf));
+              PUSH(term_new(0, F_OP2_NUM, opr, term_val(whnf)));
+              if (s_pos > max_d) max_d = s_pos;
               next = y;
               goto enter;
             }
@@ -870,7 +886,8 @@ __device__ __noinline__ Term wnf(Term term) {
             }
             default: {
               heap_set(loc + 0, whnf);
-              stack[s_pos++] = term_new(0, F_EQL_R, 0, loc);
+              PUSH(term_new(0, F_EQL_R, 0, loc));
+              if (s_pos > max_d) max_d = s_pos;
               next = b;
               goto enter;
             }
@@ -1066,23 +1083,23 @@ __device__ __noinline__ Term wnf(Term term) {
     }
   }
 
+  if ((u64)max_d > s_hot[S_MAX_DEPTH + threadIdx.x])
+    s_hot[S_MAX_DEPTH + threadIdx.x] = (u64)max_d;
   return whnf;
+
+  #undef PUSH
+  #undef POP
+}
+
+fn bool is_whnf_tag(u8 tag) {
+  return (WHNF_MASK >> tag) & 1;
 }
 
 fn Term wnf_at(u64 loc) {
   Term cur = heap_read(loc);
-  u8 tag = term_tag(cur);
-  if (tag == NAM || tag == BJV || tag == BJ0 || tag == BJ1 ||
-      tag == DRY || tag == ERA || tag == SUP || tag == LAM ||
-      tag == NUM || tag == MAT || tag == SWI || tag == USE ||
-      tag == INC || tag == ANY ||
-      (tag >= C00 && tag <= C16)) {
-    return cur;
-  }
+  if (is_whnf_tag(term_tag(cur))) return cur;
   Term res = wnf(cur);
-  if (res != cur) {
-    heap_set(loc, res);
-  }
+  if (res != cur) heap_set(loc, res);
   return res;
 }
 
@@ -1095,10 +1112,10 @@ __global__ void eval_kernel(u64 *heap, u64 *book, Term *wnf_stacks,
   HEAP = heap;
   BOOK = book;
   d_wnf_stacks = wnf_stacks;
-  d_wnf_stride = WNF_STACK_CAP;
+  d_wnf_stride = 1;
   d_itrs = 0;
-  s_hot[S_HEAP_NEXT + threadIdx.x] = heap_start;
-  s_hot[S_HEAP_END  + threadIdx.x] = heap_end_val;
+  s_hot[S_WARP_HEAP + 0] = heap_start;
+  s_hot[S_WARP_END  + 0] = heap_end_val;
   s_hot[S_MAX_DEPTH + threadIdx.x] = 0;
 
   Term ref = term_new_ref(main_id);
@@ -1109,30 +1126,23 @@ __global__ void eval_kernel(u64 *heap, u64 *book, Term *wnf_stacks,
   results[2] = term_val(res);
   results[3] = d_itrs;
   results[4] = s_hot[S_MAX_DEPTH + threadIdx.x];
-  results[5] = s_hot[S_HEAP_NEXT + threadIdx.x];
+  results[5] = s_hot[S_WARP_HEAP + 0];
 }
 
 // ============================================================
 // Parallel SNF Kernel (static path mapping)
 // ============================================================
 
-fn bool is_whnf_tag(u8 tag) {
-  return tag == NAM || tag == BJV || tag == BJ0 || tag == BJ1 ||
-         tag == DRY || tag == ERA || tag == SUP || tag == LAM ||
-         tag == NUM || tag == MAT || tag == SWI || tag == USE ||
-         tag == INC || tag == ANY ||
-         (tag >= C00 && tag <= C16);
-}
-
 fn Term spin_until_whnf(u64 loc) {
-  for (;;) {
+  for (u32 iter = 0;; iter++) {
     Term t = *(volatile u64*)&HEAP[loc];
     if (is_whnf_tag(term_tag(t))) return t;
+    if (iter >= 64) __nanosleep(100);
   }
 }
 
 fn void seq_snf(u64 loc) {
-  u64 work[256];
+  u64 work[32];
   u32 wp = 0;
   work[wp++] = loc;
   while (wp > 0) {
@@ -1160,14 +1170,21 @@ __global__ void par_eval_kernel(u64 *heap, u64 *book, Term *wnf_stacks,
   HEAP = heap;
   BOOK = book;
   d_wnf_stacks = wnf_stacks;
-  d_wnf_stride = 1024;
+  d_wnf_stride = n_threads;
 
   u64 heap_size = heap_end_val - heap_start;
-  u64 chunk = heap_size / (u64)n_threads;
-  s_hot[S_HEAP_NEXT + threadIdx.x] = heap_start + (u64)tid * chunk;
-  s_hot[S_HEAP_END  + threadIdx.x] = heap_start + (u64)(tid + 1) * chunk;
+  u32 tpr = (blockDim.x >= 32) ? 32 : 1;
+  u32 n_regions = n_threads / tpr;
+  u64 region_chunk = heap_size / (u64)n_regions;
+  u32 region_global = tid / tpr;
+  u32 region_local  = threadIdx.x / tpr;
+  if (threadIdx.x % tpr == 0) {
+    s_hot[S_WARP_HEAP + region_local] = heap_start + (u64)region_global * region_chunk;
+    s_hot[S_WARP_END  + region_local] = heap_start + (u64)(region_global + 1) * region_chunk;
+  }
   d_itrs = 0;
   s_hot[S_MAX_DEPTH + threadIdx.x] = 0;
+  __syncthreads();
 
   u64 loc = root_loc;
 
@@ -1190,7 +1207,7 @@ __global__ void par_eval_kernel(u64 *heap, u64 *book, Term *wnf_stacks,
     loc = term_val(t) + bit;
   }
 
-  __syncthreads();
+  __syncwarp();
   seq_snf(loc);
 
   atomicAdd((unsigned long long*)&results[0], (unsigned long long)d_itrs);
@@ -1361,10 +1378,8 @@ static int run_par_eval(const char *dump_path, u32 tree_depth, cudaDeviceProp *p
 
   u32 n_threads = 1u << tree_depth;
   u32 split_depth = tree_depth;
-  // Few threads: 1 per block → own warp, no intra-warp divergence.
-  // Many threads: 256 per block → threads converge in the spin loop.
   u32 block_size = 1;
-  if (n_threads > 32) block_size = 256;
+  if (n_threads > 32) block_size = 128;
   if (n_threads < block_size) block_size = n_threads;
   u32 n_blocks = n_threads / block_size;
 
