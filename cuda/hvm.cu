@@ -410,12 +410,19 @@ __device__ __noinline__ Term wnf(Term term) {
   u64 nt  = d_wnf_stride;
   u32  s_pos = 0;
   u32  base  = 0;
+#ifndef NO_MAX_DEPTH
   u32  max_d = 0;
+#endif
   Term next  = term;
   Term whnf;
 
   #define PUSH(v) do { d_wnf_stacks[(u64)s_pos * nt + tid] = (v); s_pos++; } while(0)
   #define POP()   (--s_pos, d_wnf_stacks[(u64)s_pos * nt + tid])
+#ifdef NO_MAX_DEPTH
+  #define TRACK_DEPTH() ((void)0)
+#else
+  #define TRACK_DEPTH() do { if (s_pos > max_d) max_d = s_pos; } while(0)
+#endif
 
   enter: {
     switch (term_tag(next)) {
@@ -424,7 +431,9 @@ __device__ __noinline__ Term wnf(Term term) {
         Term cell = heap_read(loc);
         if (term_sub_get(cell)) {
           next = term_sub_set(cell, 0);
+#ifndef NO_WHNF_FASTPATH
           if ((WHNF_MASK >> term_tag(next)) & 1) { whnf = next; goto apply; }
+#endif
           goto enter;
         }
         whnf = next;
@@ -437,11 +446,13 @@ __device__ __noinline__ Term wnf(Term term) {
         Term cell = heap_take(loc);
         if (term_sub_get(cell)) {
           next = term_sub_set(cell, 0);
+#ifndef NO_WHNF_FASTPATH
           if ((WHNF_MASK >> term_tag(next)) & 1) { whnf = next; goto apply; }
+#endif
           goto enter;
         }
         PUSH(next);
-        if (s_pos > max_d) max_d = s_pos;
+        TRACK_DEPTH();
         next = cell;
         goto enter;
       }
@@ -450,7 +461,7 @@ __device__ __noinline__ Term wnf(Term term) {
         u64  loc = term_val(next);
         Term fun = heap_read(loc);
         PUSH(next);
-        if (s_pos > max_d) max_d = s_pos;
+        TRACK_DEPTH();
         next = fun;
         goto enter;
       }
@@ -569,7 +580,7 @@ __device__ __noinline__ Term wnf(Term term) {
         u64  loc = term_val(next);
         Term x   = heap_read(loc + 0);
         PUSH(next);
-        if (s_pos > max_d) max_d = s_pos;
+        TRACK_DEPTH();
         next = x;
         goto enter;
       }
@@ -578,7 +589,7 @@ __device__ __noinline__ Term wnf(Term term) {
         u64  loc = term_val(next);
         Term a   = heap_read(loc + 0);
         PUSH(next);
-        if (s_pos > max_d) max_d = s_pos;
+        TRACK_DEPTH();
         next = a;
         goto enter;
       }
@@ -587,7 +598,7 @@ __device__ __noinline__ Term wnf(Term term) {
         u64  loc = term_val(next);
         Term a   = heap_read(loc + 0);
         PUSH(next);
-        if (s_pos > max_d) max_d = s_pos;
+        TRACK_DEPTH();
         next = a;
         goto enter;
       }
@@ -596,7 +607,7 @@ __device__ __noinline__ Term wnf(Term term) {
         u64  loc = term_val(next);
         Term a   = heap_read(loc + 0);
         PUSH(next);
-        if (s_pos > max_d) max_d = s_pos;
+        TRACK_DEPTH();
         next = a;
         goto enter;
       }
@@ -605,7 +616,7 @@ __device__ __noinline__ Term wnf(Term term) {
         u64  loc = term_val(next);
         Term lab = heap_read(loc + 0);
         PUSH(next);
-        if (s_pos > max_d) max_d = s_pos;
+        TRACK_DEPTH();
         next = lab;
         goto enter;
       }
@@ -614,7 +625,7 @@ __device__ __noinline__ Term wnf(Term term) {
         u64  loc = term_val(next);
         Term lab = heap_read(loc + 0);
         PUSH(next);
-        if (s_pos > max_d) max_d = s_pos;
+        TRACK_DEPTH();
         next = lab;
         goto enter;
       }
@@ -666,25 +677,29 @@ __device__ __noinline__ Term wnf(Term term) {
             case MAT:
             case SWI: {
               PUSH(whnf);
-              if (s_pos > max_d) max_d = s_pos;
+              TRACK_DEPTH();
               next = arg;
               goto enter;
             }
             case USE: {
               PUSH(whnf);
-              if (s_pos > max_d) max_d = s_pos;
+              TRACK_DEPTH();
               next = arg;
               goto enter;
             }
             case NUM: {
+#ifndef NO_MAX_DEPTH
               if ((u64)max_d > s_hot[S_MAX_DEPTH + threadIdx.x])
                 s_hot[S_MAX_DEPTH + threadIdx.x] = (u64)max_d;
+#endif
               return whnf;
             }
             default: {
               if (term_tag(whnf) >= C00 && term_tag(whnf) <= C16) {
+#ifndef NO_MAX_DEPTH
                 if ((u64)max_d > s_hot[S_MAX_DEPTH + threadIdx.x])
                   s_hot[S_MAX_DEPTH + threadIdx.x] = (u64)max_d;
+#endif
                 return whnf;
               }
               heap_set(app_loc + 0, whnf);
@@ -824,7 +839,7 @@ __device__ __noinline__ Term wnf(Term term) {
                 continue;
               }
               PUSH(term_new(0, F_OP2_NUM, opr, term_val(whnf)));
-              if (s_pos > max_d) max_d = s_pos;
+              TRACK_DEPTH();
               next = y;
               goto enter;
             }
@@ -899,7 +914,7 @@ __device__ __noinline__ Term wnf(Term term) {
             default: {
               heap_set(loc + 0, whnf);
               PUSH(term_new(0, F_EQL_R, 0, loc));
-              if (s_pos > max_d) max_d = s_pos;
+              TRACK_DEPTH();
               next = b;
               goto enter;
             }
@@ -1095,12 +1110,15 @@ __device__ __noinline__ Term wnf(Term term) {
     }
   }
 
+#ifndef NO_MAX_DEPTH
   if ((u64)max_d > s_hot[S_MAX_DEPTH + threadIdx.x])
     s_hot[S_MAX_DEPTH + threadIdx.x] = (u64)max_d;
+#endif
   return whnf;
 
   #undef PUSH
   #undef POP
+  #undef TRACK_DEPTH
 }
 
 fn bool is_whnf_tag(u8 tag) {
@@ -1174,7 +1192,11 @@ fn void seq_snf(u64 loc) {
   }
 }
 
-__global__ void par_eval_kernel(u64 *heap, u64 *book, Term *wnf_stacks,
+__global__
+#ifdef LAUNCH_BOUNDS
+__launch_bounds__(128, LAUNCH_BOUNDS)
+#endif
+void par_eval_kernel(u64 *heap, u64 *book, Term *wnf_stacks,
                      u64 root_loc, u64 heap_start, u64 heap_end_val,
                      u32 tree_depth, u32 split_depth, u64 max_region, u64 *results) {
   u32 tid = threadIdx.x + blockIdx.x * blockDim.x;
@@ -1229,6 +1251,96 @@ __global__ void par_eval_kernel(u64 *heap, u64 *book, Term *wnf_stacks,
   atomicAdd((unsigned long long*)&results[0], (unsigned long long)d_itrs);
   atomicMax((unsigned int*)&results[1], (unsigned int)s_hot[S_MAX_DEPTH + threadIdx.x]);
 }
+
+// ============================================================
+// Two-Kernel Split/Eval (enables 128K+ threads without cooperative_groups)
+// ============================================================
+
+#ifdef SPLIT_KERNEL
+__global__ void split_tree_kernel(u64 *heap, u64 *book, Term *wnf_stacks,
+                     u64 root_loc, u64 heap_start, u64 heap_end_val,
+                     u32 tree_depth, u32 split_depth, u64 max_region, u64 *results) {
+  u32 tid = threadIdx.x + blockIdx.x * blockDim.x;
+  u32 n_threads = blockDim.x * gridDim.x;
+
+  HEAP = heap;
+  BOOK = book;
+  d_wnf_stacks = wnf_stacks;
+  d_wnf_stride = n_threads;
+
+  u64 heap_size = heap_end_val - heap_start;
+  u32 tpr = (blockDim.x >= 32) ? 32 : 1;
+  u32 n_regions = n_threads / tpr;
+  u64 region_chunk = heap_size / (u64)n_regions;
+  if (max_region > 0 && region_chunk > max_region) region_chunk = max_region;
+  u32 region_global = tid / tpr;
+  u32 region_local  = threadIdx.x / tpr;
+  if (threadIdx.x % tpr == 0) {
+    u64 base = heap_start + (u64)region_global * region_chunk;
+    s_hot[S_WARP_BASE + region_local] = base;
+    s_hot[S_WARP_HEAP + region_local] = base;
+    s_hot[S_WARP_END  + region_local] = base + region_chunk;
+  }
+  d_itrs = 0;
+  s_hot[S_MAX_DEPTH + threadIdx.x] = 0;
+  __syncthreads();
+
+  u64 loc = root_loc;
+  for (u32 d = 0; d < split_depth; d++) {
+    u32 shift = split_depth - d;
+    u32 owner_mask = (1u << shift) - 1;
+    Term t;
+    if ((tid & owner_mask) == 0) {
+      t = wnf_at(loc);
+      __threadfence();
+    } else {
+      t = spin_until_whnf(loc);
+    }
+    u32 ari = term_arity(t);
+    if (ari < 2) break;
+    u32 bit = (tid >> (shift - 1)) & 1;
+    loc = term_val(t) + bit;
+  }
+  __syncwarp();
+
+  results[tid] = loc;
+}
+
+__global__ void eval_leaves_kernel(u64 *heap, u64 *book, Term *wnf_stacks,
+                     u64 *leaf_locs, u64 heap_start, u64 heap_end_val,
+                     u64 max_region, u32 n_total, u64 *results) {
+  u32 tid = threadIdx.x + blockIdx.x * blockDim.x;
+  u32 n_threads = blockDim.x * gridDim.x;
+
+  HEAP = heap;
+  BOOK = book;
+  d_wnf_stacks = wnf_stacks;
+  d_wnf_stride = n_threads;
+
+  u64 heap_size = heap_end_val - heap_start;
+  u32 tpr = (blockDim.x >= 32) ? 32 : 1;
+  u32 n_regions = n_threads / tpr;
+  u64 region_chunk = heap_size / (u64)n_regions;
+  if (max_region > 0 && region_chunk > max_region) region_chunk = max_region;
+  u32 region_global = tid / tpr;
+  u32 region_local  = threadIdx.x / tpr;
+  if (threadIdx.x % tpr == 0) {
+    u64 base = heap_start + (u64)region_global * region_chunk;
+    s_hot[S_WARP_BASE + region_local] = base;
+    s_hot[S_WARP_HEAP + region_local] = base;
+    s_hot[S_WARP_END  + region_local] = base + region_chunk;
+  }
+  d_itrs = 0;
+  s_hot[S_MAX_DEPTH + threadIdx.x] = 0;
+  __syncthreads();
+
+  u64 loc = leaf_locs[tid];
+  seq_snf(loc);
+
+  atomicAdd((unsigned long long*)&results[0], (unsigned long long)d_itrs);
+  atomicMax((unsigned int*)&results[1], (unsigned int)s_hot[S_MAX_DEPTH + threadIdx.x]);
+}
+#endif
 
 // ============================================================
 // Undo device macros for host code
@@ -1426,6 +1538,10 @@ static int run_par_eval(const char *dump_path, u32 tree_depth, cudaDeviceProp *p
   CUDA_CHECK(cudaMalloc(&d_stacks, stack_bytes));
   CUDA_CHECK(cudaMalloc(&d_results, 16 * sizeof(u64)));
   CUDA_CHECK(cudaMemset(d_results, 0, 16 * sizeof(u64)));
+#ifdef SPLIT_KERNEL
+  u64 *d_leaf_locs;
+  CUDA_CHECK(cudaMalloc(&d_leaf_locs, (size_t)n_threads * sizeof(u64)));
+#endif
 
   free(h_heap);
   free(h_book);
@@ -1436,9 +1552,20 @@ static int run_par_eval(const char *dump_path, u32 tree_depth, cudaDeviceProp *p
 
   CUDA_CHECK(cudaEventRecord(t0));
   u64 max_region = g_region_words;
+#ifdef SPLIT_KERNEL
+  split_tree_kernel<<<n_blocks, block_size, S_HOT_BYTES>>>(
+    d_heap, d_book, d_stacks, root_loc, alloc_start, heap_words,
+    tree_depth, split_depth, max_region, d_leaf_locs);
+  CUDA_CHECK(cudaDeviceSynchronize());
+  u64 eval_start = alloc_start + heap_words / 2;
+  eval_leaves_kernel<<<n_blocks, block_size, S_HOT_BYTES>>>(
+    d_heap, d_book, d_stacks, d_leaf_locs, eval_start, heap_words,
+    max_region, n_threads, d_results);
+#else
   par_eval_kernel<<<n_blocks, block_size, S_HOT_BYTES>>>(
     d_heap, d_book, d_stacks, root_loc, alloc_start, heap_words,
     tree_depth, split_depth, max_region, d_results);
+#endif
   CUDA_CHECK(cudaEventRecord(t1));
   CUDA_CHECK(cudaEventSynchronize(t1));
 
@@ -1450,9 +1577,8 @@ static int run_par_eval(const char *dump_path, u32 tree_depth, cudaDeviceProp *p
 
   double secs = ms / 1000.0;
   u64 itrs = h_results[0];
-  double mips = (double)itrs / secs / 1e6;
-
   u64 max_depth = h_results[1] & 0xFFFFFFFFULL;
+  double mips = (double)itrs / secs / 1e6;
 
   printf("\n");
   printf("- Itrs: %llu interactions\n", (unsigned long long)itrs);
@@ -1466,6 +1592,9 @@ static int run_par_eval(const char *dump_path, u32 tree_depth, cudaDeviceProp *p
   CUDA_CHECK(cudaFree(d_book));
   CUDA_CHECK(cudaFree(d_stacks));
   CUDA_CHECK(cudaFree(d_results));
+#ifdef SPLIT_KERNEL
+  CUDA_CHECK(cudaFree(d_leaf_locs));
+#endif
   return 0;
 }
 

@@ -34,19 +34,20 @@ nvcc -O2 -arch=sm_89 -I../clang -w -DCIRCULAR_HEAP -o hvm_cuda_circ hvm.cu
 
 ## Current Performance
 
-| Threads | Standard MIPS | Circular MIPS | Change   |
-|---------|---------------|---------------|----------|
-| 1       | 0.85          | —             | —        |
-| 1,024   | 682           | —             | —        |
-| 16,384  | 10,661        | —             | —        |
-| 32,768  | 18,749        | —             | —        |
-| 65,536  | **22,713**    | **23,620**    | **+4.0%**|
+| Threads | Standard MIPS | Circular MIPS | Best MIPS | Change   |
+|---------|---------------|---------------|-----------|----------|
+| 1       | 0.85          | —             | —         | —        |
+| 1,024   | 682           | —             | —         | —        |
+| 16,384  | 10,661        | —             | —         | —        |
+| 32,768  | 18,749        | —             | —         | —        |
+| 65,536  | **22,713**    | **23,620**    | **24,344**| **+7.2%**|
 
 CPU baselines: Ryzen 77 MIPS/thread, M4 Max 184 MIPS/thread.
 
-**23.6 GIPS peak at 65K threads with circular heap (`-DCIRCULAR_HEAP -r 64`).** Standard
-build peaks at 22.7 GIPS. Per-thread scaling efficiency at 65K: 43% (circular) / 41%
-(standard). Theoretical max: 0.85 × 65536 = 55.7 GIPS.
+**24.3 GIPS peak at 65K threads** with `-DCIRCULAR_HEAP -DNO_MAX_DEPTH -r 48`.
+Standard build peaks at 22.7 GIPS. Circular-only (-r 64) peaks at 23.6 GIPS.
+Per-thread scaling efficiency at 65K: 44% (best) / 43% (circular) / 41% (standard).
+Theoretical max: 0.85 × 65536 = 55.7 GIPS.
 
 ### Register / Occupancy Profile
 - `par_eval_kernel` (standard): 60 registers, 384 bytes stack, 0 spills → 8 blocks/SM.
@@ -55,15 +56,40 @@ build peaks at 22.7 GIPS. Per-thread scaling efficiency at 65K: 43% (circular) /
 - `heap_alloc_coop`: noinline, ~20 registers.
 
 ### Nsight Compute Profile (65K threads, bench_tree, standard build)
-- DRAM reads: 61 MB (near-zero — reads fully cached in L2).
-- DRAM writes: 11.8 GB (dirty line evictions from heap allocations).
-- L1 load hit rate: 84.4%.
-- Active warps: 31.24% of peak (16 warps/SM, limited by thread count not registers).
+- L2 throughput: 91.6% of peak (highest-utilized unit).
+- L1/TEX hit rate: 75.5%.
+- L2 hit rate: 99.9% (reads almost never reach DRAM).
+- DRAM reads: 61 MB (near-zero). DRAM writes: 11.8 GB (dirty evictions).
+- Load coalescing: 58% (18.6 of 32 bytes per sector utilized).
+- Store coalescing: 63% (20.1 of 32 bytes per sector utilized).
+- Active warps per scheduler: 3.95 (of 12 max). Eligible warps: 0.41 per cycle.
+- Warp cycles per issued instruction: 12.0.
+- Top stall: long scoreboard (L1TEX wait) — 5.3 cycles, 44% of total stall.
+- Achieved occupancy: 32.7%. Theoretical occupancy: 66.7%.
+- Block limit: registers (8 blocks/SM). Shared mem would allow 12.
 - Instructions: 32.2 per interaction.
 - Effective DRAM write bandwidth: ~655 GB/s (~65% of peak 1 TB/s).
-- **Bottleneck**: occupancy (31%), not bandwidth. Only 16 warps/SM = 4 warps per scheduler.
-  Can't fully hide L1 memory latency (~28 cycles) with 4 warps and ~5 instructions between
-  memory ops.
+- **Nsight diagnosis**: "utilizing >80% of available memory performance. To further improve,
+  shift work from L2." The kernel is L2-throughput bound.
+
+## Compiler Sensitivity (Critical Context)
+
+The wnf() function compiles to ~15K SASS instructions (all hot+cold rules forceinlined).
+ptxas is extremely sensitive to ANY source-level change in code that gets inlined into wnf().
+Even changes that preserve or reduce register count can cause large regressions through
+different instruction scheduling / SASS layout. This has been observed repeatedly:
+
+- +1 register (60→61): 50% regression (enter bitmask consolidation).
+- -2 registers (60→58): 11% regression (shared memory stack).
+- +0 registers (60→60): 8% regression (alo_lam alloc batching).
+- +10 registers (60→70): 48% regression (WHNF fast-paths in enter cases).
+
+The register count alone does NOT predict performance. The SASS instruction scheduling
+is the actual variable, and it changes unpredictably with source changes. There is no
+known way to control ptxas scheduling short of hand-writing PTX.
+
+Changes that are OUTSIDE wnf() (host code, kernel launch params, noinline functions that
+don't get inlined) do not trigger this sensitivity.
 
 ## Circular Heap Allocation
 
@@ -83,6 +109,12 @@ steps (~10 KB), so a 64 KB region (18 steps before wrap) has ~6x safety margin.
 or multi-leaf-per-thread workloads, tree nodes allocated during the split phase can be
 overwritten before other warps read them. A global barrier after the split would fix this
 but isn't implemented yet.
+
+**Not safe for `-p 0` (single-thread, whole-program evaluation)**. Tested with
+`-DCIRCULAR_HEAP -p 0 -r 64`: crashes (illegal memory access). Crashes at all region sizes
+that cause wrapping; works at sizes large enough to avoid wrapping. Non-monotonic pattern
+across sizes (some that wrap work, others don't — depends on wrap alignment relative to
+live data). Pre-existing issue, not specific to any code change.
 
 ## Code Architecture (hvm.cu layout, top-to-bottom)
 
@@ -208,14 +240,20 @@ Parallel SNF evaluation via static binary-tree split:
 ~20 heap accesses per step, ~8 heap_alloc calls per step (including term_new_alo calls).
 
 ### Bottleneck Analysis (65K threads)
-Primary bottleneck is **occupancy** (31%), not DRAM bandwidth (65% utilized):
+
+Nsight reports L2 throughput at 91.6% of peak — this is the primary bottleneck. The earlier
+characterization as "occupancy-limited" was based on the 31% achieved occupancy, but the
+profiler shows the kernel is memory-throughput bound. The two are related: low occupancy
+means fewer warps to hide L1 latency (44% of stalls are L1TEX long-scoreboard waits), but
+even with more warps the L2 bandwidth would saturate.
+
 - 65K threads / 128 SMs = 512 threads/SM = 16 warps/SM
-- 4 warp schedulers per SM → 4 warps per scheduler
-- With ~5 instructions between memory ops and ~28-cycle L1 latency:
-  4 warps hide only 20 cycles, leaving 8 cycles exposed per memory access
-- DRAM write traffic: 11.8 GB (dirty evictions), ~655 GB/s → 65% of peak
-- DRAM read traffic: 61 MB → near zero (fully cached in L2)
-- More threads would help but the benchmark has exactly 65K leaves
+- 4 warp schedulers per SM → 4 warps per scheduler → 0.41 eligible per cycle
+- L1TEX long-scoreboard stall: 5.3 cycles average, 44% of all stalls
+- Load coalescing: 58% (scattered heap pointer chasing)
+- Store coalescing: 63% (mostly coalesced via warp-cooperative alloc)
+- DRAM write traffic: 11.8 GB (dirty evictions), ~655 GB/s → 65% of DRAM peak
+- L2 throughput: 91.6% of L2 peak (the binding constraint)
 
 ### Memory Liveness in @spin
 Per step: ~14 words allocated, but only last 2-3 steps' data (~10 KB/warp) is alive.
@@ -224,6 +262,8 @@ With linear allocation, dead data occupies L2 cache lines until evicted. Circula
 allocation reclaims dead space, confining the working set and reducing eviction traffic.
 
 ## What Was Tried and Didn't Help (or Marginal)
+
+### Previous session (before current optimization round)
 
 - **`__launch_bounds__(128, 4)`** — forced 128 regs, 4 blocks/SM. Helped 65K (+10%) but hurt
   32K (-7%) due to 156-byte spills. Removed; noinline heap_alloc_coop achieves 60 regs
@@ -259,17 +299,142 @@ allocation reclaims dead space, confining the working set and reducing eviction 
 - **Vectorized 128-bit stores** — requires 16-byte alignment. Mixed 1-word and 2-word
   allocations make alignment unpredictable. Padding wastes 50% of 1-word allocs.
 
+### Current session
+
+- **ALO extraction from wnf()** — extracted the 73-line ALO enter case into a separate
+  `wnf_enter_alo()` noinline function. Hot ALO rules (alo_lam, alo_nod, alo_var) get
+  forceinlined into the helper instead of into wnf(). Register count unchanged (60). Measured
+  at 65K: ~22,380 MIPS vs 22,713 baseline. Within noise (~1.5% lower). Reverted — no benefit.
+
+- **Enter dispatch bitmask consolidation** — 7 enter cases (APP, OP2, EQL, AND, OR, DSU, DDU)
+  have identical code (read slot 0, push, enter child). Merged into a single `ENTER_PUSH_MASK`
+  bitmask check before the switch, plus a WHNF_MASK pre-check. Reduced wnf() enter switch
+  from ~15 to 6 cases.
+  Register count: 60 → 61 (+1). Standard build: 11,200 MIPS (50% regression). Circular build:
+  23,250 MIPS (neutral, within noise of 23,620 baseline). The same code change produced
+  opposite results in two compilation contexts — the only difference being the CIRCULAR_HEAP
+  flag adding a branch to heap_alloc. Reverted.
+
+- **Shared memory WNF stack** — moved the first 8 levels of the WNF stack from interleaved
+  global memory to shared memory. PUSH/POP access shmem (~5 cycle) instead of L1 global
+  (~28 cycle). Two variants tested:
+  - With fallback branch (shmem for depth < 8, global for depth ≥ 8): 20,100 MIPS.
+  - Without fallback (shmem only, no branch): 20,200 MIPS.
+  Both show ~11% regression vs 22,713 baseline. Register count: 60 → 58 (-2).
+  The branch is NOT the cause — removing it made no difference. Shmem layout has 2-way bank
+  conflicts per warp (u64 = 2 banks, 32 threads → period 16 → 2-way within a 32-thread warp).
+  Shmem access cost: ~2 cycles × 2-way = ~4 cycles per access — still cheaper than L1's 28.
+  Despite cheaper accesses and fewer registers, the regression happened. Reverted.
+
+- **alo_lam allocation batching** — combined `heap_alloc(2) + heap_alloc(1)` into
+  `heap_alloc(3)` for the len==0 case in wnf_alo_lam. Saves one heap_alloc call per @spin
+  step (eliminates one __activemask/__popc/shmem round-trip). Register count unchanged (60).
+  Measured: 20,800 MIPS (8% regression vs 22,713). The if/else restructure to separate
+  len==0 and len>0 paths changed the forceinlined code in wnf(). Reverted.
+
+- **Cooperative grid barrier + 131K threads** — added `cooperative_groups::this_grid().sync()`
+  after split loop, changed host to `cudaLaunchCooperativeKernel`. Created bench_tree17.hvm
+  (depth 17, 131K leaves). Register count unchanged (60). At 131K threads: 25,020 MIPS
+  (+5.9% over 23,620 circular baseline). However, this doubles the thread count (halving heap
+  per thread) for a marginal gain — the improvement comes from higher occupancy (32 vs 16
+  warps/SM), not from making the code faster. Reverted — not a real per-thread speedup.
+
+- **Circular heap for eval_kernel** — when compiled with CIRCULAR_HEAP, set eval_kernel's
+  region to 64 KB (8192 words) instead of the full heap, to confine the working set to L1.
+  Result: crashes (illegal memory access). This is the same pre-existing issue as circular
+  heap with -p 0 — circular wrapping is unsafe for whole-program evaluation. The crash occurs
+  at the original code too (not introduced by any change). Reverted.
+
+- **`-Xptxas --allow-expensive-optimizations=true`** — tells ptxas to try aggressive
+  optimizations. Measured: ~22,600 MIPS. Neutral vs 22,713 baseline. ptxas is already doing
+  its best.
+
+- **seq_snf work array reduction** — reduced `u64 work[32]` to `u64 work[4]` in seq_snf.
+  Stack frame: 384 → 160 bytes (-224 bytes). The @spin workload uses at most 2 entries.
+  Register count unchanged (60). Measured: ~22,700 MIPS. Neutral. The work array was in local
+  memory (not L1), and reducing it didn't affect cache pressure meaningfully. Reverted.
+
+- **Block size sweep** — tested block_size = 32, 64, 96, 128, 192, 256 at 65K threads.
+  Results: 128 is optimal (22,900 MIPS). 256 is close (22,700). 32 and 64 are significantly
+  worse (17,200–17,700). Smaller blocks likely reduce warp-cooperative allocation efficiency.
+  No change — 128 is already the best.
+
+- **Computed gotos** — not available in CUDA. PTX has no indirect branch instruction. Function
+  pointers exist but cost ~50-100 cycles per indirect call (no hardware call stack). The
+  switch-based interpreter is the best dispatch mechanism on GPU.
+
+- **NO_MAX_DEPTH flag** — removes `if (s_pos > max_d) max_d = s_pos;` from all PUSH sites
+  and the max_d variable declaration in wnf(). In circular mode, this drops register count
+  from 61→60 (the max_d register is freed). This is equivalent to `--maxrregcount=60` — tested
+  both and they produce identical performance. The removed branches themselves have negligible
+  overhead; the gain is entirely from the SASS scheduling change at 60 vs 61 registers.
+  Measured (circular -r 48): ~24,200 MIPS (+1.4% over circular baseline 23,860). Kept in
+  code as `-DNO_MAX_DEPTH` compile flag.
+
+- **NO_WHNF_FASTPATH flag** — removes the `(WHNF_MASK >> tag) & 1` shortcut in VAR and
+  DP0/DP1 enter cases. Register count unchanged (60 in both standard and circular). Measured:
+  22,756 MIPS standard (neutral), 23,861 circular (neutral). The WHNF fast-paths save ~380
+  cycles per instance but their removal doesn't change performance measurably — the SASS
+  scheduling absorbs the difference. Available as `-DNO_WHNF_FASTPATH` flag. Not recommended.
+
+- **Circular region size sweep** — tested -r 16/24/32/48/64/96/128/256 at 65K threads.
+  All within ~2% of each other. -r 48 slightly leads (24,116 MIPS) vs -r 64 (23,785 MIPS).
+  -r 16 works without crashes (live data is ~10 KB, 16 KB region has 1.6x safety margin).
+  The L2 bottleneck is throughput, not capacity — confirmed by the flat curve. The marginal
+  benefit of smaller regions (~1%) comes from slightly reduced dirty eviction traffic.
+  Best: **-r 48** (3 KB region, ~4.8x safety margin).
+
+- **cudaFuncSetCacheConfig(PreferL1)** — 52% regression at 65K threads (10,915 vs 22,713).
+  On SM 8.9, PreferL1 minimizes the shared memory carveout. With 4288 bytes shared per block,
+  a tiny carveout limits blocks per SM (from 8 to ~1), halving effective occupancy. The same
+  result with `cudaFuncSetAttribute(PreferredSharedMemoryCarveout, MaxL1)` and both combined.
+  The default cache config is already optimal. DO NOT use cache config APIs on this kernel.
+
+- **`__restrict__` on kernel pointer parameters** — added `__restrict__` to heap, book, and
+  wnf_stacks parameters of par_eval_kernel. Tells ptxas these don't alias, enabling aggressive
+  load/store reordering. Register count unchanged (60). Measured: 24,383 MIPS. Neutral — ptxas
+  already infers non-aliasing for these access patterns. Reverted.
+
+- **`__launch_bounds__` sweep** — tested LAUNCH_BOUNDS 6-10 on par_eval_kernel with
+  circ+no_maxd. Register counts: lb=6→63, lb=7→62, lb=8→61, lb=9→56, lb=10→48(+spill).
+  Performance: all within ±2% (23,975–24,489 MIPS). At 65K threads, occupancy is 4 blocks/SM
+  regardless of launch_bounds (512 blocks / 128 SMs). The SASS changes from different register
+  pressures, but net performance is flat. Not adopted.
+
+- **Two-kernel split/eval** — split par_eval_kernel into `split_tree_kernel` (tree traversal)
+  and `eval_leaves_kernel` (leaf evaluation) with implicit kernel-launch barrier between them.
+  Enables 128K+ threads without cooperative_groups. At 131K threads with -r 48: 24,181 MIPS.
+  Essentially identical to single-kernel 65K (24,344). Doubling thread count does NOT improve
+  throughput because L2 bandwidth is the ceiling — more warps just add contention without
+  increasing useful work rate. Code available via `-DSPLIT_KERNEL` flag.
+
+- **AOT @spin specialization** — made aot_try_call noinline, added detection for APP(REF,NUM)
+  pattern to short-circuit @spin(n) → NUM(0) directly. Failed: the arg is always OP2 (lazy
+  evaluation), never NUM at the REF entry point. The noinline call added 1 register (60→61)
+  and SASS regression → 21,990 MIPS (-3.4%). For AOT to work, pattern detection would need
+  to happen after the arg is evaluated (deep inside the MAT dispatch), requiring significant
+  restructuring. Reverted.
+
+- **GPU clock locking** (`nvidia-smi -lgc 3120`) — GPU already boosts to max during kernel
+  execution. Locking clocks at 3120 MHz gave identical results (24,397 vs 24,344 peak).
+  Benchmark results are not affected by dynamic frequency scaling.
+
 ## What Would Further Improve Performance
 
-1. **Higher occupancy via more leaves** — the 65K benchmark is occupancy-limited at 31%.
-   With 131K+ threads (deeper tree): each SM gets 32+ warps/SM = 67% occupancy. This requires
-   circular heap allocation AND a global barrier after the split phase to prevent cross-warp
-   data corruption. Current implementation only supports split_depth == tree_depth.
+1. **Reduce heap words per interaction** — currently ~14 words allocated per @spin step.
+   This generates the L2 write traffic that saturates the 91.6% throughput ceiling. Fusing
+   adjacent interactions (e.g., REF→ALO→LAM→APP-LAM as one unit) would eliminate intermediate
+   heap cells. The AOT experiment proved this is the right direction but showed that naive
+   REF-level interception doesn't work due to lazy argument evaluation. A working approach
+   would need to detect the tail-call pattern AFTER argument evaluation (inside the MAT+NUM
+   mismatch path), fusing the 6-interaction sequence into a single rewrite. Key challenge:
+   any change to forceinlined interaction rules risks compiler sensitivity in wnf().
 
-2. **Reduce heap words per interaction** — currently ~14 words allocated per @spin step.
-   Fusing adjacent interactions (e.g., REF→ALO→LAM→APP-LAM as one unit) would eliminate
-   intermediate heap cells. This is conceptually close to AOT but could be done as
-   pattern-specific interpreter fast-paths.
+2. **Higher occupancy via more leaves** — tested with both cooperative_groups (25,020 MIPS at
+   131K, previous session) and two-kernel split (24,181 MIPS at 131K, this session). Neither
+   helps significantly because L2 throughput — not occupancy — is the binding constraint. More
+   warps per SM just increase L2 contention. The ceiling is ~24.5K MIPS regardless of thread
+   count beyond 32K.
 
 3. **Prefetching APP arg** — when entering APP, prefetch `HEAP[loc+1]` (the arg needed later
    in apply). Currently the arg load and fun load are at different times. Prefetching would
