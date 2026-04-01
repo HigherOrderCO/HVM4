@@ -419,16 +419,119 @@ allocation reclaims dead space, confining the working set and reducing eviction 
   execution. Locking clocks at 3120 MHz gave identical results (24,397 vs 24,344 peak).
   Benchmark results are not affected by dynamic frequency scaling.
 
+## Super-Ops: Fused Interpreter Instructions (Not Yet Implemented)
+
+The L2 throughput ceiling (91.6%) comes from ~20 L2 transactions per @spin step. Most of
+these are write-then-read pairs: one interaction writes to the heap, the next reads it back.
+A super-op keeps the intermediate value in a register, eliminating both the write and read.
+
+### Why super-ops succeed where AOT failed
+
+AOT operates at **function granularity** — detect @spin by ID, short-circuit. Failed because:
+- Lazy evaluation: args are OP2/REF at REF entry, never NUM. Detection needs to happen after
+  arg evaluation (deep inside MAT dispatch), requiring massive restructuring.
+- Function-specific: needs ID matching, is benchmark-specific.
+- noinline boundary: adds 1 register to wnf() → SASS regression.
+
+Super-ops operate at **interaction granularity** — detect tag sequences. No function detection
+needed: a REF that produces LAM with APP on stack always admits REF-CALL fusion, regardless
+of which function is being evaluated. Tag checks are already in registers (zero memory cost).
+
+### @spin hot path — L2 transaction breakdown (per step, ~6 interactions)
+
+```
+Step  Interaction       Heap alloc  Heap writes  Heap reads  Stack ops
+─────────────────────────────────────────────────────────────────────────
+1     REF→ALO(len=0)    —           —            1 (book)    —
+2     ALO→alo_lam       3 words     3            —           —
+3     APP-LAM            —          1 (subst)    1 (body)    1 pop
+4     ALO→alo_nod(MAT)  3 words     3            1 (pair)    —
+      ALO→alo_var        —          —            1 (ls)      —
+5     APP+MAT→MAT+NUM    —         2 (reuse)    2 (slots)   2 push/pop
+6     OP2-NUM-NUM         —         —            2 (ops)     2 push/pop
+─────────────────────────────────────────────────────────────────────────
+Total                    6 words    9 writes     8 reads     5 stack ops
+                                                             = ~22 L2 txns
+```
+
+### Candidate super-ops
+
+**1. REF-CALL: REF + ALO(len=0) + alo_lam + APP-LAM**
+
+Trigger: REF enter, book[bv] is LAM, APP frame on stack.
+Fuses steps 1-3. The key saving: alo_lam writes the body ALO to bind_loc+0, then APP-LAM
+immediately reads it back from bind_loc+0. With fusion, the body stays in a register.
+
+```
+Non-fused:  heap_set(bind_loc+0, alo)  →  heap_read(bind_loc+0)  →  heap_subst_var(bind_loc)
+Fused:      heap_subst_var(bind_loc, arg);  next = alo;  // skip write+read of body
+```
+
+Saves: 2 L2 transactions (1 write + 1 read of bind_loc+0). Also saves 2 dispatch cycles
+(ALO enter + APP apply). Implementation: ~15 lines added to REF enter case.
+
+**2. ALO-NOD-CONSUME: ALO→alo_nod + immediate consumption**
+
+Trigger: ALO produces a NOD (MAT, APP, OP2, etc.) that is immediately consumed by the
+next interaction (APP+MAT, or further ALO expansion).
+The NOD slots are allocated on the heap, written, then immediately read by the consumer.
+With fusion, skip the allocation — pass slot values directly in registers.
+
+Saves: 2-3 words allocated + 2-3 writes + 2-3 reads = ~5-7 L2 transactions. This is the
+largest single saving but requires knowing the consumer at ALO time (depends on stack state
+and the specific NOD tag).
+
+**3. MAT-MIS-TAIL: MAT mismatch + APP(else, num) + enter APP + ALO-LAM + APP-LAM**
+
+Trigger: MAT+NUM mismatch in apply. The result APP(else_arm, num) is entered, and if
+else_arm is an ALO wrapping a LAM, the entire APP-LAM sequence fires.
+Currently: writes APP(else, num) to mat_loc → enters APP → reads mat_loc → pushes APP →
+enters else_arm → ALO → LAM → pops APP → APP-LAM.
+
+With fusion: after mismatch, if stack analysis shows we'll reach APP-LAM, skip the
+intermediate APP creation. Read else_arm from mat_loc+1, do alo_lam + app_lam inline.
+
+Saves: 2 heap writes (APP creation) + 1 heap read (APP enter) + 2 stack ops (push/pop APP)
+= ~5 L2 transactions.
+
+### Estimated impact of super-ops
+
+| Super-op         | L2 txns saved | Per-step % |
+|------------------|---------------|------------|
+| REF-CALL         | 2             | 9%         |
+| ALO-NOD-CONSUME  | 5–7           | 23–32%     |
+| MAT-MIS-TAIL     | 5             | 23%        |
+| **Combined**     | **~12**       | **~55%**   |
+
+With ~55% fewer L2 transactions per step, the L2 throughput ceiling would be reached at
+roughly 2× the current interaction rate: ~48K MIPS (theoretical). Realistic estimate
+accounting for compiler sensitivity and added instruction overhead: 30–40K MIPS.
+
+### Implementation strategy and compiler sensitivity
+
+Super-ops add forceinlined code to wnf(). Previous wnf() changes caused SASS regressions.
+Mitigation strategies:
+
+1. **Incremental testing**: implement one super-op at a time, measure. If SASS regresses,
+   try reordering the code or adjusting `__launch_bounds__` to find a "good zone." The
+   65K→24.5K baseline should be repeatable.
+
+2. **Cold-path noinline wrappers**: put the super-op BODY in a noinline function, keep only
+   the tag-check in wnf(). This limits wnf()'s code growth to 2-3 instructions per super-op
+   (check + call + goto). Risk: the noinline call itself uses 1 register for return address.
+
+3. **Compile-flag variants**: guard each super-op with `-DSUPEROP_REF_CALL` etc. Build N
+   variants (with/without each combination) and benchmark. The SASS lottery works in our
+   favor here — some combinations will compile well.
+
+4. **Register budget awareness**: the current budget is tight at 60 regs → 8 blocks/SM.
+   Each register added by super-op code risks dropping to 7 blocks (62 regs) or worse.
+   Monitor with `--ptxas-options=-v` after each change.
+
 ## What Would Further Improve Performance
 
-1. **Reduce heap words per interaction** — currently ~14 words allocated per @spin step.
-   This generates the L2 write traffic that saturates the 91.6% throughput ceiling. Fusing
-   adjacent interactions (e.g., REF→ALO→LAM→APP-LAM as one unit) would eliminate intermediate
-   heap cells. The AOT experiment proved this is the right direction but showed that naive
-   REF-level interception doesn't work due to lazy argument evaluation. A working approach
-   would need to detect the tail-call pattern AFTER argument evaluation (inside the MAT+NUM
-   mismatch path), fusing the 6-interaction sequence into a single rewrite. Key challenge:
-   any change to forceinlined interaction rules risks compiler sensitivity in wnf().
+1. **Super-ops (see above)** — the most promising path. Target: 30–40K MIPS via 55% L2
+   traffic reduction. Implement REF-CALL first (lowest risk, 2 L2 txns saved).
 
 2. **Higher occupancy via more leaves** — tested with both cooperative_groups (25,020 MIPS at
    131K, previous session) and two-kernel split (24,181 MIPS at 131K, this session). Neither
