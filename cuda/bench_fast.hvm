@@ -1,0 +1,17 @@
+// Fast GPU benchmark: 2 leaves with moderate spin work.
+// Depth 1 → 2 leaves. Use -p 0 for 1 thread, -p 1 for 2 threads.
+// ~1.2M interactions, targets ~1s on 1 GPU thread.
+
+@seq = 200000
+
+@spin = λ{
+  0: 0;
+  λx. @spin(x - 1)
+}
+
+@tree = λ{
+  0: @spin(@seq);
+  λ&x. #P{ @tree(x - 1), @tree(x - 1) }
+}
+
+@main = @tree(1)
