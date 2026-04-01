@@ -60,7 +60,7 @@ fn void runtime_eval_main(u32 main_id, const RuntimeEvalCfg *cfg) {
     }
     printf("- Heap: %llu nodes\n", (unsigned long long)total_heap);
     if (GC_ENABLED) {
-      printf("- GCs : %llu collections\n", (unsigned long long)GC_COUNT);
+      printf("- GCed: %llu collections\n", (unsigned long long)GC_COUNT);
     }
     printf("- Time: %.3f seconds\n", dt);
     printf("- Perf: %.2f M interactions/s\n", ips / 1e6);
