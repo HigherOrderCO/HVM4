@@ -4,11 +4,8 @@ fn Term parse_term(PState *s, u32 depth);
 // Desugars to: λx&L.λy&L.λz&L.&L{A';B'}
 // where A' uses x₀,y₀,z₀ and B' uses x₁,y₁,z₁
 fn Term parse_term_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 depth) {
-  if (PARSE_FORK_SIDE != -1) {
-    fprintf(stderr, "\033[1;31mPARSE_ERROR\033[0m (%s:%d:%d)\n", s->file, s->line, s->col);
-    fprintf(stderr, "- nested forks are not allowed\n");
-    exit(1);
-  }
+  // Save outer fork state (allow nesting when inside a sup-fork)
+  int saved_fork_side = PARSE_FORK_SIDE;
   u32 names[16];
   u32 n = 0;
   names[n++] = parse_name(s);
@@ -46,7 +43,7 @@ fn Term parse_term_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 depth) {
   }
   PARSE_FORK_SIDE = 1;
   Term right = parse_term(s, body_depth);
-  PARSE_FORK_SIDE = -1;
+  PARSE_FORK_SIDE = saved_fork_side;
   parse_skip(s);
   parse_match(s, ";");  // optional trailing semicolon
   parse_consume(s, "}");

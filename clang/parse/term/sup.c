@@ -1,5 +1,6 @@
 fn Term parse_term(PState *s, u32 depth);
 fn Term parse_term_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 depth);
+fn Term parse_term_sup_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 depth);
 
 fn Term parse_term_sup(PState *s, u32 depth) {
   parse_skip(s);
@@ -22,6 +23,11 @@ fn Term parse_term_sup(PState *s, u32 depth) {
   // Fork: &Lλx,y,z{A;B} or &(L)λx,y,z{A;B}
   if (parse_match(s, "λ")) {
     return parse_term_fork(s, dyn, lab_term, lab, depth);
+  }
+  // Sup-fork: &L[x,y,z]{A;B} or &(L)[x,y,z]{A;B}
+  if (parse_peek(s) == '[') {
+    parse_consume(s, "[");
+    return parse_term_sup_fork(s, dyn, lab_term, lab, depth);
   }
   // Regular sup: &L{A,B} or &(L){A,B} or &L{A B}
   parse_consume(s, "{");
