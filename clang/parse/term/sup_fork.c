@@ -1,64 +1,13 @@
 fn Term parse_term(PState *s, u32 depth);
 
-// Sup-fork: &L[x,y,&z]{A; B}  or  &(L)[x,y,&z]{A; B}
-// Desugars to: !x &L = x; !y &L = y; !&z &L = z; &L{A'; B'}
-// where A' uses x₀,y₀,z₀ and B' uses x₁,y₁,z₁
-// Variables prefixed with & are cloned (can be used multiple times per branch).
-fn Term parse_term_sup_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 depth) {
-  // Save outer fork state (sup-forks can nest)
-  int saved_fork_side = PARSE_FORK_SIDE;
-
-  // Parse variable names: [x, y, &z]
-  // Do this BEFORE resetting PARSE_FORK_SIDE so that variables from an
-  // outer fork resolve to the correct projection (BJ0/BJ1).
-  u32 names[16];
-  u32 old_depths[16];
-  u32 old_tags[16];
-  u32 old_labs[16];
-  u32 cloned[16];
-  u32 n = 0;
-
-  parse_skip(s);
-  while (parse_peek(s) != ']') {
-    parse_skip(s);
-    if (n >= 16) {
-      parse_error(s, "at most 16 sup-fork binders", parse_peek(s));
-    }
-    // Check for & prefix (cloned)
-    cloned[n] = 0;
-    if (parse_peek(s) == '&') {
-      parse_advance(s);
-      parse_skip(s);
-      cloned[n] = 1;
-    }
-    names[n] = parse_name(s);
-    parse_skip(s);
-
-    // Look up the variable in the current scope.
-    int skipped;
-    PBind* bind = parse_bind_lookup(names[n], -1, &skipped);
-    if (bind == NULL) {
-      parse_error_var(s, names[n], 1, skipped);
-    }
-    old_depths[n] = bind->lvl;
-    if (bind->forked && saved_fork_side >= 0) {
-      old_tags[n] = (saved_fork_side == 0) ? BJ0 : BJ1;
-      old_labs[n] = bind->lab;
-    } else {
-      old_tags[n] = BJV;
-      old_labs[n] = 0;
-    }
-    n++;
-
-    parse_skip(s);
-    parse_match(s, ",");
-  }
-  parse_consume(s, "]");
-  parse_skip(s);
-  parse_consume(s, "{");
-  parse_skip(s);
-
-  // Now reset PARSE_FORK_SIDE for parsing the branches of THIS fork
+// Core sup-fork logic shared by explicit [x,y,&z] and auto-fork !.
+// Assumes variable arrays are already filled and PARSE_FORK_SIDE is saved by caller.
+fn Term parse_term_sup_fork_core(
+  PState *s, int dyn, Term lab_term, u32 lab, u32 depth,
+  u32 *names, u32 *old_depths, u32 *old_tags, u32 *old_labs, u32 *cloned, u32 n,
+  int saved_fork_side
+) {
+  // Reset PARSE_FORK_SIDE for parsing the branches of THIS fork
   PARSE_FORK_SIDE = -1;
 
   // Push forked bindings for each variable.
@@ -109,9 +58,6 @@ fn Term parse_term_sup_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 dept
       uses1 = count_uses(right, lvl, BJ1, lab);
     }
     if (cloned[i]) {
-      // Auto-dup for cloned variables.
-      // Use body_depth as base so that refs to other forked variables
-      // (at levels between depth+1 and body_depth) don't get shifted.
       if (dyn) {
         left  = parse_auto_dup(left,  lvl,     body_depth, BJV, 0, uses0);
         right = parse_auto_dup(right, lvl + 1, body_depth, BJV, 0, uses1);
@@ -154,4 +100,106 @@ fn Term parse_term_sup_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 dept
   }
 
   return body;
+}
+
+// Sup-fork: &L[x,y,&z]{A; B}  or  &(L)[x,y,&z]{A; B}
+// Desugars to: !x &L = x; !y &L = y; !&z &L = z; &L{A'; B'}
+// where A' uses x₀,y₀,z₀ and B' uses x₁,y₁,z₁
+// Variables prefixed with & are cloned (can be used multiple times per branch).
+fn Term parse_term_sup_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 depth) {
+  int saved_fork_side = PARSE_FORK_SIDE;
+
+  // Parse variable names: [x, y, &z]
+  u32 names[16];
+  u32 old_depths[16];
+  u32 old_tags[16];
+  u32 old_labs[16];
+  u32 cloned[16];
+  u32 n = 0;
+
+  parse_skip(s);
+  while (parse_peek(s) != ']') {
+    parse_skip(s);
+    if (n >= 16) {
+      parse_error(s, "at most 16 sup-fork binders", parse_peek(s));
+    }
+    cloned[n] = 0;
+    if (parse_peek(s) == '&') {
+      parse_advance(s);
+      parse_skip(s);
+      cloned[n] = 1;
+    }
+    names[n] = parse_name(s);
+    parse_skip(s);
+
+    int skipped;
+    PBind* bind = parse_bind_lookup(names[n], -1, &skipped);
+    if (bind == NULL) {
+      parse_error_var(s, names[n], 1, skipped);
+    }
+    old_depths[n] = bind->lvl;
+    if (bind->forked && saved_fork_side >= 0) {
+      old_tags[n] = (saved_fork_side == 0) ? BJ0 : BJ1;
+      old_labs[n] = bind->lab;
+    } else {
+      old_tags[n] = BJV;
+      old_labs[n] = 0;
+    }
+    n++;
+
+    parse_skip(s);
+    parse_match(s, ",");
+  }
+  parse_consume(s, "]");
+  parse_skip(s);
+  parse_consume(s, "{");
+  parse_skip(s);
+
+  return parse_term_sup_fork_core(s, dyn, lab_term, lab, depth,
+    names, old_depths, old_tags, old_labs, cloned, n, saved_fork_side);
+}
+
+// Auto-fork: &L!{A; B}  or  &(L)!{A; B}
+// Like sup-fork but captures ALL in-scope variables (all cloned).
+fn Term parse_term_auto_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 depth) {
+  int saved_fork_side = PARSE_FORK_SIDE;
+
+  u32 names[16];
+  u32 old_depths[16];
+  u32 old_tags[16];
+  u32 old_labs[16];
+  u32 cloned[16];
+  u32 n = 0;
+
+  // Collect all in-scope variables from the binding stack.
+  for (u32 bi = 0; bi < PARSE_BINDS_LEN; bi++) {
+    PBind *bind = &PARSE_BINDS[bi];
+    if (bind->lab != 0 && !bind->forked) continue; // skip raw dup bindings
+    // Deduplicate: keep innermost (last) binding per name
+    int found = -1;
+    for (u32 j = 0; j < n; j++) {
+      if (names[j] == bind->name) { found = j; break; }
+    }
+    u32 slot = (found >= 0) ? found : n;
+    if (found < 0) {
+      if (n >= 16) parse_error(s, "at most 16 auto-fork captures", parse_peek(s));
+      n++;
+    }
+    names[slot]     = bind->name;
+    old_depths[slot] = bind->lvl;
+    cloned[slot]    = 1;
+    if (bind->forked && saved_fork_side >= 0) {
+      old_tags[slot] = (saved_fork_side == 0) ? BJ0 : BJ1;
+      old_labs[slot] = bind->lab;
+    } else {
+      old_tags[slot] = BJV;
+      old_labs[slot] = 0;
+    }
+  }
+
+  parse_consume(s, "{");
+  parse_skip(s);
+
+  return parse_term_sup_fork_core(s, dyn, lab_term, lab, depth,
+    names, old_depths, old_tags, old_labs, cloned, n, saved_fork_side);
 }

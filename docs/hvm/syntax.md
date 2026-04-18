@@ -152,6 +152,20 @@ All of these combine with cloning: `λ&x&L. ...`.
 - `&{}` is core `Era`.
   - Commas are optional; trailing comma allowed.
 
+### Auto-fork sugar
+
+```
+&L!{A;B}
+```
+
+desugars to `&L[&x,&y,&z,...]{A;B}` where `x,y,z,...` are all variables
+currently in scope (lambda/let bindings and fork bindings, excluding
+raw dup bindings that require subscripts). All captured variables are
+automatically cloned. Dynamic labels are supported: `&(lab)!{A;B}`.
+
+This is a convenience for the common pattern of forking the entire
+context into a superposition's two branches.
+
 ### Fork sugar
 
 ```
