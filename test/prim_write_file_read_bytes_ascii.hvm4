@@ -1,0 +1,12 @@
+@bind = λr. λk.
+  λ{
+    #OK:  λx.k(x)
+    #ERR: λe.#ERR{e}
+    &{}
+  }(r)
+
+// prim_write_file_read_bytes_ascii
+@path_003 = "/tmp/hvm4_io_003.txt"
+@text_003 = "ABC"
+@main     = @bind(%write_file(@path_003, @text_003), λx.%read_bytes(@path_003))
+//!#OK{[#BYT{65},#BYT{66},#BYT{67}]}

@@ -1,0 +1,5 @@
+@main =
+  !!s = %process_spawn("exit 0");
+  !!r = %process_wait(#Proc{1,0});
+  %process_kill(#Proc{1,1})
+//!#OK{#Rdy{#Proc{1,2},#Exit{0}}}

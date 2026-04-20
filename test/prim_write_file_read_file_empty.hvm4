@@ -1,0 +1,12 @@
+@bind = λr. λk.
+  λ{
+    #OK:  λx.k(x)
+    #ERR: λe.#ERR{e}
+    &{}
+  }(r)
+
+// prim_write_read_file_empty
+@path_002 = "/tmp/hvm4_io_002.txt"
+@text_002 = ""
+@main     = @bind(%write_file(@path_002, @text_002), λx.%read_file(@path_002))
+//!#OK{[]}

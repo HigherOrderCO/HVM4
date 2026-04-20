@@ -1,0 +1,3 @@
+@main = %argv(0)
+//FLAGS: -- alpha beta
+//!["alpha","beta"]

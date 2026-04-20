@@ -1,0 +1,37 @@
+#include "../stdlib/all.hvm4"
+
+// Connects to localhost:9090, sends "ping\n", waits reply, closes socket.
+// Requires an echo server running on 127.0.0.1:9090.
+
+@decode_recv_evt = λev.
+  λ{
+    #Recv: λbs.@bytes_to_string(bs);
+    #TcpEof:  @pure("<eof>");
+    #TcpFail: λreason. λmsg.#ERR{msg};
+    &{}
+  }(ev)
+
+@decode_roundtrip = λout0.
+  !&o = out0;
+  ! p = @snd(o);
+  ! recv_evt = @snd(p);
+  ! f0 = λ txt ;
+  @do(
+    [
+      f0, @decode_recv_evt(recv_evt)
+    ],
+    #P{o, txt}
+  )
+
+@main =
+  ! req = @tcp_req("127.0.0.1", 9090, @tcp_opts_default);
+  ! payload = [#BYT{112}, #BYT{105}, #BYT{110}, #BYT{103}, #BYT{10}];
+  ! f0 = λ out0 ;
+  ! f1 = λ out1 ;
+  @do(
+    [
+      f0, @tcp_roundtrip(req, payload, 128),
+      f1, @decode_roundtrip(out0)
+    ],
+    out1
+  )

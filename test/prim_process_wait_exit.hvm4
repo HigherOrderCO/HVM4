@@ -1,0 +1,4 @@
+@main =
+  !!x = %process_spawn("exit 7");
+  %process_wait(#Proc{1,0})
+//!#OK{#Rdy{#Proc{1,1},#Exit{7}}}

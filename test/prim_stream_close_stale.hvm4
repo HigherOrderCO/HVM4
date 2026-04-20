@@ -1,0 +1,5 @@
+@main =
+  !!x = %stream_file_open("/dev/null");
+  !!y = %stream_close(#Strm{1,0});
+  %stream_close(#Strm{1,0})
+//EXPECT_CONTAINS:E3 stale stream handle

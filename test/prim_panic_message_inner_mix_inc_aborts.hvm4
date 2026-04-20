@@ -1,0 +1,3 @@
+// prim_panic_message_inner_mix_inc_aborts
+@main = %panic('p'<>↑"anic_inc")
+//panic_inc

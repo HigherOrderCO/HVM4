@@ -1,0 +1,63 @@
+#include "../stdlib/all.hvm4"
+
+// Reads one line from stdin (until '\n'), closes stream, decodes UTF-8.
+
+@stream_read_line_step = λw. λ&acc.
+  !&w2 = w;
+  !&h  = @fst(w2);
+  ! e  = @snd(w2);
+  λ{
+    #StreamByte: λb.
+      λ{
+        #BYT: λn.
+          λ{
+            10:
+              @pure(#P{h, @list_rev(acc)});
+            λx.
+              @stream_read_line(h, #BYT{x} <> acc)
+          }(n);
+        &{}
+      }(b);
+    #StreamEof:
+      @pure(#P{h, @list_rev(acc)});
+    &{}
+  }(e)
+
+@stream_read_line = λstrm. λ&acc.
+  ! f0 = λ w0 ;
+  ! f1 = λ r1 ;
+  @do(
+    [
+      f0, @stream_wait(strm),
+      f1, @stream_read_line_step(w0, acc)
+    ],
+    r1
+  )
+
+@stream_close_decode = λr1.
+  !&r = r1;
+  ! f0 = λ c2 ;
+  ! f1 = λ txt ;
+  @do(
+    [
+      f0, @stream_close(@fst(r)),
+      f1, @bytes_to_string(@snd(r))
+    ],
+    txt
+  )
+
+@stdin_read_line =
+  ! f0 = λ s0 ;
+  ! f1 = λ r1 ;
+  ! f2 = λ txt ;
+  @do(
+    [
+      f0, @stream_stdin_open(0),
+      f1, @stream_read_line(s0, []),
+      f2, @stream_close_decode(r1)
+    ],
+    txt
+  )
+
+@main =
+  @stdin_read_line

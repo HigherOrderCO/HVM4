@@ -1,0 +1,2 @@
+@main = %stream_stdin_open(0)
+//!#OK{#Strm{1,0}}

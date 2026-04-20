@@ -231,6 +231,41 @@ can be written as `_ : d` or as a bare `d`.
 ### Primitives
 
 - `%log` prints a string (list of `#Chr`) to stdout and returns `#Nil`.
+- `%process_spawn(cmd)` returns `#OK{#Proc{id,seq}}` or `#ERR{String}`.
+- `%process_poll(proc)` returns `#OK{#Pend{proc2}|#Rdy{proc2,#Exit{n}|#Sig{n}}}` or `#ERR{String}`.
+- `%process_wait(proc)` returns `#OK{#Rdy{proc2,#Exit{n}|#Sig{n}}}` or `#ERR{String}`.
+- `%process_kill(proc)` returns `#OK{#Pend{proc2}|#Rdy{...}}` or `#ERR{String}`.
+- `%stream_stdin_open(seed)` returns `#OK{#Strm{id,0}}` or `#ERR{String}`.
+- `%stream_file_open(path)` returns `#OK{#Strm{id,0}}` or `#ERR{String}`.
+- `%stream_poll(strm)` returns `#OK{#Pend{strm2}|#Rdy{strm2,#BYT{n}|#Eof}}` or `#ERR{String}`.
+- `%stream_wait(strm)` returns `#OK{#Rdy{strm2,#BYT{n}|#Eof}}` or `#ERR{String}`.
+- `%stream_close(strm)` returns `#OK{#Nil}` or `#ERR{String}`.
+- `%timer_start(ms)` returns `#OK{#Time{id,seq}}` or `#ERR{String}`.
+- `%timer_poll(time)` returns `#OK{#Pend{time2}|#Rdy{time2}}` or `#ERR{String}`.
+- `%timer_wait(time)` returns `#OK{#Rdy{time2}}` or `#ERR{String}`.
+- `%http_request(req)` returns `#OK{#Http{id,seq}}` or `#ERR{String}`.
+- `req` must be `#Req{method,url,headers,body,opts}`:
+  - `method`: `#Get|#Post|#Put|#Patch|#Delete|#Head|#Options`
+  - `headers`: `List<#Hdr{name,value}>`
+  - `body`: `#NoBody|#BodyText{String}|#BodyBytes{List<#BYT{n}>}`
+  - `opts`: `#Opts{timeout_ms,connect_timeout_ms,follow_redirects,max_redirects,verify_tls,max_body_bytes}`
+- `%http_poll(http)` returns `#OK{#Pend{http2}|#Rdy{http2,#Resp{status,headers,body}|#Fail{reason,msg}|#Canceled}}` or `#ERR{String}`.
+- `%http_wait(http)` returns `#OK{#Rdy{http2,#Resp{status,headers,body}|#Fail{reason,msg}|#Canceled}}` or `#ERR{String}`.
+- `%http_cancel(http)` returns `#OK{#Pend{http2}|#Rdy{http2,#Resp{status,headers,body}|#Fail{reason,msg}|#Canceled}}` or `#ERR{String}`.
+- `%tcp_connect(req)` returns `#OK{#Tcp{id,seq}}` or `#ERR{String}`.
+- `req` must be `#TcpReq{host,port,opts}`:
+  - `host`: `String`
+  - `port`: `NUM` in `[1,65535]`
+  - `opts`: `#TcpOpts{connect_timeout_ms,read_timeout_ms,write_timeout_ms,nodelay,keepalive}`
+- `%tcp_connect_poll(tcp)` returns `#OK{#Pend{tcp2}|#Rdy{tcp2,#Conn{}|#Fail{reason,msg}}}` or `#ERR{String}`.
+- `%tcp_connect_wait(tcp)` returns `#OK{#Rdy{tcp2,#Conn{}|#Fail{reason,msg}}}` or `#ERR{String}`.
+- `%tcp_recv_poll(tcp,max_bytes)` returns `#OK{#Pend{tcp2}|#Rdy{tcp2,#Recv{bytes}|#Eof{}|#Fail{reason,msg}}}` or `#ERR{String}`.
+- `%tcp_recv_wait(tcp,max_bytes)` returns `#OK{#Rdy{tcp2,#Recv{bytes}|#Eof{}|#Fail{reason,msg}}}` or `#ERR{String}`.
+- `%tcp_send_poll(tcp,bytes)` returns `#OK{#Pend{tcp2}|#Rdy{tcp2,#Sent{n}|#Fail{reason,msg}}}` or `#ERR{String}`.
+- `%tcp_send_wait(tcp,bytes)` returns `#OK{#Rdy{tcp2,#Sent{n}|#Fail{reason,msg}}}` or `#ERR{String}`.
+- `%tcp_close(tcp)` returns `#OK{#Rdy{tcp2,#Closed{}|#Fail{reason,msg}}}` or `#ERR{String}`.
+- TCP fail reasons are `#Timeout`, `#Dns`, `#Refused`, `#Unreachable`,
+  `#Reset`, `#BrokenPipe`, `#Protocol`, `#NotConnected`, or `#Sys{errno}`.
 
 ## Priority wrapper and wildcard
 

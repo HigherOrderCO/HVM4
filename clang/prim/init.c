@@ -1,3 +1,20 @@
 fn void prim_init(void) {
   prim_log_init();
+  prim_panic_init();
+  prim_argv_init();
+  prim_rand_init();
+  prim_uuid_init();
+  prim_uid_init();
+  prim_process_init();
+  prim_stream_init();
+  prim_timer_init();
+  prim_http_init();
+  prim_tcp_init();
+  prim_env_init();
+  prim_cwd_init();
+  prim_chdir_init();
+  prim_read_bytes_init();
+  prim_write_bytes_init();
+  prim_read_file_init();
+  prim_write_file_init();
 }

@@ -1,0 +1,2 @@
+@main = %uuid(0)
+//EXPECT_PREFIX:#OK{"

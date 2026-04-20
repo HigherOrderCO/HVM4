@@ -1,0 +1,2 @@
+@main = %stream_wait(#Strm{1,0})
+//EXPECT_CONTAINS:E2 unknown stream id

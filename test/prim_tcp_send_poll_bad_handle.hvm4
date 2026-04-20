@@ -1,0 +1,2 @@
+@main = %tcp_send_poll(#Tcp{0,0}, [])
+//EXPECT_CONTAINS:ERROR(tcp_send_poll): E2

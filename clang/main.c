@@ -37,6 +37,8 @@ typedef struct {
   u32            ffi_loads_len;
   RuntimeFfiLoad ffi_loads[RUNTIME_FFI_MAX];
   char *file;
+  int   prog_argc;
+  char  **prog_argv;
 } CliOpts;
 
 // Returns the executable basename for help text.
@@ -156,11 +158,17 @@ fn CliOpts parse_opts(int argc, char **argv) {
     .gc_heap_kb = 0,
     .output = NULL,
     .ffi_loads_len = 0,
-    .file = NULL
+    .file = NULL,
+    .prog_argc = 0,
+    .prog_argv = NULL
   };
 
   for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+    if (strcmp(argv[i], "--") == 0) {
+      opts.prog_argc = argc - (i + 1);
+      opts.prog_argv = &argv[i + 1];
+      break;
+    } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       opts.help = 1;
     } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
       opts.version = 1;
@@ -338,6 +346,7 @@ int main(int argc, char **argv) {
     threads = 1;
   }
   runtime_init(threads, opts.debug, opts.silent, opts.step_by_step);
+  prim_set_argv(opts.prog_argc, opts.prog_argv);
 
   // Load FFI libraries before parsing (needed for arity checks and overrides).
   int suppress_build_warnings = opts.as_c || opts.to_c || opts.output != NULL;

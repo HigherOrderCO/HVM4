@@ -1,0 +1,15 @@
+#include "_.hvm4"
+
+// File system helpers
+
+@fs_read_text = λpath.
+  %read_file(path)
+
+@fs_read_bytes = λpath.
+  %read_bytes(path)
+
+@fs_write_text = λpath. λtext.
+  %write_file(path, text)
+
+@fs_write_bytes = λpath. λdata.
+  %write_bytes(path, data)

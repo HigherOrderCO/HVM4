@@ -1,0 +1,10 @@
+@tag = λr.
+  λ{
+    #OK:  λx. "OK"
+    #ERR: λe. "ERR"
+    &{}
+  }(r)
+
+// prim_chdir_missing_err
+@main = @tag(%chdir("/tmp/hvm4_missing_chdir_001"))
+//!"ERR"

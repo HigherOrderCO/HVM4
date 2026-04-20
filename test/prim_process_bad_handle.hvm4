@@ -1,0 +1,2 @@
+@main = %process_poll(#Proc{1,0})
+//EXPECT_CONTAINS:E2 unknown process id

@@ -1,0 +1,11 @@
+@tag = λr.
+  λ{
+    #OK:  λx. "OK"
+    #ERR: λe. "ERR"
+    &{}
+  }(r)
+
+// prim_read_file_missing
+@path_006 = "/tmp/hvm4_io_missing_006.txt"
+@main     = @tag(%read_file(@path_006))
+//!"ERR"

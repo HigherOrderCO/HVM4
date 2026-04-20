@@ -1,0 +1,2 @@
+@main = %stream_file_open("/definitely_missing_hvm4_stream_file")
+//EXPECT_CONTAINS:ERROR(stream_file_open): E5

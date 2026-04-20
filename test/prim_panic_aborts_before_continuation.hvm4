@@ -1,0 +1,3 @@
+// prim_panic_aborts_before_continuation
+@main = !!x = %panic("panic_001_basic"); "panic_should_not_print"
+//panic_001_basic

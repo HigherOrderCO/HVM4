@@ -1,0 +1,9 @@
+@bind = λr. λk.
+  λ{
+    #OK:  λx.k(x)
+    #ERR: λe.#ERR{e}
+    &{}
+  }(r)
+
+@main = @bind(%timer_start(0), λh.%timer_wait(h))
+//!#OK{#Rdy{#Time{1,1},#None{}}}

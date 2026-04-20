@@ -1,0 +1,4 @@
+// prim_write_file_path_mix_inc_sup_era
+@path_015 = "/tmp/hvm4_io_015.txt"
+@main     = %write_file(&L{↑@path_015, &{}}, "mix-path")
+//!&L{↑#OK{[]},&{}}

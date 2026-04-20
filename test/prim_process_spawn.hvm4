@@ -1,0 +1,2 @@
+@main = %process_spawn("exit 0")
+//!#OK{#Proc{1,0}}

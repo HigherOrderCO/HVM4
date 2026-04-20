@@ -1,0 +1,31 @@
+//@test_panic = #Pair{%panic((λx.x<>"A")('∀')), 33}
+//@test_concat = %concat((λx.x<>[])([1,2]), [3])
+//
+//@main = @test_panic
+//@main = @test_concat
+//
+////@main = %concat([1,2],[3])
+////@main = %log(&L{1,2})
+//
+//
+@trace = λa.λb. !!v = %log(a); b
+@main = @trace("works", 90)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
