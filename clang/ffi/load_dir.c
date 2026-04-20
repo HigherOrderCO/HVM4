@@ -1,3 +1,14 @@
+#if defined(__EMSCRIPTEN__) || defined(HVM_NO_DLOPEN)
+
+fn void ffi_load_dir(const char *dir) {
+  (void)dir;
+  fprintf(stderr,
+    "ERROR: dynamic FFI loading not available on this platform.\n");
+  exit(1);
+}
+
+#else
+
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -48,3 +59,5 @@ fn void ffi_load_dir(const char *dir) {
 
   closedir(dp);
 }
+
+#endif
