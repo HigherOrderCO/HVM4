@@ -138,7 +138,16 @@ fn Term parse_term_sup_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 dept
       parse_error_var(s, names[n], 1, skipped);
     }
     old_depths[n] = bind->lvl;
-    if (bind->forked && saved_fork_side >= 0) {
+    if (bind->side >= 0) {
+      if (bind->lab == PARSE_DYN_LAB) {
+        old_depths[n] = bind->lvl + bind->side;
+        old_tags[n]   = BJV;
+        old_labs[n]   = 0;
+      } else {
+        old_tags[n] = (bind->side == 0) ? BJ0 : BJ1;
+        old_labs[n] = bind->lab;
+      }
+    } else if (bind->forked && saved_fork_side >= 0) {
       old_tags[n] = (saved_fork_side == 0) ? BJ0 : BJ1;
       old_labs[n] = bind->lab;
     } else {
@@ -174,7 +183,9 @@ fn Term parse_term_auto_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 dep
   // Collect all in-scope variables from the binding stack.
   for (u32 bi = 0; bi < PARSE_BINDS_LEN; bi++) {
     PBind *bind = &PARSE_BINDS[bi];
-    if (bind->lab != 0 && !bind->forked) continue; // skip raw dup bindings
+    if (bind->lab != 0 && !bind->forked && bind->side < 0) {
+      continue; // skip raw dup bindings
+    }
     // Deduplicate: keep innermost (last) binding per name
     int found = -1;
     for (u32 j = 0; j < n; j++) {
@@ -188,7 +199,16 @@ fn Term parse_term_auto_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 dep
     names[slot]     = bind->name;
     old_depths[slot] = bind->lvl;
     cloned[slot]    = 1;
-    if (bind->forked && saved_fork_side >= 0) {
+    if (bind->side >= 0) {
+      if (bind->lab == PARSE_DYN_LAB) {
+        old_depths[slot] = bind->lvl + bind->side;
+        old_tags[slot]   = BJV;
+        old_labs[slot]   = 0;
+      } else {
+        old_tags[slot] = (bind->side == 0) ? BJ0 : BJ1;
+        old_labs[slot] = bind->lab;
+      }
+    } else if (bind->forked && saved_fork_side >= 0) {
       old_tags[slot] = (saved_fork_side == 0) ? BJ0 : BJ1;
       old_labs[slot] = bind->lab;
     } else {

@@ -1,0 +1,2 @@
+@main = ! &L{x,y} = &L{1,2}; x + x + y
+//PARSE_ERROR

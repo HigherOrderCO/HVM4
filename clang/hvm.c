@@ -249,6 +249,7 @@ typedef struct {
   u32 lab;
   u32 forked;  // 1 if this is a fork variable
   u32 cloned;  // 1 if this is a cloned variable (λ&x or ! &x = v)
+  int side;    // forced dup side for destructured dup aliases, -1 otherwise
 } PBind;
 
 // Parser Globals

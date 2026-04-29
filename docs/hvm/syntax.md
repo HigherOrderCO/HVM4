@@ -131,6 +131,15 @@ All of these combine with cloning: `λ&x&L. ...`.
 - Optional `;` after `v` is allowed.
 - Cloned dup binder: `!&x&L = v; body` (or `!&x& = ...`).
 
+### Dup destructuring sugar
+
+Short form for binding each side of a duplicated value as a plain variable:
+
+- `! &L{x,y} = v; body` desugars like `!x_y&L = v; body[x := x_y₀, y := x_y₁]`.
+- `! &{x,y} = v; body` uses a fresh label.
+- `! &(lab){x,y} = v; body` uses a dynamic label.
+- Branch binders can be cloned independently: `! &L{&x,y} = v; body`.
+
 ### Duplication (dynamic label)
 
 - `!x&(lab) = v; body` is core `DDu`.

@@ -9,8 +9,12 @@ fn Term parse_term_var(PState *s, u32 depth) {
   if (bind == NULL) {
     parse_error_var(s, nam, side == -1, skipped);
   }
-  if (side == -1 && bind->forked) {
-    side = PARSE_FORK_SIDE;
+  if (side == -1) {
+    if (bind->side >= 0) {
+      side = bind->side;
+    } else if (bind->forked) {
+      side = PARSE_FORK_SIDE;
+    }
   }
   // Handle dynamic dup binding (lab=PARSE_DYN_LAB marker)
   // For dynamic dup, X₀ and X₁ become BJV references to nested lambdas
