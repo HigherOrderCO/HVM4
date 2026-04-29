@@ -2,6 +2,46 @@
 // ===========
 // Emits, compiles, and runs standalone AOT programs.
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
+#if defined(__EMSCRIPTEN__) || defined(__ANDROID__) || \
+    (defined(__APPLE__) && TARGET_OS_IPHONE) || \
+    defined(HVM_NO_AOT_BUILD)
+
+// Sandboxed platforms (WASM, iOS, Android) cannot fork/exec processes.
+// AOT compilation is a development-time feature for desktop/server.
+// Provide stubs that report the error clearly.
+
+fn void aot_build_to_c(const char *argv0, const char *src_path,
+                        const char *src_text, const AotBuildCfg *cfg) {
+  (void)argv0; (void)src_path; (void)src_text; (void)cfg;
+  fprintf(stderr,
+    "ERROR: AOT compilation not available on this platform\n");
+  exit(1);
+}
+
+fn int aot_build_as_c_once(const char *argv0, const char *src_path,
+                            const char *src_text, const AotBuildCfg *cfg) {
+  (void)argv0; (void)src_path; (void)src_text; (void)cfg;
+  fprintf(stderr,
+    "ERROR: AOT compilation not available on this platform\n");
+  return 1;
+}
+
+fn int aot_build_to_output(const char *argv0, const char *src_path,
+                            const char *src_text, const char *out_path,
+                            const AotBuildCfg *cfg) {
+  (void)argv0; (void)src_path; (void)src_text;
+  (void)out_path; (void)cfg;
+  fprintf(stderr,
+    "ERROR: AOT compilation not available on this platform\n");
+  return 1;
+}
+
+#else
+
 #include <limits.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -356,3 +396,5 @@ fn int aot_build_to_output(const char *argv0, const char *src_path, const char *
   }
   return rc;
 }
+
+#endif
