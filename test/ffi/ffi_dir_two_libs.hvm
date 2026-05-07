@@ -1,2 +1,0 @@
-@main = (%ffi_inc(41) + %ffi_double(20))
-//82

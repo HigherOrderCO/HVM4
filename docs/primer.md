@@ -319,7 +319,7 @@ Switch on machine ints with `0:`, `1:`, etc., and `λn.` for default:
 
 ### Fork Notation
 
-`&Lλx,y{A;B}` is sugar for parallel branching. A uses `x₀,y₀`; B uses
+`&Lλx,y{A;B}` is sugar for paired branching. A uses `x₀,y₀`; B uses
 `x₁,y₁`:
 
 ```hvm

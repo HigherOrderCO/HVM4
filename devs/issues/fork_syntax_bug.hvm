@@ -1,0 +1,39 @@
+@Y     = λ&f. f(@Y(f))
+@sp0   = λ&x. (x * 16293 + 1) % 65536
+@sp1   = λ&x. (x * 32677 + 3) % 65536
+@not   = λ{0:1;1:0}
+@or    = λ{0:λb.b;1:λb.1}
+@and   = λ{0:λb.0;1:λb.b}
+@cat   = λ{[]: λys.ys; <>: λx,xs,ys. x <> @cat(xs, ys)}
+@when  = λ{[]: λx.x; <>: λ{0: λt. &{}; 1: λt,x. @when(t, x)}}
+@match = λscu. λcse. cse(scu)
+@empty = λ{ []: &Tup{[],1}; <>: λx.λxs. &Tup{x<>xs,0} }
+
+@O = λxs. λo. λi. λe. o(xs)
+@I = λxs. λo. λi. λe. i(xs)
+@E =      λo. λi. λe. e
+
+@all = λ&L. λ&F. λxs. λo. λi. λe.
+  ! O &(L) = o
+  ! I &(L) = i
+  ! case_o = λxs.&(L){O₀,I₁}(! F &(L+1) = F; ! XS &(L+1) = xs; &(L+1){XS₀,XS₁})
+  // FIXME: the lines below should be equivalent, but aren't...
+//  ! case_i = λxs.&(L){I₀,O₁}(! F &(L+1) = F; ! XS &(L+1) = xs; &(L+1){XS₀,XS₁})
+  ! case_i = λxs.&(L){I₀,O₁}(&(L+1)[F,xs]{xs;xs})
+  xs(case_o, case_i, e)
+
+//@F0 = λxs. λo. λi. λe. xs(λxs. o(@F0(xs)), λxs. i(@F0(xs)), e)
+//@F1 = λxs. λo. λi. λe. xs(λxs. i(@F0(xs)), λxs. o(@F1(xs)), e)
+//@F2 = λxs. λo. λi. λe. xs(λxs. i(λo. λi. λe. o(@F1(xs))), λxs. o(@F2(xs)), e)
+
+@view = λxs. xs(λxs. #O{@view(xs)}, λxs. #I{@view(xs)}, #E)
+
+
+//@main = @view(@F2(@F2(@F2(@F2(@F2(@F2(@F2(@O(@O(@O(@O(@O(@O(@O(@O(@E))))))))))))))))
+@main =
+  ! &F = @all(1)
+  F
+//  ! e0 = @Y(F)(@O(@O(@O(@O(@E))))) === @I(@I(@I(@I(@E))))
+//  ! e1 = @Y(F)(@I(@I(@I(@I(@E))))) === @O(@O(@O(@O(@E))))
+//  @when([e0,e1], @view(@Y(F)(@O(@O(@O(@O(@O(@O(@O(@O(@E)))))))))))
+

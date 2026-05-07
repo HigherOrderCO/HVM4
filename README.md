@@ -8,28 +8,22 @@ HVM is a high-performance runtime for the [Interaction Calculus](docs/theory/int
 
 ```bash
 # Build
-cd clang && clang -O2 -o main main.c
-# On Linux, add: -ldl
+clang -O2 -o src/hvm src/hvm.c
 
 # Run a file (use collapse mode by default)
-./clang/main test/file.hvm -s -C10
+hvm devs/test/file.hvm -s -C10
 
 # Run all tests
-./test/_all_.sh
+./devs/test/_all_.sh
 
-# Run benchmarks (from sibling bench repo)
-cd ../bench && ./bench.ts --hvm-interpreted
+# Run a benchmark file
+hvm devs/bench/u32_fib.hvm -s
 ```
 
 Flags:
 - `-s` shows performance stats
 - `-D` prints each intermediate reduction step with interaction labels
 - `-C10` collapses and flattens superpositions (limit to 10 lines)
-- `--to-c` emits a standalone AOT C program to stdout
-- `--as-c` emits + compiles + runs a standalone executable once
-- `-o <path>`, `--output <path>` emits + compiles a standalone executable to a file path
-- `--ffi <path>` loads one FFI shared library before parsing
-- `--ffi-dir <path>` loads all FFI shared libraries in a directory before parsing
 
 ## Examples
 

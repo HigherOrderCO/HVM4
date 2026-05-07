@@ -1,0 +1,20 @@
+// u32_fib/main.hvm
+// ================
+// Naive Fibonacci recursion.
+// Mirrors bench/u32_fib/main.bend.
+
+// Fibonacci
+// ---------
+
+// Computes Fibonacci recursively with base cases at 0 and 1.
+@u32_fib = λ{
+  0: 0;
+  1: 1;
+  λ&k. @u32_fib(k - 1) + @u32_fib(k - 2)
+}
+
+// Main
+// ----
+
+// Evaluates fib(38).
+@main = @u32_fib(38)

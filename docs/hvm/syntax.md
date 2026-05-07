@@ -26,9 +26,8 @@ for desugaring only; the parser itself does not accept whitespace application.
 - Variable: `x`
 - Dup variables: `x₀` or `x₁` (see “Dup variables”)
 - Grouping: `(term)`
-- Constructor: `#Name` or `#Name{a,b,c}` (commas optional, trailing comma ok)
+- Constructor: `#Name` or `#Name{a,b,c}` (`,` and `;` are equivalent, trailing separator ok)
 - Reference: `@Name`
-- Primitive: `%Name`
 - Name head: `^Name`
 - Dry app: `^(f x)`
 - Priority wrapper: `↑atom`
@@ -38,7 +37,7 @@ for desugaring only; the parser itself does not accept whitespace application.
 ## Application
 
 - `f(a, b, c)` desugars to `((f a) b) c`.
-  - Commas are optional: `f(a b c)` is the same.
+  - `,` and `;` are equivalent, and separators are optional: `f(a b c)` is the same.
   - `f()` is allowed and desugars to `f`.
 
 ## Literals
@@ -85,7 +84,7 @@ Lists use built-in `#Nil` and `#Con`:
 
 - `[]` desugars to `#Nil`.
 - `[a, b, c]` desugars to `#Con{a, #Con{b, #Con{c, #Nil}}}`.
-  - Commas are optional; trailing comma allowed.
+  - `,` and `;` are equivalent; trailing separator allowed.
 - `a <> b` desugars to `#Con{a, b}` (cons sugar).
 
 ## Lambdas and binders
@@ -94,6 +93,7 @@ Lists use built-in `#Nil` and `#Con`:
 
 - `λx. body` is core `Lam`.
 - `λx,y,z. body` desugars to `λx. λy. λz. body`.
+  - `,` and `;` are equivalent between binders.
 - `λ$x. body` is an unscoped lambda binder (see “Unscoped lambda (UNS)”).
 
 ### Cloned binders (auto-dup)
@@ -128,7 +128,7 @@ All of these combine with cloning: `λ&x&L. ...`.
 
 - `!x&L = v; body` is core `Dup`.
 - `!x& = v; body` uses a fresh label.
-- Optional `;` after `v` is allowed.
+- Optional `,` or `;` after `v` is allowed.
 - Cloned dup binder: `!&x&L = v; body` (or `!&x& = ...`).
 
 ### Dup destructuring sugar
@@ -139,6 +139,7 @@ Short form for binding each side of a duplicated value as a plain variable:
 - `! &{x,y} = v; body` uses a fresh label.
 - `! &(lab){x,y} = v; body` uses a dynamic label.
 - Branch binders can be cloned independently: `! &L{&x,y} = v; body`.
+- `,` and `;` are equivalent between branch binders; trailing separator allowed.
 
 ### Duplication (dynamic label)
 
@@ -149,7 +150,7 @@ Short form for binding each side of a duplicated value as a plain variable:
 
 - `! f = λ x ; body` desugars to `!${f,x}; body`.
 - `λ$x. body` desugars to `! f = λ x ; f(body)` with fresh `f`.
-  - Commas are allowed: `λ$x,y. body` (x unscoped, y scoped).
+  - `,` and `;` are allowed between binders: `λ$x,y. body` (x unscoped, y scoped).
   - The unscoped variable is referenced as plain `x` inside the body.
 
 ## Superposition (`&`) and fork
@@ -159,7 +160,7 @@ Short form for binding each side of a duplicated value as a plain variable:
 - `&L{a, b}` is core `Sup`.
 - `&(lab){a, b}` is core `DSu`.
 - `&{}` is core `Era`.
-  - Commas are optional; trailing comma allowed.
+  - `,` and `;` are equivalent; trailing separator allowed.
 
 ### Auto-fork sugar
 
@@ -191,8 +192,8 @@ where `A'` uses `x₀, y₀` and `B'` uses `x₁, y₁`.
 
 Inside each branch you can omit `₀`/`₁` and the parser chooses the side
 automatically. You can also prefix branches with `&₀:` or `&₁:` to force the
-side for all un-subscripted dup variables in that branch. Semicolons between
-branches are optional; trailing `;` allowed.
+side for all un-subscripted dup variables in that branch. `,` and `;` are
+equivalent between branches; trailing separator allowed.
 
 Dynamic labels are supported: `&(lab)λx,y{A;B}`.
 
@@ -240,20 +241,15 @@ Desugaring is right-nested:
 => λ{0: t0; λ{1: t1; d}}
 ```
 
-Semicolons between cases are optional; trailing `;` allowed. The final default
-can be written as `_ : d` or as a bare `d`.
+`,` and `;` are equivalent between cases; trailing separator allowed, including
+after the final default. The final default can be written as `_ : d` or as a
+bare `d`.
 
 ## Names and references
 
 - `@Name` is a book reference.
-- `%Name` is a primitive (native) function; it must be fully applied as
-  `%Name(arg1, arg2, ...)` with the correct arity (bare `%Name` is a parse error).
 - `^Name` is a stuck name head.
 - `^(f x)` is a dry application.
-
-### Primitives
-
-- `%log` prints a string (list of `#Chr`) to stdout and returns `#Nil`.
 
 ## Priority wrapper and wildcard
 

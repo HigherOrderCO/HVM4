@@ -16,14 +16,13 @@ Two insights make this possible:
 
 ## Algorithm (as implemented)
 
-- `cnf` (clang/cnf/_.c): reduce to WNF, then lift the first SUP to the top and
+- `cnf` (`src/hvm.c`, CNF section): reduce to WNF, then lift the first SUP to the top and
   return immediately. ERA propagates upward; INC is left in place for the
-  flattener. When collapse threads are idle, cnf can spawn subterm tasks to use
-  the same worker pool.
-- `eval_collapse` (clang/eval/collapse.c): breadth-first traversal with a
-  work-stealing key queue. Lower numeric keys are popped first; SUP increases
-  key, INC decreases key. Single-threaded runs pop FIFO within each key bucket
-  for deterministic ordering. When a branch has no SUP, it prints `cnf(term)`.
+  flattener.
+- `eval_collapse` (`src/hvm.c`, Eval section): breadth-first traversal with a
+  sequential priority queue. Lower numeric keys are popped first; SUP increases
+  key, INC decreases key. Branches with the same key are popped FIFO for
+  deterministic ordering. When a branch has no SUP, it prints `cnf(term)`.
 
 ## Label Behavior (pairwise vs cross product)
 
@@ -53,6 +52,5 @@ Same labels annihilate pairwise:
 
 ## Where To Look
 
-- `clang/cnf/_.c`: SUP lifting rules.
-- `clang/eval/collapse.c`: branch enumeration + SNF quoting for output.
-- `clang/data/wspq.c`: work-stealing key queue used by collapse (FIFO when T=1).
+- `src/hvm.c`, `CNF` section: SUP lifting rules.
+- `src/hvm.c`, `Eval` section: branch enumeration + SNF quoting for output.

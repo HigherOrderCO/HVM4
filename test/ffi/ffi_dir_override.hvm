@@ -1,3 +1,0 @@
-@main = %ffi_same(0)
-//WARNING: overriding primitive '%ffi_same'
-//7

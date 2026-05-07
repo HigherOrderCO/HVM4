@@ -1,0 +1,275 @@
+// lambda_eval/main.hvm
+// ====================
+// Pure functional lambda-calculus normalization benchmark.
+// Manual port of bench/lambda_eval/main.bend.
+
+// Utils
+// -----
+
+// Advances the linear-congruential generator state.
+@rng = λ&seed.
+  seed * 1664525 + 1013904223
+
+// Converts a numeric predicate into Bool.
+@u2b = λ{
+  0:
+    #F{};
+  λ&x.
+    #T{}
+}
+
+// Shift / Subst
+// -------------
+
+// Shifts free variables by `by` at depth >= `dep`.
+@shift_above = λ{
+  #var: λ&k. λ&by. λ&dep.
+    @shift_var(k, by, dep);
+  #lam: λ&bod. λ&by. λ&dep.
+    #lam{@shift_above(bod, by, dep + 1)};
+  #app: λ&fun. λ&arg. λ&by. λ&dep.
+    #app{@shift_above(fun, by, dep), @shift_above(arg, by, dep)}
+}
+
+// Shifts one variable index when needed.
+@shift_var = λ&k. λ&by. λ&dep.
+  ! ok = @u2b(k < dep);
+  @shift_var_go(ok, k, by)
+
+// Selects shift branch from Bool.
+@shift_var_go = λ{
+  #T: λ&k. λ&by.
+    #var{k};
+  #F: λ&k. λ&by.
+    #var{k + by}
+}
+
+// Substitutes outermost bound variable in `tm` with `arg`.
+@subst0 = λ&tm. λ&arg.
+  @subst_dep(tm, arg, 0)
+
+// Substitutes a variable at de Bruijn depth `dep`.
+@subst_dep = λ{
+  #var: λ&k. λ&arg. λ&dep.
+    @subst_var(k, arg, dep);
+  #lam: λ&bod. λ&arg. λ&dep.
+    #lam{@subst_dep(bod, arg, dep + 1)};
+  #app: λ&fun. λ&val. λ&arg. λ&dep.
+    ! fun = @subst_dep(fun, arg, dep);
+    ! val = @subst_dep(val, arg, dep);
+    #app{fun, val}
+}
+
+// Substitutes one variable occurrence.
+@subst_var = λ&k. λ&arg. λ&dep.
+  ! eq = @u2b(k == dep);
+  @subst_var_go(eq, k, arg, dep)
+
+// Selects substitution branch from Bool.
+@subst_var_go = λ{
+  #T: λ&k. λ&arg. λ&dep.
+    @shift_above(arg, dep, 0);
+  #F: λ&k. λ&arg. λ&dep.
+    @subst_var_ne(k, dep)
+}
+
+// Handles non-equal variable case during substitution.
+@subst_var_ne = λ&k. λ&dep.
+  ! gt = @u2b(k > dep);
+  @subst_var_ne_go(gt, k)
+
+// Selects non-equal substitution branch from Bool.
+@subst_var_ne_go = λ{
+  #T: λ&k.
+    #var{k - 1};
+  #F: λ&k.
+    #var{k}
+}
+
+// Reduction
+// ---------
+
+// Reduces to weak-head normal form.
+@wnf = λ{
+  #var: λ&k.
+    #var{k};
+  #lam: λ&bod.
+    #lam{bod};
+  #app: λ&fun. λ&arg.
+    @wnf_app(fun, arg)
+}
+
+// Reduces an application to weak-head normal form.
+@wnf_app = λ&fun. λ&arg.
+  @wnf_app_go(@wnf(fun), arg)
+
+// Reduces a typed weak-head application.
+@wnf_app_go = λ{
+  #lam: λ&bod. λ&arg.
+    @wnf(@subst0(bod, arg));
+  #var: λ&k. λ&arg.
+    #app{#var{k}, arg};
+  #app: λ&f0. λ&f1. λ&arg.
+    #app{#app{f0, f1}, arg}
+}
+
+// Reduces to full normal form.
+@nf = λ&tm.
+  @nf_go(@wnf(tm))
+
+// Reduces a weak-head-normal term to normal form.
+@nf_go = λ{
+  #var: λ&k.
+    #var{k};
+  #lam: λ&bod.
+    #lam{@nf(bod)};
+  #app: λ&fun. λ&arg.
+    ! fun = @nf(fun);
+    ! arg = @nf(arg);
+    #app{fun, arg}
+}
+
+// Church Terms
+// ------------
+
+// Church numeral zero.
+@c_zero = #lam{#lam{#var{0}}}
+
+// Church successor.
+@c_succ =
+  #lam{#lam{#lam{#app{#var{1}, #app{#app{#var{2}, #var{1}}, #var{0}}}}}}
+
+// Church addition.
+@c_add =
+  #lam{#lam{#lam{#lam{#app{#app{#var{3}, #var{1}}, #app{#app{#var{2}, #var{1}}, #var{0}}}}}}}
+
+// Church multiplication.
+@c_mul =
+  #lam{#lam{#lam{#lam{#app{#app{#var{3}, #app{#var{2}, #var{1}}}, #var{0}}}}}}
+
+// Builds a Church numeral from U32.
+@church = λ&n.
+  ! eq = @u2b(n == 0);
+  @church_go(eq, n)
+
+// Selects Church constructor branch.
+@church_go = λ{
+  #T: λ&n.
+    @c_zero;
+  #F: λ&n.
+    @church_suc(n)
+}
+
+// Builds successor branch for Church numeral construction.
+@church_suc = λ&n.
+  #app{@c_succ, @church(n - 1)}
+
+// Decodes a normalized Church numeral into U32.
+@church_to_u32 = λ{
+  #lam: λ&bod.
+    @church_to_u32_lam(bod);
+  λ&tm.
+    0
+}
+
+// Decodes second lambda layer of a Church numeral.
+@church_to_u32_lam = λ{
+  #lam: λ&inner.
+    @count_apps(inner);
+  λ&bod.
+    0
+}
+
+// Detects if a term is `var{idx}`.
+@is_var = λ{
+  #var: λ&k. λ&idx.
+    λ{
+      0: 0;
+      λ&x. 1
+    }(k == idx);
+  λ&tm. λ&idx.
+    0
+}
+
+// Counts f-applications in Church numeral body.
+@count_apps = λ{
+  #var: λ&k.
+    0;
+  #lam: λ&bod.
+    @count_apps(bod);
+  #app: λ&fun. λ&arg.
+    @count_app(fun, arg)
+}
+
+// Counts one application node in Church body.
+@count_app = λ&fun. λ&arg.
+  λ{
+    0: @count_apps(fun) + @count_apps(arg);
+    λ&x. @count_apps(arg) + 1
+  }(@is_var(fun, 1))
+
+// Benchmark
+// ---------
+
+// Builds and normalizes one Church arithmetic expression.
+@eval_expr = λ&a. λ&b. λ&c.
+  @church_to_u32(
+    @nf(
+      #app{
+        #app{
+          @c_mul,
+          #app{
+            #app{@c_add, #app{#app{@c_mul, a}, b}},
+            c
+          }
+        },
+        @church(2)
+      }
+    )
+  )
+
+// Runs one benchmark round and returns next state.
+@round = λ&seed. λ&acc.
+  ! &na  = 19 + seed % 4;
+  ! &nb  = 18 + (seed >> 3) % 4;
+  ! &nc  = 16 + (seed >> 5) % 3;
+  ! r0   = @eval_expr(@church(na), @church(nb), @church(nc));
+  ! r1   = @eval_expr(@church(nb), @church(nc), @church(na));
+  ! acc  = (acc ^ r0) * 16777619 + r1 * 131 + seed;
+  ! seed = @rng(seed);
+  #st{seed, acc}
+
+// Runs one round from an existing benchmark state.
+@round_st = λ{
+  #st: λ&seed. λ&acc.
+    @round(seed, acc)
+}
+
+// Runs benchmark rounds.
+@bench = λ{
+  0: λ&seed. λ&acc.
+    acc;
+  λ&rounds. λ&seed. λ&acc.
+    @bench_go(rounds, seed, acc)
+}
+
+// Runs four rounds per recursion step.
+@bench_go = λ&rounds. λ&seed. λ&acc.
+  ! s      = @round(seed, acc);
+  ! s      = @round_st(s);
+  ! s      = @round_st(s);
+  ! s      = @round_st(s);
+  ! rounds = rounds - 1;
+  @bench_take(rounds, s)
+
+// Continues benchmark recursion from a state pair.
+@bench_take = λ&rounds. λ{
+  #st: λ&seed. λ&acc.
+    @bench(rounds, seed, acc)
+}
+
+// Main
+// ----
+
+// Evaluates the benchmark with the shared tuned input.
+@main = @bench(1, 1, 0)

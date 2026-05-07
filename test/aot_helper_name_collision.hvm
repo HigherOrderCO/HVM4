@@ -1,5 +1,0 @@
-// AOT helper names must not collide with user definitions like @foo_1.
-@foo = λ{#A:1; λx.2}
-@foo_1 = 7
-@main = [@foo(#A{}), @foo(#B{}), @foo_1]
-//[1,2,7]

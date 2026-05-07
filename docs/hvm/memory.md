@@ -41,7 +41,6 @@ priority wrapper        | INC    | 0                | node: [term]              
 name literal            | NAM    | name id          | 0                            | literal ^name
 stuck application       | DRY    | 0                | node: [fun, arg]             | literal ^(f x)
 reference               | REF    | name id          | 0                            | book reference @name
-primitive               | PRI    | name id          | node: [arg0..argN-1]         | native function call; arity from prim table
 allocation              | ALO    | bind list length | direct or packed pair        | len=0: VAL=book term; len>0: VAL->(low24=book term, high40=bind list head)
 unscoped binding        | UNS    | 0                | node: [body]                 | helper to construct unscoped lams
 wildcard                | ANY    | 0                | 0                            | duplicates itself, equals anything

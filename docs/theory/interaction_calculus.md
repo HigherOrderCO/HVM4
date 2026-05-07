@@ -1,7 +1,7 @@
 # Interaction Calculus
 
 The Interaction Calculus is a model of computation that extends the Lambda
-Calculus with **duplications** and **superpositions**, two primitives that
+Calculus with **duplications** and **superpositions**, two core forms that
 enable optimal lazy evaluation.
 
 ## Contents
@@ -24,7 +24,7 @@ Haskell solves this with *memoization* (thunks), caching results so repeated
 access doesn't recompute. This works for data, but breaks down inside lambdas.
 
 The Interaction Calculus achieves **optimal sharing**: work is never duplicated,
-even inside lambdas. Two dual primitives make this possible:
+even inside lambdas. Two dual forms make this possible:
 
 - **Duplications**: allow a single value to exist in multiple locations
 - **Superpositions**: allow multiple values to exist in a single location
@@ -240,8 +240,8 @@ extension for practical constructs: numbers, constructors, pattern-matching.
 
 ## Relation to Interaction Combinators
 
-The Interaction Calculus is similar to Interaction Combinators, a parallel model
-of computation described by Lafont (1997). This similarity can be visualized as:
+The Interaction Calculus is similar to Interaction Combinators, the graph
+rewriting model described by Lafont (1997). This similarity can be visualized as:
 
 ```
 ┌─────┬─────────────────────┬──────────────────┐

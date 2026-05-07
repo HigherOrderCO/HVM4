@@ -1,13 +1,10 @@
 .stuff/
 *.o
 *.hi
-clang/main
+hvm
 haskell/main
 hvm_old/
 .DS_Store
-test/ffi/*.dylib
-test/ffi/*/*.dylib
-test/ffi/*.so
-test/ffi/*/*.so
 .hvm/
 .cache/
+.tmp/

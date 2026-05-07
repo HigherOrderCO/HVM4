@@ -1,0 +1,23 @@
+@add3 = λa;b;c. a + b + c
+
+@match_default = λ{0:10, 1:20, λx.x;}
+@match_last    = λ{#A:30, #B:40;}
+@match_named   = λ{#A:1; _:λx.6;}
+
+@sup_semicolon = !x&S = &S{1;2;}; x₀ + x₁
+@sup_comma     = !x&T = &T{3,4,}; x₀ * x₁
+@dup_pat       = ! &U{x;y;} = &U{8;9;}; x + y
+
+@main = [
+  @sup_semicolon,
+  @sup_comma,
+  @dup_pat,
+  [5;6;7;],
+  #Pair{8;9;},
+  @add3(1;2;3;),
+  @match_default(0),
+  @match_default(5),
+  @match_last(#B{}),
+  @match_named(#C{4})
+]
+//[3,12,17,[5,6,7],#Pair{8,9},6,10,5,40,6]

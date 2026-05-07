@@ -1,0 +1,20 @@
+// lambda_eval.hvm
+// ---------------
+// Direct HVM lambda benchmark.
+
+// Terms
+// -----
+
+@c2  = λ&f. λx. f(f(x))
+@c8  = λ&f. λx. f(f(f(f(f(f(f(f(x))))))))
+@t   = λt. λf. t
+@f   = λt. λf. f
+@not = λb. b(@f, @t)
+@xor = λa. λ&b. a(@not(b), b)
+@tog = λb. @xor(b, @t)
+
+// Main
+// ----
+
+@main = @c8(@c2, @tog, @t)
+//λa.λb.a

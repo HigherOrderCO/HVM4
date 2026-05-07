@@ -1,3 +1,0 @@
-//!-T4
-@main = ((%ffi_inc(1) + %ffi_inc(2)) + (%ffi_inc(3) + %ffi_inc(4)))
-//!14

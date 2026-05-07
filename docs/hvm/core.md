@@ -12,7 +12,6 @@ Term ::=
   | Dp0  Name "₀"                                    -- first dup variable
   | Dp1  Name "₁"                                    -- second dup variable
   | Ref  "@" Name                                    -- reference
-  | Pri  "%" Name                                    -- primitive (native) function
   | Nam  "^" Name                                    -- name (stuck head)
   | Dry  "^" "(" Term " " Term ")"                   -- dry (stuck application)
   | Era  "&{}"                                       -- erasure
@@ -48,7 +47,5 @@ Oper  ::= "+" | "-" | "*" | "/" | "%" | "&&" | "||"
 - Variables are global: a variable can occur outside its binder's lexical scope.
 - Labels determine how duplications and superpositions interact; equal labels
   annihilate, different labels commute.
-- Primitives (`%name`) are native functions and must be fully applied with the
-  correct arity; `%log` prints a string and yields `#Nil`.
 - Surface sugar accepts `λ$x. body` as an unscoped lambda, equivalent to
   `! f = λ x ; f(body)` with fresh `f` (see `docs/hvm/syntax.md`).

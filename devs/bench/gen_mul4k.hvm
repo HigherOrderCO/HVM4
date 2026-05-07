@@ -1,0 +1,21 @@
+@Y    = λ&f. f(@Y(f))
+@when = λ{[]: λx.x; <>: λ{0: λt. &{}; 1: λt,x. @when(t, x)}}
+
+@muln = λ&L,&K. λF. λ{
+  0n: 0n
+  1n+: λp. @expr(L, K, F, p)
+}
+      
+@expr = λ&L. λ{
+  0n: λf. λx. x;
+  1n+: λ&K. λf. λx.
+    ! f &(L) = f
+    ! x &(L) = x
+    &(L){f₀(x₀), 1n+@expr(L+1,K,f₁,x₁)}
+}
+
+@main =
+  ! &F = λF. @muln(1, 100000n, F)
+  ! e0 = @Y(F)(3n) === 12000n
+  ! e1 = @Y(F)(4n) === 16000n
+  @when([e0,e1], [F])

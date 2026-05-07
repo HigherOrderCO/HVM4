@@ -1,0 +1,42 @@
+// fib_nat/main.hvm
+// ================
+// Naive Fibonacci recursion over Peano naturals.
+// Mirrors bench/fib_nat/main.ts.
+
+// Nat Arithmetic
+// --------------
+
+// Adds two unary naturals tail-recursively.
+@add = λ{
+  #ZER: λb. b;
+  #SUC: λa. λb. @add(a,#SUC{b})
+}
+
+// Fibonacci
+// ---------
+
+// Computes Fibonacci over unary naturals.
+@fib = λ{
+  #ZER: #ZER;
+  #SUC: λ{
+    #ZER: #SUC{#ZER}
+    #SUC: λp.
+      ! P &L = p;
+      @add(@fib(#SUC{P₀}), @fib(P₁))
+  }
+}
+
+// U32
+// ---
+
+// Converts one unary nat to one U32 accumulator.
+@u32 = λ{
+  #ZER: λn. n
+  #SUC: λp. λn. @u32(p,1+n)
+}
+
+// Main
+// ----
+
+// Evaluates fib(34) and converts the result to U32.
+@main = @u32(@fib(34n),0)
