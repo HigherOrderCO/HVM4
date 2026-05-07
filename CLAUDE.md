@@ -51,7 +51,7 @@ inspired by Bend's `Core.ts`:
 
 - `Types`: scalar aliases, term tags, parser/runtime structs, globals.
 - `Term`: term packing, tag/ext/val helpers, constructors, clone helpers, OP2.
-- `Heap`: allocation, heap access, substitutions, and GC.
+- `Heap`: allocation, heap access, and substitutions.
 - `Nick`, `System`, `Table`, `Print`: names, file/path helpers, intern table,
   and dynamic/static pretty-printing.
 - `Runtime`: process setup, program preparation, entry lookup, and @main eval.

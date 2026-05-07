@@ -152,7 +152,6 @@ typedef struct {
 
 static Term *HEAP;
 static u64   HEAP_NEXT = 1;
-static u64   HEAP_END  = HEAP_CAP;
 
 // Book Globals
 // ============
@@ -239,31 +238,25 @@ fn Term term_new(u8 sub, u8 tag, u32 ext, u64 val) {
        | ((u64)(val & VAL_MASK));
 }
 
-
 fn u8 term_sub_get(Term t) {
   return (t >> SUB_SHIFT) & SUB_MASK;
 }
-
 
 fn Term term_sub_set(Term t, u8 sub) {
   return (t & ~(((u64)SUB_MASK) << SUB_SHIFT)) | (((u64)(sub & SUB_MASK)) << SUB_SHIFT);
 }
 
-
 fn u8 term_tag(Term t) {
   return (t >> TAG_SHIFT) & TAG_MASK;
 }
-
 
 fn u32 term_ext(Term t) {
   return (t >> EXT_SHIFT) & EXT_MASK;
 }
 
-
 fn u64 term_val(Term t) {
   return (t >> VAL_SHIFT) & VAL_MASK;
 }
-
 
 static const u8 TERM_ARITY[TAG_MASK + 1] = {
   [APP] = 2,
@@ -318,15 +311,13 @@ fn u32 term_arity(Term t) {
   return TERM_ARITY[tag];
 }
 
-
 // Heap
 // ====
-
 
 fn u64 heap_alloc(u64 size) {
   u64 at   = HEAP_NEXT;
   u64 next = at + size;
-  if (__builtin_expect(next <= HEAP_END && next >= at, 1)) {
+  if (__builtin_expect(next <= HEAP_CAP && next >= at, 1)) {
     HEAP_NEXT = next;
     return at;
   }
@@ -334,16 +325,13 @@ fn u64 heap_alloc(u64 size) {
   exit(1);
 }
 
-
 fn u64 heap_alloc_total(void) {
   return HEAP_NEXT > 0 ? HEAP_NEXT - 1 : 0;
 }
 
-
 fn Term heap_read(u64 loc) {
   return HEAP[loc];
 }
-
 
 fn Term heap_take(u64 loc) {
   Term term = HEAP[loc];
@@ -354,154 +342,12 @@ fn Term heap_take(u64 loc) {
   abort();
 }
 
-
 fn void heap_set(u64 loc, Term val) {
   HEAP[loc] = val;
 }
 
-
-fn void heap_init_slices(void) {
-  HEAP_NEXT = 1;
-  HEAP_END  = HEAP_CAP;
-}
-
-
-// Semi-space copying garbage collector
-//
-// Heap layout after gc_init:
-//   [0..base)         = book/parse allocations (untouched by GC)
-//   [base..base+sz)   = from-space (active allocation region)
-//   [base+sz..base+2*sz) = to-space (target for copying)
-//
-// When from-space fills up, wnf() bails via wnf_rebuild. eval_normalize
-// calls gc_collect: trace from root_loc, copy live objects to to-space,
-// flip spaces. Cost is proportional to the live set only.
-
-#define GC_FWD_TAG 0x7F
-#define GC_MARGIN  256
-
-static int GC_ENABLED    = 0;
-static int GC_NEEDED     = 0;
-static u64 GC_SPACE_SZ   = 0;
-static u64 GC_FROM_START = 0;
-static u64 GC_TO_START   = 0;
-static u64 GC_COUNT      = 0;
-
-fn void gc_init(u64 space_words) {
-  u64 base      = HEAP_NEXT;
-  GC_ENABLED    = 1;
-  GC_SPACE_SZ   = space_words;
-  GC_FROM_START = base;
-  GC_TO_START   = base + space_words;
-  GC_COUNT      = 0;
-  GC_NEEDED     = 0;
-  HEAP_NEXT = GC_FROM_START;
-  HEAP_END  = GC_FROM_START + space_words;
-}
-
-fn Term gc_evacuate(Term term, u64 *alloc);
-
-fn u64 gc_evacuate_chain(u64 loc, u64 *alloc) {
-  u64 from_lo = GC_FROM_START;
-  u64 from_hi = GC_FROM_START + GC_SPACE_SZ;
-  if (loc == 0 || loc < from_lo || loc >= from_hi) {
-    return loc;
-  }
-  if (term_tag(HEAP[loc]) == GC_FWD_TAG) {
-    return term_val(HEAP[loc]);
-  }
-  u64 dst = *alloc;
-  *alloc += 2;
-  HEAP[dst]     = HEAP[loc];
-  HEAP[dst + 1] = HEAP[loc + 1];
-  HEAP[loc]     = term_new(0, GC_FWD_TAG, 0, dst);
-  HEAP[dst] = gc_evacuate(HEAP[dst], alloc);
-  u64 next_ls = term_val(HEAP[dst + 1]);
-  if (next_ls != 0) {
-    u64 new_next = gc_evacuate_chain(next_ls, alloc);
-    HEAP[dst + 1] = term_new(0, NUM, 0, new_next);
-  }
-  return dst;
-}
-
-fn Term gc_evacuate(Term term, u64 *alloc) {
-  u8  tag = term_tag(term);
-  u64 loc = term_val(term);
-  u64 from_lo = GC_FROM_START;
-  u64 from_hi = GC_FROM_START + GC_SPACE_SZ;
-
-  if (tag == NUM || tag == REF || tag == ERA || tag == NAM || tag == ANY ||
-      tag == C00 || tag == GC_FWD_TAG) {
-    return term;
-  }
-  if (loc < from_lo || loc >= from_hi) {
-    return term;
-  }
-  if (term_tag(HEAP[loc]) == GC_FWD_TAG) {
-    u64 new_loc = term_val(HEAP[loc]);
-    return term_new(term_sub_get(term), tag, term_ext(term), new_loc);
-  }
-
-  if (tag == ALO) {
-    u32 len = term_ext(term);
-    if (len == 0) return term;
-    u64 dst = *alloc;
-    *alloc += 1;
-    HEAP[dst] = HEAP[loc];
-    HEAP[loc] = term_new(0, GC_FWD_TAG, 0, dst);
-    u64 pair   = HEAP[dst];
-    u64 ls_loc = (pair >> ALO_TM_BITS) & ALO_LS_MASK;
-    u64 tm_loc = pair & ALO_TM_MASK;
-    if (ls_loc >= from_lo && ls_loc < from_hi) {
-      u64 new_ls = gc_evacuate_chain(ls_loc, alloc);
-      HEAP[dst] = ((new_ls & ALO_LS_MASK) << ALO_TM_BITS) | (tm_loc & ALO_TM_MASK);
-    }
-    return term_new(term_sub_get(term), ALO, len, dst);
-  }
-
-  if (tag == VAR || tag == DP0 || tag == DP1 ||
-      tag == BJV || tag == BJ0 || tag == BJ1) {
-    u64 dst = *alloc;
-    *alloc += 1;
-    HEAP[dst] = HEAP[loc];
-    HEAP[loc] = term_new(0, GC_FWD_TAG, 0, dst);
-    HEAP[dst] = gc_evacuate(HEAP[dst], alloc);
-    return term_new(term_sub_get(term), tag, term_ext(term), dst);
-  }
-
-  u32 arity = TERM_ARITY[tag];
-  if (arity == 0) return term;
-
-  u64 dst = *alloc;
-  *alloc += arity;
-  for (u32 i = 0; i < arity; i++) {
-    HEAP[dst + i] = HEAP[loc + i];
-  }
-  HEAP[loc] = term_new(0, GC_FWD_TAG, 0, dst);
-  for (u32 i = 0; i < arity; i++) {
-    HEAP[dst + i] = gc_evacuate(HEAP[dst + i], alloc);
-  }
-  return term_new(term_sub_get(term), tag, term_ext(term), dst);
-}
-
-fn u64 gc_collect(u64 root_loc) {
-  GC_COUNT++;
-  u64 alloc = GC_TO_START;
-  u64 new_root_loc = alloc++;
-  HEAP[new_root_loc] = gc_evacuate(HEAP[root_loc], &alloc);
-  u64 old_from  = GC_FROM_START;
-  GC_FROM_START = GC_TO_START;
-  GC_TO_START   = old_from;
-  HEAP_NEXT = alloc;
-  HEAP_END  = GC_FROM_START + GC_SPACE_SZ;
-  GC_NEEDED = 0;
-  return new_root_loc;
-}
-
-
 // Term Constructors
 // =================
-
 
 fn Term term_new_at(u64 loc, u8 tag, u32 ext, u32 ari, Term *args) {
   for (u32 i = 0; i < ari; i++) {
@@ -514,11 +360,9 @@ fn Term term_new_(u8 tag, u32 ext, u32 ari, Term *args) {
   return term_new_at(heap_alloc(ari), tag, ext, ari, args);
 }
 
-
 fn Term term_new_nam(u32 nam) {
   return term_new(0, NAM, nam, 0);
 }
-
 
 fn Term term_new_alo(u64 ls_loc, u32 len, u64 tm_loc) {
   if (len == 0) {
@@ -537,7 +381,6 @@ fn Term term_new_alo_at(u64 alo_loc, u64 ls_loc, u32 len, u64 tm_loc) {
   return term_new(0, ALO, len, alo_loc);
 }
 
-
 fn Term term_new_dry_at(u64 loc, Term fun, Term arg) {
   heap_set(loc + 0, fun);
   heap_set(loc + 1, arg);
@@ -548,36 +391,29 @@ fn Term term_new_dry(Term fun, Term arg) {
   return term_new_dry_at(heap_alloc(2), fun, arg);
 }
 
-
 fn Term term_new_var(u64 loc) {
   return term_new(0, VAR, 0, loc);
 }
-
 
 fn Term term_new_ref(u32 nam) {
   return term_new(0, REF, nam, 0);
 }
 
-
 fn Term term_new_era(void) {
   return term_new(0, ERA, 0, 0);
 }
-
 
 fn Term term_new_any(void) {
   return term_new(0, ANY, 0, 0);
 }
 
-
 fn Term term_new_dp0(u32 lab, u64 loc) {
   return term_new(0, DP0, lab, loc);
 }
 
-
 fn Term term_new_dp1(u32 lab, u64 loc) {
   return term_new(0, DP1, lab, loc);
 }
-
 
 fn Term term_new_lam_at(u64 loc, Term bod) {
   heap_set(loc, bod);
@@ -587,7 +423,6 @@ fn Term term_new_lam_at(u64 loc, Term bod) {
 fn Term term_new_lam(Term bod) {
   return term_new_lam_at(heap_alloc(1), bod);
 }
-
 
 fn Term term_new_app_at(u64 loc, Term fun, Term arg) {
   heap_set(loc + 0, fun);
@@ -599,7 +434,6 @@ fn Term term_new_app(Term fun, Term arg) {
   return term_new_app_at(heap_alloc(2), fun, arg);
 }
 
-
 fn Term term_new_sup_at(u64 loc, u32 lab, Term tm0, Term tm1) {
   heap_set(loc + 0, tm0);
   heap_set(loc + 1, tm1);
@@ -609,7 +443,6 @@ fn Term term_new_sup_at(u64 loc, u32 lab, Term tm0, Term tm1) {
 fn Term term_new_sup(u32 lab, Term tm0, Term tm1) {
   return term_new_sup_at(heap_alloc(2), lab, tm0, tm1);
 }
-
 
 fn Term term_new_dup_at(u64 loc, u32 lab, Term val, Term bod) {
   heap_set(loc + 0, val);
@@ -621,7 +454,6 @@ fn Term term_new_dup(u32 lab, Term val, Term bod) {
   return term_new_dup_at(heap_alloc(2), lab, val, bod);
 }
 
-
 fn Term term_new_mat_at(u64 loc, u32 nam, Term val, Term nxt) {
   heap_set(loc + 0, val);
   heap_set(loc + 1, nxt);
@@ -632,7 +464,6 @@ fn Term term_new_mat(u32 nam, Term val, Term nxt) {
   return term_new_mat_at(heap_alloc(2), nam, val, nxt);
 }
 
-
 // SWI: λ{num: f; g} - number switch (same as MAT but for parser/printer)
 fn Term term_new_swi(u32 num, Term f, Term g) {
   u64 loc = heap_alloc(2);
@@ -640,7 +471,6 @@ fn Term term_new_swi(u32 num, Term f, Term g) {
   heap_set(loc + 1, g);
   return term_new(0, SWI, num, loc);
 }
-
 
 // USE: λ{f} - reduce arg and apply
 // fields = [f]
@@ -652,7 +482,6 @@ fn Term term_new_use_at(u64 loc, Term f) {
 fn Term term_new_use(Term f) {
   return term_new_use_at(heap_alloc(1), f);
 }
-
 
 fn Term term_new_ctr_at(u64 loc, u32 nam, u32 ari, Term *args) {
   if (ari == 0) {
@@ -671,7 +500,6 @@ fn Term term_new_ctr(u32 nam, u32 ari, Term *args) {
   }
   return term_new_ctr_at(heap_alloc(ari), nam, ari, args);
 }
-
 
 // Op2(opr, x, y): binary operation, strict on x first
 // Layout: heap_read(loc+0) = x, heap_read(loc+1) = y
@@ -696,7 +524,6 @@ fn Term term_new_dsu(Term lab, Term a, Term b) {
   return term_new(0, DSU, 0, loc);
 }
 
-
 // DynDup(lab, val, bod): dynamic DUP binder, strict on lab
 // Layout: heap_read(loc+0) = lab, heap_read(loc+1) = val, heap_read(loc+2) = bod
 fn Term term_new_ddu(Term lab, Term val, Term bod) {
@@ -706,7 +533,6 @@ fn Term term_new_ddu(Term lab, Term val, Term bod) {
   heap_set(loc + 2, bod);
   return term_new(0, DDU, 0, loc);
 }
-
 
 // Eql(a, b): structural equality, strict on a first then b
 // Layout: heap_read(loc+0) = a, heap_read(loc+1) = b
@@ -721,7 +547,6 @@ fn Term term_new_eql(Term a, Term b) {
   return term_new_eql_at(heap_alloc(2), a, b);
 }
 
-
 fn Term term_new_and_at(u64 loc, Term a, Term b) {
   heap_set(loc + 0, a);
   heap_set(loc + 1, b);
@@ -731,7 +556,6 @@ fn Term term_new_and_at(u64 loc, Term a, Term b) {
 fn Term term_new_and(Term a, Term b) {
   return term_new_and_at(heap_alloc(2), a, b);
 }
-
 
 // Or(a, b): short-circuit OR, strict on a only
 // Layout: heap_read(loc+0) = a, heap_read(loc+1) = b
@@ -746,7 +570,6 @@ fn Term term_new_or(Term a, Term b) {
   return term_new_or_at(heap_alloc(2), a, b);
 }
 
-
 // UNS: ! ${f, v}; body - unscoped binding
 // fields = [body]
 fn Term term_new_uns(Term bod) {
@@ -754,7 +577,6 @@ fn Term term_new_uns(Term bod) {
   heap_set(loc, bod);
   return term_new(0, UNS, 0, loc);
 }
-
 
 // INC: ↑x - priority wrapper for collapse ordering
 // fields = [x]
@@ -764,11 +586,9 @@ fn Term term_new_inc(Term x) {
   return term_new(0, INC, 0, loc);
 }
 
-
 fn Term term_new_num(u32 n) {
   return term_new(0, NUM, 0, n);
 }
-
 
 fn Copy term_clone_at(u64 loc, u32 lab) {
   return (Copy){ term_new_dp0(lab, loc), term_new_dp1(lab, loc) };
@@ -805,7 +625,6 @@ fn void term_clone_many(u32 lab, Term *src, u32 n, Term *dst0, Term *dst1) {
     dst1[i] = c.k1;
   }
 }
-
 
 // OP2 Helpers
 // ===========
@@ -879,30 +698,24 @@ fn u32 term_op2_u32(u32 opr, u32 a, u32 b) {
   }
 }
 
-
 // Heap Substitution
 // =================
-
 
 fn void heap_subst_var(u64 loc, Term val) {
   heap_set(loc, term_sub_set(val, 1));
 }
 
-
 fn void heap_subst_var_dup(u64 loc, Term val) {
   heap_set(loc, term_sub_set(val, 1));
 }
-
 
 fn Term heap_subst_cop(u8 side, u64 loc, Term r0, Term r1) {
   heap_set(loc, term_sub_set(side == 0 ? r1 : r0, 1));
   return side == 0 ? r0 : r1;
 }
 
-
 // Nick
 // ====
-
 
 fn int nick_letter_to_b64(char c) {
   if (c == '_') {
@@ -923,7 +736,6 @@ fn int nick_letter_to_b64(char c) {
   return -1;
 }
 
-
 fn char nick_b64_to_letter(int b64) {
   if (b64 == 0) {
     return '_';
@@ -942,7 +754,6 @@ fn char nick_b64_to_letter(int b64) {
   }
   return '?';
 }
-
 
 fn void nick_to_str(u32 name, char *buf, u32 buf_size) {
   // Extract 4 characters from the 24-bit name (6 bits each)
@@ -966,16 +777,13 @@ fn void nick_to_str(u32 name, char *buf, u32 buf_size) {
   buf[len < (int)buf_size - 1 ? len : buf_size - 1] = '\0';
 }
 
-
 fn int nick_is_init(char c) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
 }
 
-
 fn int nick_is_char(char c) {
   return nick_letter_to_b64(c) >= 0;
 }
-
 
 fn void sys_error(const char *msg);
 
@@ -997,7 +805,6 @@ fn u32 nick_from_str(const char *name, u32 len) {
   return k;
 }
 
-
 fn u32 table_find(const char *name, u32 len);
 
 // Built-in constructor symbols (initialized at runtime).
@@ -1015,22 +822,18 @@ fn void symbols_init(void) {
   SYM_CHR = table_find("CHR", 3);
 }
 
-
 // System
 // ======
-
 
 fn void sys_error(const char *msg) {
   fprintf(stderr, "ERROR: %s\n", msg);
   exit(1);
 }
 
-
 fn void sys_runtime_error(const char *msg) {
   fprintf(stderr, "RUNTIME_ERROR: %s\n", msg);
   exit(1);
 }
-
 
 fn void sys_path_join(char *out, int size, const char *base, const char *rel) {
   if (rel[0] == '/') {
@@ -1044,7 +847,6 @@ fn void sys_path_join(char *out, int size, const char *base, const char *rel) {
     snprintf(out, size, "%s", rel);
   }
 }
-
 
 fn char *sys_file_read(const char *path) {
   FILE *fp = fopen(path, "rb");
@@ -1063,7 +865,6 @@ fn char *sys_file_read(const char *path) {
   fclose(fp);
   return src;
 }
-
 
 #ifndef MAP_ANONYMOUS
   #define MAP_ANONYMOUS MAP_ANON
@@ -1090,10 +891,8 @@ fn void sys_munmap_anon(void *ptr, size_t bytes) {
   munmap(ptr, bytes);
 }
 
-
 // Table
 // =====
-
 
 // Name table globals
 // ==================
@@ -1106,7 +905,6 @@ typedef struct {
 } NameTable;
 
 static NameTable TABLE = {0};
-
 
 fn void sys_error(const char *msg);
 
@@ -1138,7 +936,6 @@ fn u32 table_find(const char *name, u32 len) {
   return id;
 }
 
-
 // Returns the name string for a given id, or NULL if not set.
 fn char *table_get(u32 id) {
   if (TABLE.data == NULL || id >= TABLE.len) {
@@ -1147,10 +944,8 @@ fn char *table_get(u32 id) {
   return TABLE.data[id];
 }
 
-
 // Print
 // =====
-
 
 // Prints nick-encoded names (base64-like alphabet) used by parser/printer round-trip.
 fn void print_name(FILE *f, u32 n) {
@@ -1161,7 +956,6 @@ fn void print_name(FILE *f, u32 n) {
     fputc(nick_alphabet[n % 64], f);
   }
 }
-
 
 // Print a Unicode codepoint as UTF-8.
 // Emits a codepoint as UTF-8 without validation; escaping helpers gate usage.
@@ -1281,7 +1075,6 @@ fn int print_utf8_escape(FILE *f, u32 c, u8 mode) {
   print_utf8(f, c);
   return 1;
 }
-
 
 // Pretty-printer overview
 // - Dynamic links: LAM/VAR and DP0/DP1 point to heap locations; DUP is a
@@ -1451,7 +1244,6 @@ fn void print_sym_name(FILE *f, u32 nam) {
     print_name(f, nam);
   }
 }
-
 
 // Prints match constructor labels with special sugar for nat/list forms.
 fn void print_mat_name(FILE *f, u32 nam) {
@@ -1965,10 +1757,8 @@ fn void print_term_quoted(Term term) {
   print_term_quoted_ex(stdout, term, 0);
 }
 
-
 // Runtime Types
 // =============
-
 
 // Runtime Shared Types
 // ====================
@@ -1983,10 +1773,8 @@ typedef struct {
   int step_by_step;
 } RuntimeEvalCfg;
 
-
 // Parse
 // =====
-
 
 fn void parse_error(PState *s, const char *expected, char detected) {
   fprintf(stderr, "\033[1;31mPARSE_ERROR\033[0m (%s:%d:%d)\n", s->file, s->line, s->col);
@@ -1998,7 +1786,6 @@ fn void parse_error(PState *s, const char *expected, char detected) {
   }
   exit(1);
 }
-
 
 fn void parse_error_var(PState *s, u32 nam, int is_dup, int skipped) {
   char  nam_fallback[32];
@@ -2018,7 +1805,6 @@ fn void parse_error_var(PState *s, u32 nam, int is_dup, int skipped) {
   exit(1);
 }
 
-
 fn void parse_error_affine(PState *s, u32 nam, u32 side, u32 uses) {
   char  nam_fallback[32];
   char *nam_buf = table_get(nam);
@@ -2032,22 +1818,18 @@ fn void parse_error_affine(PState *s, u32 nam, u32 side, u32 uses) {
   exit(1);
 }
 
-
 fn int parse_at_end(PState *s) {
   return s->pos >= s->len;
 }
-
 
 fn char parse_peek_at(PState *s, u32 offset) {
   u32 idx = s->pos + offset;
   return (idx >= s->len) ? 0 : s->src[idx];
 }
 
-
 fn char parse_peek(PState *s) {
   return parse_peek_at(s, 0);
 }
-
 
 fn void parse_advance(PState *s) {
   if (parse_at_end(s)) {
@@ -2062,7 +1844,6 @@ fn void parse_advance(PState *s) {
   s->pos++;
 }
 
-
 fn int parse_starts_with(PState *s, const char *str) {
   u32 i = 0;
   while (str[i]) {
@@ -2073,7 +1854,6 @@ fn int parse_starts_with(PState *s, const char *str) {
   }
   return 1;
 }
-
 
 fn int parse_match(PState *s, const char *str) {
   if (!parse_starts_with(s, str)) {
@@ -2086,7 +1866,6 @@ fn int parse_match(PState *s, const char *str) {
   return 1;
 }
 
-
 fn int parse_sep(PState *s) {
   char c = parse_peek(s);
   if (c != ',' && c != ';') {
@@ -2096,18 +1875,15 @@ fn int parse_sep(PState *s) {
   return 1;
 }
 
-
 fn int parse_is_space(char c) {
   return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
-
 
 fn void parse_skip_comment(PState *s) {
   while (!parse_at_end(s) && parse_peek(s) != '\n') {
     parse_advance(s);
   }
 }
-
 
 fn void parse_skip(PState *s) {
   while (!parse_at_end(s)) {
@@ -2123,7 +1899,6 @@ fn void parse_skip(PState *s) {
   }
 }
 
-
 fn void parse_consume(PState *s, const char *str) {
   parse_skip(s);
   if (!parse_match(s, str)) {
@@ -2131,7 +1906,6 @@ fn void parse_consume(PState *s, const char *str) {
   }
   parse_skip(s);
 }
-
 
 fn void parse_bind_push_side(u32 name, u32 depth, u32 lab, int side, u32 cloned) {
   PARSE_BINDS[PARSE_BINDS_LEN++] = (PBind){name, depth + 1, lab, 0, cloned, side};
@@ -2143,11 +1917,9 @@ fn void parse_bind_push(u32 name, u32 depth, u32 lab, u32 forked, u32 cloned) {
   return;
 }
 
-
 fn void parse_bind_pop(void) {
   PARSE_BINDS_LEN--;
 }
-
 
 // Lookup binding by name. Skips to outer binds on false shadowing (dup var + lam bind, lam var + dup bind, etc)
 // Returns 1 and sets the bind if found, skipped = 1 if skipped a binding with the same name.
@@ -2180,7 +1952,6 @@ fn PBind* parse_bind_lookup(u32 name, int side, int *skipped) {
   return NULL;
 }
 
-
 // Count the number of uses of a target variable in a term
 // Variables are identified by tag + level (and ext for BJ mode).
 fn u32 count_uses(Term t, u32 lvl, u8 tgt, u32 ext) {
@@ -2205,7 +1976,6 @@ fn u32 count_uses(Term t, u32 lvl, u8 tgt, u32 ext) {
   free(ts);
   return uses;
 }
-
 
 // Auto-dup: rewrites a cloned binder with N uses into N-1 nested DUP nodes.
 // Example: [x,x,x] becomes !d0&=x; !d1&=d0₁; [d0₀,d1₀,d1₁]
@@ -2319,7 +2089,6 @@ fn Term parse_auto_dup(Term body, u32 lvl, u32 base, u8 tgt, u32 ext, u32 uses) 
   return result;
 }
 
-
 fn u32 parse_name(PState *s) {
   parse_skip(s);
   char c = parse_peek(s);
@@ -2379,7 +2148,6 @@ fn u32 parse_name_ref(PState *s) {
   return id;
 }
 
-
 // Decode UTF-8 codepoint at current position, advance past it
 fn u32 parse_utf8(PState *s) {
   u8 b0 = (u8)s->src[s->pos];
@@ -2409,7 +2177,6 @@ fn u32 parse_utf8(PState *s) {
   }
   return b0;
 }
-
 
 fn Term parse_term(PState *s, u32 depth);
 fn u32  parse_char_lit(PState *s);
@@ -2677,7 +2444,6 @@ fn Term parse_term_lam(PState *s, u32 depth) {
   HEAP[loc] = body;
   return term_new(0, LAM, lam_ext, loc);
 }
-
 
 fn Term parse_term(PState *s, u32 depth);
 
@@ -2969,7 +2735,6 @@ fn Term parse_term_dup(PState *s, u32 depth) {
   return term_new(0, DUP, lab, loc);
 }
 
-
 fn Term parse_term(PState *s, u32 depth);
 
 // Fork: &Lλx,y,z{A;B} or &(L)λx,y,z{A;B}
@@ -3068,7 +2833,6 @@ fn Term parse_term_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 depth) {
   }
   return body;
 }
-
 
 fn Term parse_term(PState *s, u32 depth);
 
@@ -3296,7 +3060,6 @@ fn Term parse_term_auto_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 dep
     names, old_depths, old_tags, old_labs, cloned, n, saved_fork_side);
 }
 
-
 fn Term parse_term(PState *s, u32 depth);
 fn Term parse_term_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 depth);
 fn Term parse_term_sup_fork(PState *s, int dyn, Term lab_term, u32 lab, u32 depth);
@@ -3346,7 +3109,6 @@ fn Term parse_term_sup(PState *s, u32 depth) {
   return dyn ? term_new_dsu(lab_term, tm0, tm1) : term_new_sup(lab, tm0, tm1);
 }
 
-
 fn Term parse_term(PState *s, u32 depth);
 
 fn Term parse_term_ctr(PState *s, u32 depth) {
@@ -3370,11 +3132,9 @@ fn Term parse_term_ctr(PState *s, u32 depth) {
   return term_new_ctr(nam, cnt, args);
 }
 
-
 fn Term parse_term_ref(PState *s) {
   return term_new_ref(parse_name_ref(s));
 }
-
 
 fn Term parse_term(PState *s, u32 depth);
 
@@ -3395,7 +3155,6 @@ fn Term parse_term_nam(PState *s, u32 depth) {
   }
 }
 
-
 fn Term parse_term(PState *s, u32 depth);
 
 fn Term parse_term_par(PState *s, u32 depth) {
@@ -3403,7 +3162,6 @@ fn Term parse_term_par(PState *s, u32 depth) {
   parse_consume(s, ")");
   return term;
 }
-
 
 fn Term parse_term_num(PState *s) {
   parse_skip(s);
@@ -3421,7 +3179,6 @@ fn Term parse_term_num(PState *s) {
   return term_new_num(n);
 }
 
-
 fn Term parse_term(PState *s, u32 depth);
 
 fn Term parse_term_nat(PState *s, u32 depth) {
@@ -3437,7 +3194,6 @@ fn Term parse_term_nat(PState *s, u32 depth) {
   for (u32 i = 0; i < num; i++) t = term_new_ctr(SYM_SUC, 1, &t);
   return t;
 }
-
 
 fn u32 parse_char_esc(PState *s) {
   if (parse_peek(s) == 0) {
@@ -3480,7 +3236,6 @@ fn Term parse_term_chr(PState *s) {
   return term_new_ctr(SYM_CHR, 1, &n);
 }
 
-
 fn Term parse_term(PState *s, u32 depth);
 fn u32  parse_char_esc(PState *s);
 
@@ -3503,7 +3258,6 @@ fn Term parse_term_str(PState *s, u32 depth) {
   return t;
 }
 
-
 fn Term parse_term(PState *s, u32 depth);
 
 fn Term parse_term_lst(PState *s, u32 depth) {
@@ -3525,7 +3279,6 @@ fn Term parse_term_lst(PState *s, u32 depth) {
   }
   return t;
 }
-
 
 fn Term parse_term_var(PState *s, u32 depth) {
   parse_skip(s);
@@ -3557,11 +3310,9 @@ fn Term parse_term_var(PState *s, u32 depth) {
   return term_new(0, tag, lab, val);
 }
 
-
 fn Term parse_term_any(void) {
   return term_new_any();
 }
-
 
 fn Term parse_term(PState *s, u32 depth);
 
@@ -3582,7 +3333,6 @@ fn u32 parse_term_args(PState *s, u32 depth, Term *args, u32 max_args) {
   parse_consume(s, ")");
   return cnt;
 }
-
 
 fn Term parse_term(PState *s, u32 depth);
 
@@ -3671,7 +3421,6 @@ fn int parse_term_opr_match(PState *s) {
   return -1;
 }
 
-
 fn Term parse_term(PState *s, u32 depth);
 fn Term parse_term_atom(PState *s, u32 depth);
 fn int parse_term_opr_peek(PState *s);
@@ -3742,13 +3491,11 @@ fn Term parse_term_app_prec(Term f, PState *s, u32 depth, int min_prec) {
   return parse_term_app_prec(f, s, depth, min_prec);
 }
 
-
 // Parse INC: ↑x
 fn Term parse_term_inc(PState *s, u32 depth) {
   Term x = parse_term_atom(s, depth);
   return term_new_inc(x);
 }
-
 
 // Parse a single atom (no trailing operators or function calls)
 fn Term parse_term_atom(PState *s, u32 depth) {
@@ -3789,7 +3536,6 @@ fn Term parse_term_atom(PState *s, u32 depth) {
 fn Term parse_term(PState *s, u32 depth) {
   return parse_term_app(parse_term_atom(s, depth), s, depth);
 }
-
 
 fn void parse_def(PState *s);
 
@@ -3842,7 +3588,6 @@ fn void parse_include(PState *s) {
   free(src);
 }
 
-
 fn void parse_def(PState *s) {
   parse_skip(s);
   if (parse_at_end(s)) {
@@ -3866,7 +3611,6 @@ fn void parse_def(PState *s) {
   }
   parse_error(s, "definition or #include", parse_peek(s));
 }
-
 
 // Parse Program Entry
 // -------------------
@@ -3899,10 +3643,8 @@ fn void parse_program(const char *source_path, char *src) {
   parse_def(&s);
 }
 
-
 // WNF
 // ===
-
 
 // WNF Interaction Counter Toggle
 // ==============================
@@ -3912,7 +3654,6 @@ fn void parse_program(const char *source_path, char *src) {
 fn void wnf_set_itrs_enabled(int enabled) {
   ITRS_ENABLED = enabled != 0;
 }
-
 
 fn void wnf_stack_init(void) {
   WnfBank *bank = &WNF_BANK;
@@ -3940,7 +3681,6 @@ fn void wnf_stack_init(void) {
   bank->s_pos       = 1;
 }
 
-
 fn void wnf_stack_free(void) {
   WnfBank *bank = &WNF_BANK;
   if (!bank->stack) {
@@ -3957,11 +3697,9 @@ fn void wnf_stack_free(void) {
   bank->s_pos       = 0;
 }
 
-
 fn u64 wnf_itrs_total(void) {
   return ITRS;
 }
-
 
 // (&{} a)
 // ------- APP-ERA
@@ -3971,7 +3709,6 @@ fn Term wnf_app_era(void) {
   return term_new_era();
 }
 
-
 // (name a)
 // --------- APP-NAM
 // ^(name a)
@@ -3980,7 +3717,6 @@ fn Term wnf_app_nam(u64 app_loc, Term nam) {
   return term_new(0, DRY, 0, app_loc);
 }
 
-
 // (^(f x) a)
 // ----------- APP-DRY
 // ^(^(f x) a)
@@ -3988,7 +3724,6 @@ fn Term wnf_app_dry(u64 app_loc, Term dry) {
   heap_set(app_loc + 0, dry);
   return term_new(0, DRY, 0, app_loc);
 }
-
 
 // (λx.f a)
 // -------- APP-LAM
@@ -4006,7 +3741,6 @@ fn Term wnf_app_lam(Term lam, Term arg) {
   return body;
 }
 
-
 // (&L{f,g} a)
 // ----------------- APP-SUP
 // ! A &L = a
@@ -4023,7 +3757,6 @@ fn Term wnf_app_sup(u64 app_loc, Term sup, Term arg) {
   return term_new_sup_at(app_loc, lab, ap0, ap1);
 }
 
-
 // (↑f x)
 // -------- APP-INC
 // ↑(f x)
@@ -4037,7 +3770,6 @@ fn Term wnf_app_inc(Term app, Term inc) {
   heap_set(inc_loc + 0, term_new(0, APP, 0, app_loc));
   return inc;
 }
-
 
 // (λ{#K:h; m} &L{a,b})
 // -------------------- APP-MAT-SUP
@@ -4054,7 +3786,6 @@ fn Term wnf_app_mat_sup(Term mat, Term sup) {
   Term b   = heap_read(loc + 1);
   return term_new_sup_at(loc, lab, term_new_app(M.k0, a), term_new_app(M.k1, b));
 }
-
 
 // (λ{#K:h; m} #K{a,b})
 // -------------------- APP-MAT-CTR-MAT
@@ -4099,7 +3830,6 @@ fn Term wnf_app_mat_ctr(Term mat, Term ctr) {
   }
 }
 
-
 // (λ{#a:h; m} #a)
 // --------------- APP-MAT-NUM-MAT
 // h
@@ -4121,7 +3851,6 @@ fn Term wnf_app_mat_num(Term mat, Term num) {
   }
 }
 
-
 // (λ{...} ↑x)
 // ------------ MAT-INC
 // ↑(λ{...} x)
@@ -4134,7 +3863,6 @@ fn Term wnf_mat_inc(Term mat, Term inc) {
   return term_new(0, INC, 0, inc_loc);
 }
 
-
 // ! X &L = name
 // ------------ DUP-NAM
 // X₀ ← name
@@ -4144,7 +3872,6 @@ fn Term wnf_dup_nam(u32 lab, u64 loc, u8 side, Term nam) {
   heap_subst_var_dup(loc, nam);
   return nam;
 }
-
 
 // ! F &L = λx.f
 // ---------------- DUP-LAM
@@ -4183,7 +3910,6 @@ fn Term wnf_dup_lam(u32 lab, u64 loc, u8 side, Term lam) {
   return heap_subst_cop(side, loc, l0, l1);
 }
 
-
 // ! X &L = &R{a,b}
 // ---------------- DUP-SUP
 // if L == R:
@@ -4212,7 +3938,6 @@ fn Term wnf_dup_sup(u32 lab, u64 loc, u8 side, Term sup) {
     return heap_subst_cop(side, loc, s0, s1);
   }
 }
-
 
 // ! X &L = T{a,b,...}
 // ------------------- DUP-NOD
@@ -4244,7 +3969,6 @@ fn Term wnf_dup_nod(u32 lab, u64 loc, u8 side, Term term) {
   return heap_subst_cop(side, loc, r0, r1);
 }
 
-
 // @{s} n
 // ------ ALO-VAR
 // s[n] or n when substitution missing (n is a de Bruijn level)
@@ -4262,7 +3986,6 @@ fn Term wnf_alo_var(u64 ls, u32 len, Term book) {
   }
   return it != 0 ? term_new_var(it) : term_new(0, tag, ext, lvl);
 }
-
 
 // @{s} n₀
 // ------- ALO-DP0
@@ -4288,7 +4011,6 @@ fn Term wnf_alo_cop(u64 ls, u32 len, Term book) {
   return it != 0 ? term_new(0, rtag, lab, it) : term_new(0, tag, lab, lvl);
 }
 
-
 // @{s} λx.f
 // ------------ ALO-LAM
 // x' ← fresh
@@ -4303,7 +4025,6 @@ fn Term wnf_alo_lam(u64 alo_loc, u64 ls_loc, u32 len, Term book) {
   heap_set(bind_loc + 1, term_new(0, NUM, 0, ls_loc));
   return term_new(0, LAM, lam_ext, bind_loc + 0);
 }
-
 
 // @{s} ! x &L = v; t
 // ------------------ ALO-DUP
@@ -4338,7 +4059,6 @@ fn Term wnf_alo_nod(u64 alo_loc, u64 ls_loc, u32 len, Term book) {
   return term_new_(tag, ext, ari, args);
 }
 
-
 // @@opr(&{}, y)
 // ------------- OP2-ERA
 // &{}
@@ -4346,7 +4066,6 @@ fn Term wnf_op2_era() {
   ITRS_INC("OP2-ERA");
   return term_new_era();
 }
-
 
 // @@opr(&L{a,b}, y)
 // ------------------------- OP2-SUP
@@ -4362,7 +4081,6 @@ fn Term wnf_op2_sup(u64 loc, u32 opr, Term sup, Term y) {
   return term_new_sup_at(sup_loc, lab, op0, op1);
 }
 
-
 // (x op &{}) where x is NUM
 // -------------- OP2-NUM-ERA
 // &{}
@@ -4370,7 +4088,6 @@ fn Term wnf_op2_num_era() {
   ITRS_INC("OP2-NUM-ERA");
   return term_new_era();
 }
-
 
 // (#a op #b)
 // -------------- OP2-NUM-NUM
@@ -4384,7 +4101,6 @@ fn Term wnf_op2_num_num(u32 opr, Term x, Term y) {
   return wnf_op2_num_num_raw(opr, (u32)term_val(x), (u32)term_val(y));
 }
 
-
 // (x op &L{a,b}) where x is NUM
 // ------------------------- OP2-NUM-SUP
 // ! X &L = x
@@ -4397,7 +4113,6 @@ fn Term wnf_op2_num_sup(u32 opr, Term x, Term sup) {
   Term op1     = term_new_op2(opr, x, heap_read(sup_loc + 1));
   return term_new_sup_at(sup_loc, lab, op0, op1);
 }
-
 
 // (↑x op y)
 // ---------- OP2-INC-X
@@ -4423,7 +4138,6 @@ fn Term wnf_op2_inc_y(u32 opr, Term x, Term inc) {
   return inc;
 }
 
-
 // &(&{}){a, b}
 // ------------ DSU-ERA
 // &{}
@@ -4431,7 +4145,6 @@ fn Term wnf_dsu_era() {
   ITRS_INC("DSU-ERA");
   return term_new_era();
 }
-
 
 // &(#n){a, b}
 // ----------- DSU-NUM
@@ -4441,7 +4154,6 @@ fn Term wnf_dsu_num(Term lab_num, Term a, Term b) {
   u32 lab = term_val(lab_num);
   return term_new_sup(lab, a, b);
 }
-
 
 // &(&L{x,y}){a, b}
 // -------------------------- DSU-SUP
@@ -4460,7 +4172,6 @@ fn Term wnf_dsu_sup(Term lab_sup, Term a, Term b) {
   return term_new_sup_at(sup_loc, lab, ds0, ds1);
 }
 
-
 // &(↑x){a, b}
 // ------------ DSU-INC
 // ↑(&(x){a, b})
@@ -4473,7 +4184,6 @@ fn Term wnf_dsu_inc(Term inc, Term a, Term b) {
   return inc;
 }
 
-
 // ! X &(&{}) = v; b
 // ----------------- DDU-ERA
 // &{}
@@ -4481,7 +4191,6 @@ fn Term wnf_ddu_era() {
   ITRS_INC("DDU-ERA");
   return term_new_era();
 }
-
 
 // ! X &(#n) = v; b
 // ---------------- DDU-NUM
@@ -4495,7 +4204,6 @@ fn Term wnf_ddu_num(Term lab_num, Term val, Term bod) {
   Term app1 = term_new_app(app0, V.k1);
   return app1;
 }
-
 
 // ! X &(&L{x,y}) = v; b
 // ------------------------------ DDU-SUP
@@ -4514,7 +4222,6 @@ fn Term wnf_ddu_sup(Term lab_sup, Term val, Term bod) {
   return term_new_sup_at(sup_loc, lab, dd0, dd1);
 }
 
-
 // ! X &(↑x) = v; b
 // ---------------- DDU-INC
 // ↑(! X &(x) = v; b)
@@ -4527,7 +4234,6 @@ fn Term wnf_ddu_inc(Term inc, Term val, Term bod) {
   return inc;
 }
 
-
 // (λ{f} &{})
 // ---------- USE-ERA
 // &{}
@@ -4535,7 +4241,6 @@ fn Term wnf_use_era() {
   ITRS_INC("USE-ERA");
   return term_new_era();
 }
-
 
 // (λ{f} &L{a,b})
 // ----------------- USE-SUP
@@ -4554,7 +4259,6 @@ fn Term wnf_use_sup(Term use, Term sup) {
   return term_new_sup_at(sup_loc, lab, app0, app1);
 }
 
-
 // (λ{f} x)
 // --------- USE-VAL
 // (f x)
@@ -4564,7 +4268,6 @@ fn Term wnf_use_val(Term use, Term val) {
   Term f   = heap_read(loc);
   return term_new_app(f, val);
 }
-
 
 // (use ↑x)
 // --------- USE-INC
@@ -4577,7 +4280,6 @@ fn Term wnf_use_inc(Term use, Term inc) {
   heap_set(inc_loc, app);
   return term_new(0, INC, 0, inc_loc);
 }
-
 
 // (&{} === b)
 // ----------- EQL-ERA-L
@@ -4595,7 +4297,6 @@ fn Term wnf_eql_era_r(void) {
   return term_new_era();
 }
 
-
 // (* === b)
 // ----------- EQL-ANY-L
 // 1
@@ -4611,7 +4312,6 @@ fn Term wnf_eql_any_r(void) {
   ITRS_INC("1");
   return term_new_num(1);
 }
-
 
 // (&L{a0,a1} === b)
 // ---------------------- EQL-SUP-L
@@ -4645,7 +4345,6 @@ fn Term wnf_eql_sup_r(u64 eql_loc, Term a, Term sup) {
   return term_new_sup_at(sup_loc, lab, eq0, eq1);
 }
 
-
 // (#a === #b)
 // ------------ EQL-NUM
 // #(a == b)
@@ -4655,7 +4354,6 @@ fn Term wnf_eql_num(Term a, Term b) {
   u32 bv = (u32)term_val(b);
   return term_new_num(av == bv ? 1 : 0);
 }
-
 
 // (λax.af === λbx.bf)
 // ------------------- EQL-LAM
@@ -4677,7 +4375,6 @@ fn Term wnf_eql_lam(Term a, Term b) {
   heap_subst_var(b_loc, nam);
   return term_new_eql(af, bf);
 }
-
 
 // (#K{a0,a1...} === #K{b0,b1...})  (same tag)
 // --------------------------------------- EQL-CTR-MAT
@@ -4732,7 +4429,6 @@ fn Term wnf_eql_ctr(u64 eql_loc, Term a, Term b) {
   return result;
 }
 
-
 // (λ{#K:ah;am} === λ{#K:bh;bm})  (same tag)
 // ----------------------------------------- EQL-MAT-MAT
 // (ah === bh) & (am === bm)
@@ -4763,7 +4459,6 @@ fn Term wnf_eql_mat(u64 eql_loc, Term a, Term b) {
   return term_new_and_at(eql_loc, eq_h, eq_m);
 }
 
-
 // (λ{af} === λ{bf})
 // ----------------- EQL-USE
 // af === bf
@@ -4775,7 +4470,6 @@ fn Term wnf_eql_use(u64 eql_loc, Term a, Term b) {
   Term bf    = heap_read(b_loc);
   return term_new_eql_at(eql_loc, af, bf);
 }
-
 
 // (name === name)  (same tag/ext/val)
 // -----------------------------------
@@ -4795,7 +4489,6 @@ fn Term wnf_eql_nam(Term a, Term b) {
   return term_new_num((a_tag == b_tag) && (a_ext == b_ext) && (a_val == b_val));
 }
 
-
 // (^(af ax) === ^(bf bx))
 // ----------------------- EQL-DRY
 // (af === bf) & (ax === bx)
@@ -4813,7 +4506,6 @@ fn Term wnf_eql_dry(u64 eql_loc, Term a, Term b) {
   Term eq_x = term_new_eql(ax, bx);
   return term_new_and_at(eql_loc, eq_f, eq_x);
 }
-
 
 // (↑a === b)
 // ----------- EQL-INC-L
@@ -4839,7 +4531,6 @@ fn Term wnf_eql_inc_r(u64 loc, Term a, Term inc) {
   return inc;
 }
 
-
 // (&{} .&. b)
 // ----------- AND-ERA
 // &{}
@@ -4847,7 +4538,6 @@ fn Term wnf_and_era(void) {
   ITRS_INC("AND-ERA");
   return term_new_era();
 }
-
 
 // (&L{a0,a1} .&. b)
 // -------------------------- AND-SUP
@@ -4864,7 +4554,6 @@ fn Term wnf_and_sup(u64 and_loc, Term sup, Term b) {
   Term r1 = term_new_and(a1, B.k1);
   return term_new_sup_at(sup_loc, sup_lab, r0, r1);
 }
-
 
 // (#0 .&. b)
 // ---------- AND-ZER
@@ -4884,7 +4573,6 @@ fn Term wnf_and_num(Term num, Term b) {
   }
 }
 
-
 // (↑a & b)
 // --------- AND-INC
 // ↑(a & b)
@@ -4897,7 +4585,6 @@ fn Term wnf_and_inc(u64 and_loc, Term inc, Term b) {
   return inc;
 }
 
-
 // (&{} .|. b)
 // ----------- OR-ERA
 // &{}
@@ -4905,7 +4592,6 @@ fn Term wnf_or_era(void) {
   ITRS_INC("OR-ERA");
   return term_new_era();
 }
-
 
 // (&L{a0,a1} .|. b)
 // -------------------------- OR-SUP
@@ -4922,7 +4608,6 @@ fn Term wnf_or_sup(u64 or_loc, Term sup, Term b) {
   Term r1 = term_new_or(a1, B.k1);
   return term_new_sup_at(sup_loc, lab, r0, r1);
 }
-
 
 // (#0 .|. b)
 // ---------- OR-ZER
@@ -4942,7 +4627,6 @@ fn Term wnf_or_num(Term num, Term b) {
   }
 }
 
-
 // (↑a | b)
 // --------- OR-INC
 // ↑(a | b)
@@ -4954,7 +4638,6 @@ fn Term wnf_or_inc(u64 loc, Term inc, Term b) {
   heap_set(inc_loc, or_tm);
   return inc;
 }
-
 
 // ! ${f, v}; t
 // ------------- WNF UNS
@@ -4970,8 +4653,6 @@ fn Term wnf_uns(Term uns) {
   Term y_lam   = term_new_lam_at(loc + 1, x_lam);
   return term_new_app(term_new_app(bod, y_lam), x_var);
 }
-
-
 
 // WNF uses an explicit stack to avoid recursion.
 // - Enter/reduce: walk into the head position, pushing eliminators as frames.
@@ -5051,15 +4732,6 @@ __attribute__((hot)) fn Term wnf(Term term) {
   Term whnf;
 
   enter: {
-    if (__builtin_expect(GC_NEEDED, 0)) {
-      return wnf_rebuild(next, stack, s_pos, base);
-    }
-    if (__builtin_expect(GC_ENABLED, 0)) {
-      if (HEAP_NEXT + GC_MARGIN >= HEAP_END) {
-        GC_NEEDED = 1;
-        return wnf_rebuild(next, stack, s_pos, base);
-      }
-    }
     if (__builtin_expect(STEPS_ITRS_LIM != 0, 0) && ITRS >= STEPS_ITRS_LIM) {
       return wnf_rebuild(next, stack, s_pos, base);
     }
@@ -5272,9 +4944,6 @@ __attribute__((hot)) fn Term wnf(Term term) {
     }
 
     while (s_pos > base) {
-      if (__builtin_expect(GC_NEEDED, 0)) {
-        return wnf_rebuild(whnf, stack, s_pos, base);
-      }
       if (__builtin_expect(STEPS_ITRS_LIM != 0, 0) && ITRS >= STEPS_ITRS_LIM) {
         return wnf_rebuild(whnf, stack, s_pos, base);
       }
@@ -5882,10 +5551,8 @@ __attribute__((cold, noinline)) fn Term wnf_steps_at(u64 loc) {
   return cur;
 }
 
-
 // Runtime
 // =======
-
 
 // Runtime Session Init
 // --------------------
@@ -5909,14 +5576,13 @@ fn void runtime_init(int debug, int silent, int steps_enable) {
     sys_error("Memory allocation failed");
   }
 
-  heap_init_slices();
+  HEAP_NEXT = 1;
   symbols_init();
   DEBUG        = debug;
   SILENT       = silent;
   STEPS_ENABLE = steps_enable;
   ITRS         = 0;
 }
-
 
 // Runtime Session Free
 // --------------------
@@ -5933,7 +5599,6 @@ fn void runtime_free(void) {
   free(TABLE.data);
   wnf_stack_free();
 }
-
 
 // Runtime Entry Lookup
 // --------------------
@@ -5954,7 +5619,6 @@ fn int runtime_entry(const char *name, u32 *out_id) {
   *out_id = id;
   return 1;
 }
-
 
 // Runtime Program Prepare
 // =======================
@@ -5989,7 +5653,6 @@ fn int runtime_prepare(u32 *main_id, const char *src_path, char *src) {
 
   return 1;
 }
-
 
 // Runtime Main Evaluator
 // ======================
@@ -6047,9 +5710,6 @@ fn void runtime_eval_main(u32 main_id, const RuntimeEvalCfg *cfg) {
 
     printf("- Itrs: %llu interactions\n", (unsigned long long)total_itrs);
     printf("- Heap: %llu nodes\n", (unsigned long long)total_heap);
-    if (GC_ENABLED) {
-      printf("- GCed: %llu collections\n", (unsigned long long)GC_COUNT);
-    }
     printf("- Time: %.3f seconds\n", dt);
     printf("- Perf: %.2f M interactions/s\n", ips / 1e6);
   } else if (run.silent) {
@@ -6057,10 +5717,8 @@ fn void runtime_eval_main(u32 main_id, const RuntimeEvalCfg *cfg) {
   }
 }
 
-
 // Data
 // ====
-
 
 // Bitset for non-zero u64 keys.
 //
@@ -6116,10 +5774,8 @@ fn void uset_clear(Uset *set) {
   memset(set->words, 0, (size_t)(set->word_count * sizeof(u64)));
 }
 
-
 // CNF
 // ===
-
 
 // CNF (collapsed normal form) step.
 // Reduces to WNF, then lifts the first SUP to the top.
@@ -6262,10 +5918,8 @@ fn Term cnf(Term term) {
   return cnf_at(term, 0);
 }
 
-
 // Eval
 // ====
-
 
 // Sequential normalization (SNF) traversal.
 // WNFs every reachable heap node, using a visited set to avoid revisiting
@@ -6323,17 +5977,11 @@ fn int eval_normalize_stack_pop(EvalNormalizeStack *stack, u64 *loc) {
 
 fn void eval_normalize_go(Uset *seen, EvalNormalizeStack *stack, u64 loc) {
   for (;;) {
-    if (__builtin_expect(GC_NEEDED, 0)) {
-      return;
-    }
     if (loc == 0 || !uset_add(seen, loc)) {
       return;
     }
 
     Term term = __builtin_expect(STEPS_ENABLE, 0) ? wnf_steps_at(loc) : wnf_at(loc);
-    if (__builtin_expect(GC_NEEDED, 0)) {
-      return;
-    }
 
     u64 tloc = term_val(term);
     u8  tag  = term_tag(term);
@@ -6370,22 +6018,12 @@ fn Term eval_normalize(Term term) {
   EvalNormalizeStack stack;
   uset_init(&seen);
   eval_normalize_stack_init(&stack);
+  uset_clear(&seen);
+  eval_normalize_stack_push(&stack, root_loc);
 
-  for (;;) {
-    GC_NEEDED = 0;
-    uset_clear(&seen);
-    stack.len = 0;
-    eval_normalize_stack_push(&stack, root_loc);
-
-    u64 loc = 0;
-    while (!GC_NEEDED && eval_normalize_stack_pop(&stack, &loc)) {
-      eval_normalize_go(&seen, &stack, loc);
-    }
-
-    if (!GC_NEEDED) {
-      break;
-    }
-    root_loc = gc_collect(root_loc);
+  u64 loc = 0;
+  while (eval_normalize_stack_pop(&stack, &loc)) {
+    eval_normalize_go(&seen, &stack, loc);
   }
 
   eval_normalize_stack_free(&stack);
@@ -6397,7 +6035,6 @@ fn Term eval_normalize(Term term) {
 
   return heap_read(root_loc);
 }
-
 
 // Sequential collapse (CNF flattening).
 // Lower numeric keys are popped first. INC decreases key, SUP increases key.
@@ -6580,7 +6217,6 @@ fn void eval_collapse(Term term, int limit, int show_itrs, int silent) {
   eval_collapse_queue_free(&queue);
 }
 
-
 // CLI
 // ===
 
@@ -6600,7 +6236,6 @@ typedef struct {
   int step_by_step;
   int help;
   int version;
-  int gc_heap_kb;
   char *file;
 } CliOpts;
 
@@ -6674,7 +6309,6 @@ fn CliOpts parse_opts(int argc, char **argv) {
     .step_by_step = 0,
     .help = 0,
     .version = 0,
-    .gc_heap_kb = 0,
     .file = NULL
   };
 
@@ -6707,12 +6341,6 @@ fn CliOpts parse_opts(int argc, char **argv) {
         opts.collapse_limit = atoi(num);
       } else if (i + 1 < argc && cli_is_uint(argv[i + 1])) {
         opts.collapse_limit = atoi(argv[++i]);
-      }
-    } else if (strncmp(argv[i], "-G", 2) == 0 && argv[i][2] != '\0') {
-      opts.gc_heap_kb = atoi(argv[i] + 2);
-      if (opts.gc_heap_kb <= 0) {
-        fprintf(stderr, "Error: invalid GC heap size '%s'\n", argv[i] + 2);
-        exit(1);
       }
     } else if (argv[i][0] != '-') {
       if (opts.file == NULL) {
@@ -6779,15 +6407,6 @@ int main(int argc, char **argv) {
   }
 
   free(src);
-
-  if (opts.gc_heap_kb > 0) {
-    u64 total_words = (u64)opts.gc_heap_kb * 1024 / sizeof(Term);
-    u64 space_words = total_words / 2;
-    if (space_words < 512) {
-      space_words = 512;
-    }
-    gc_init(space_words);
-  }
 
   RuntimeEvalCfg eval_cfg = {
     .do_collapse   = opts.do_collapse,
