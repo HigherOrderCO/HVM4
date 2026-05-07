@@ -1,0 +1,102 @@
+// Direct 1-to-1 port of nano-hvm/bench/bitlist_decrement.nhvm.
+
+@nil = #T{0,0}
+@input01 = #T{1,#T{0,@nil}}
+@input02 = #T{1,#T{1,@input01}}
+@input03 = #T{1,#T{1,@input02}}
+@input04 = #T{1,#T{1,@input03}}
+@input05 = #T{1,#T{1,@input04}}
+@input06 = #T{1,#T{1,@input05}}
+@input07 = #T{1,#T{1,@input06}}
+@input08 = #T{1,#T{1,@input07}}
+@input09 = #T{1,#T{1,@input08}}
+@input10 = #T{1,#T{1,@input09}}
+@input11 = #T{1,#T{1,@input10}}
+@input12 = #T{1,#T{1,@input11}}
+@input13 = #T{1,#T{1,@input12}}
+@input14 = #T{1,#T{1,@input13}}
+@input15 = #T{1,#T{1,@input14}}
+@input16 = #T{1,#T{1,@input15}}
+@input17 = #T{1,#T{1,@input16}}
+@input18 = #T{1,#T{1,@input17}}
+@input19 = #T{1,#T{1,@input18}}
+@input20 = #T{1,#T{1,@input19}}
+@input21 = #T{1,#T{1,@input20}}
+@input22 = #T{1,#T{1,@input21}}
+@input23 = #T{1,#T{1,@input22}}
+@input24 = #T{1,#T{1,@input23}}
+@input25 = #T{1,#T{1,@input24}}
+@input = @input25
+@acc = @nil
+
+@dic = λ{
+  #T: λ{
+    #T: λ{
+      0: λunused. λ{
+        #T: λ&a. λunused. @rev0(#T{a,#T{#T{0,0},0}})
+      };
+      1: λ{
+        #T: λ{
+          0: λ&rest. λ{
+            #T: λ&a. λunused. @dic(#T{rest,#T{#T{1,#T{1,a}},0}})
+          };
+          1: λ&rest. λ{
+            #T: λ&a. λunused. @rev0(#T{a,#T{#T{1,#T{0,rest}},0}})
+          }
+        }
+      }
+    }
+  }
+}
+
+@dac = λ{
+  #T: λ{
+    #T: λ{
+      0: λunused. λ{
+        #T: λ&zs. λunused. zs
+      };
+      1: λ{
+        #T: λ{
+          0: λ&rest. λ{
+            #T: λ&zs. λunused. @rev1(#T{zs,#T{#T{1,#T{0,rest}},0}})
+          };
+          1: λ&rest. λ{
+            #T: λ&zs. λunused. @dac(#T{rest,#T{#T{1,#T{1,zs}},0}})
+          }
+        }
+      }
+    }
+  }
+}
+
+@rev0 = λ{
+  #T: λ{
+    #T: λ{
+      0: λunused. λ{
+        #T: λ&ys. λunused. @dac(#T{ys,#T{#T{0,0},0}})
+      };
+      1: λ{
+        #T: λ&x. λ&rest. λ{
+          #T: λ&ys. λunused. @rev0(#T{rest,#T{#T{1,#T{x,ys}},0}})
+        }
+      }
+    }
+  }
+}
+
+@rev1 = λ{
+  #T: λ{
+    #T: λ{
+      0: λunused. λ{
+        #T: λ&ys. λunused. @dic(#T{ys,#T{#T{0,0},0}})
+      };
+      1: λ{
+        #T: λ&x. λ&rest. λ{
+          #T: λ&ys. λunused. @rev1(#T{rest,#T{#T{1,#T{x,ys}},0}})
+        }
+      }
+    }
+  }
+}
+
+@main = @dic(#T{@input,#T{@acc,0}})

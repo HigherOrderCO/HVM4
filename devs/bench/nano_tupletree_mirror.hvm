@@ -1,0 +1,148 @@
+// Direct 1-to-1 port of nano-hvm/bench/tupletree_mirror.nhvm.
+
+@nil = #T{0,0}
+@counter01 = #T{1,#T{1,#T{@nil,0}}}
+@counter02 = #T{1,#T{1,#T{@counter01,0}}}
+@counter03 = #T{1,#T{1,#T{@counter02,0}}}
+@counter04 = #T{1,#T{1,#T{@counter03,0}}}
+@counter05 = #T{1,#T{1,#T{@counter04,0}}}
+@counter06 = #T{1,#T{1,#T{@counter05,0}}}
+@counter07 = #T{1,#T{1,#T{@counter06,0}}}
+@counter08 = #T{1,#T{1,#T{@counter07,0}}}
+@counter09 = #T{1,#T{1,#T{@counter08,0}}}
+@counter10 = #T{1,#T{1,#T{@counter09,0}}}
+@counter11 = #T{1,#T{1,#T{@counter10,0}}}
+@counter12 = #T{1,#T{1,#T{@counter11,0}}}
+@counter13 = #T{1,#T{1,#T{@counter12,0}}}
+@counter14 = #T{1,#T{1,#T{@counter13,0}}}
+@counter15 = #T{1,#T{1,#T{@counter14,0}}}
+@counter16 = #T{1,#T{1,#T{@counter15,0}}}
+@counter17 = #T{1,#T{1,#T{@counter16,0}}}
+@counter18 = #T{1,#T{1,#T{@counter17,0}}}
+@counter19 = #T{1,#T{1,#T{@counter18,0}}}
+@counter20 = #T{1,#T{1,#T{@counter19,0}}}
+@counter21 = #T{1,#T{1,#T{@counter20,0}}}
+@counter22 = #T{1,#T{1,#T{@counter21,0}}}
+@counter23 = #T{1,#T{1,#T{@counter22,0}}}
+@counter = @counter23
+@acc = @nil
+@inputLeaf00 = #T{0,0}
+@inputNode00 = #T{1,#T{@inputLeaf00,#T{@inputLeaf00,0}}}
+@inputNode01 = #T{1,#T{@inputNode00,#T{@inputNode00,0}}}
+@inputNode02 = #T{1,#T{@inputNode01,#T{@inputNode01,0}}}
+@input = @inputNode02
+
+@mirror = λ{
+  #T: λ{
+    0: λ&v. #T{0,v};
+    1: λ{
+      #T: λ&l. λ{
+        #T: λ&r. λunused. #T{1,#T{@mirror(r),#T{@mirror(l),0}}}
+      }
+    }
+  }
+}
+
+@dic = λ{
+  #T: λ{
+    #T: λ{
+      0: λunused. λ{
+        #T: λ&a. λ{
+          #T: λ&xs. λunused. @rev0(#T{a,#T{#T{0,0},#T{xs,0}}})
+        }
+      };
+      1: λ{
+        #T: λ{
+          0: λ{
+            #T: λ&rest. λunused. λ{
+              #T: λ&a. λ{
+                #T: λ&xs. λunused. @dic(#T{rest,#T{#T{1,#T{1,#T{a,0}}},#T{xs,0}}})
+              }
+            }
+          };
+          1: λ{
+            #T: λ&rest. λunused. λ{
+              #T: λ&a. λ{
+                #T: λ&xs. λunused. @rev0(#T{a,#T{#T{1,#T{0,#T{rest,0}}},#T{@mirror(xs),0}}})
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@dac = λ{
+  #T: λ{
+    #T: λ{
+      0: λunused. λ{
+        #T: λunused. λ{
+          #T: λ&xs. λunused. xs
+        }
+      };
+      1: λ{
+        #T: λ{
+          0: λ{
+            #T: λ&rest. λunused. λ{
+              #T: λ&zs. λ{
+                #T: λ&xs. λunused. @rev1(#T{zs,#T{#T{1,#T{0,#T{rest,0}}},#T{xs,0}}})
+              }
+            }
+          };
+          1: λ{
+            #T: λ&rest. λunused. λ{
+              #T: λ&zs. λ{
+                #T: λ&xs. λunused. @dac(#T{rest,#T{#T{1,#T{1,#T{zs,0}}},#T{xs,0}}})
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@rev0 = λ{
+  #T: λ{
+    #T: λ{
+      0: λunused. λ{
+        #T: λ&ys. λ{
+          #T: λ&xs. λunused. @dac(#T{ys,#T{#T{0,0},#T{xs,0}}})
+        }
+      };
+      1: λ{
+        #T: λ&bit. λ{
+          #T: λ&rest. λunused. λ{
+            #T: λ&ys. λ{
+              #T: λ&xs. λunused. @rev0(#T{rest,#T{#T{1,#T{bit,#T{ys,0}}},#T{xs,0}}})
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@rev1 = λ{
+  #T: λ{
+    #T: λ{
+      0: λunused. λ{
+        #T: λ&ys. λ{
+          #T: λ&xs. λunused. @dic(#T{ys,#T{#T{0,0},#T{xs,0}}})
+        }
+      };
+      1: λ{
+        #T: λ&bit. λ{
+          #T: λ&rest. λunused. λ{
+            #T: λ&ys. λ{
+              #T: λ&xs. λunused. @rev1(#T{rest,#T{#T{1,#T{bit,#T{ys,0}}},#T{xs,0}}})
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@main = @dic(#T{@counter,#T{@acc,#T{@input,0}}})

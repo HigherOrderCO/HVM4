@@ -1,0 +1,204 @@
+// Direct 1-to-1 port of nano-hvm/bench/natlist_radix_sort.nhvm.
+
+@nil = #T{0,0}
+@counter01 = #T{1,#T{1,#T{@nil,0}}}
+@counter02 = #T{1,#T{1,#T{@counter01,0}}}
+@counter03 = #T{1,#T{1,#T{@counter02,0}}}
+@counter04 = #T{1,#T{1,#T{@counter03,0}}}
+@counter05 = #T{1,#T{1,#T{@counter04,0}}}
+@counter06 = #T{1,#T{1,#T{@counter05,0}}}
+@counter07 = #T{1,#T{1,#T{@counter06,0}}}
+@counter08 = #T{1,#T{1,#T{@counter07,0}}}
+@counter09 = #T{1,#T{1,#T{@counter08,0}}}
+@counter10 = #T{1,#T{1,#T{@counter09,0}}}
+@counter11 = #T{1,#T{1,#T{@counter10,0}}}
+@counter12 = #T{1,#T{1,#T{@counter11,0}}}
+@counter13 = #T{1,#T{1,#T{@counter12,0}}}
+@counter14 = #T{1,#T{1,#T{@counter13,0}}}
+@counter15 = #T{1,#T{1,#T{@counter14,0}}}
+@counter16 = #T{1,#T{1,#T{@counter15,0}}}
+@counter17 = #T{1,#T{1,#T{@counter16,0}}}
+@counter18 = #T{1,#T{1,#T{@counter17,0}}}
+@counter19 = #T{1,#T{1,#T{@counter18,0}}}
+@counter20 = #T{1,#T{1,#T{@counter19,0}}}
+@counter21 = #T{1,#T{1,#T{@counter20,0}}}
+@counter22 = #T{1,#T{1,#T{@counter21,0}}}
+@counter = @counter22
+@acc = @nil
+@input01 = #T{1,#T{1,#T{@nil,0}}}
+@input02 = #T{1,#T{1,#T{@input01,0}}}
+@input03 = #T{1,#T{1,#T{@input02,0}}}
+@input04 = #T{1,#T{1,#T{@input03,0}}}
+@input05 = #T{1,#T{1,#T{@input04,0}}}
+@input06 = #T{1,#T{1,#T{@input05,0}}}
+@input07 = #T{1,#T{1,#T{@input06,0}}}
+@input08 = #T{1,#T{1,#T{@input07,0}}}
+@input09 = #T{1,#T{1,#T{@input08,0}}}
+@input10 = #T{1,#T{1,#T{@input09,0}}}
+@input11 = #T{1,#T{1,#T{@input10,0}}}
+@input12 = #T{1,#T{1,#T{@input11,0}}}
+@input13 = #T{1,#T{1,#T{@input12,0}}}
+@input14 = #T{1,#T{1,#T{@input13,0}}}
+@input15 = #T{1,#T{1,#T{@input14,0}}}
+@input16 = #T{1,#T{1,#T{@input15,0}}}
+@input17 = #T{1,#T{1,#T{@input16,0}}}
+@input18 = #T{1,#T{1,#T{@input17,0}}}
+@input19 = #T{1,#T{1,#T{@input18,0}}}
+@input20 = #T{1,#T{1,#T{@input19,0}}}
+@input21 = #T{1,#T{1,#T{@input20,0}}}
+@input22 = #T{1,#T{1,#T{@input21,0}}}
+@input23 = #T{1,#T{1,#T{@input22,0}}}
+@input24 = #T{1,#T{1,#T{@input23,0}}}
+@input25 = #T{1,#T{1,#T{@input24,0}}}
+@input = @input25
+
+@rsort = λ{
+  #T: λ{
+    #T: λ{
+      0: λunused. λ{
+        #T: λ&zeros. λ{
+          #T: λ&ones. λunused. @rcat(#T{zeros,#T{ones,0}})
+        }
+      };
+      1: λ{
+        #T: λ{
+          0: λ{
+            #T: λ&rest. λunused. λ{
+              #T: λ&zeros. λ{
+                #T: λ&ones. λunused. @rsort(#T{rest,#T{#T{1,#T{0,#T{zeros,0}}},#T{ones,0}}})
+              }
+            }
+          };
+          1: λ{
+            #T: λ&rest. λunused. λ{
+              #T: λ&zeros. λ{
+                #T: λ&ones. λunused. @rsort(#T{rest,#T{zeros,#T{#T{1,#T{1,#T{ones,0}}},0}}})
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@rcat = λ{
+  #T: λ{
+    #T: λ{
+      0: λunused. λ{
+        #T: λ&ones. λunused. ones
+      };
+      1: λ{
+        #T: λ&b. λ{
+          #T: λ&rest. λunused. λ{
+            #T: λ&ones. λunused. @rcat(#T{rest,#T{#T{1,#T{b,#T{ones,0}}},0}})
+          }
+        }
+      }
+    }
+  }
+}
+
+@dic = λ{
+  #T: λ{
+    #T: λ{
+      0: λunused. λ{
+        #T: λ&a. λ{
+          #T: λ&xs. λunused. @rev0(#T{a,#T{#T{0,0},#T{xs,0}}})
+        }
+      };
+      1: λ{
+        #T: λ{
+          0: λ{
+            #T: λ&rest. λunused. λ{
+              #T: λ&a. λ{
+                #T: λ&xs. λunused. @dic(#T{rest,#T{#T{1,#T{1,#T{a,0}}},#T{xs,0}}})
+              }
+            }
+          };
+          1: λ{
+            #T: λ&rest. λunused. λ{
+              #T: λ&a. λ{
+                #T: λ&xs. λunused. @rev0(#T{a,#T{#T{1,#T{0,#T{rest,0}}},#T{@rsort(#T{xs,#T{#T{0,0},#T{#T{0,0},0}}}),0}}})
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@dac = λ{
+  #T: λ{
+    #T: λ{
+      0: λunused. λ{
+        #T: λunused. λ{
+          #T: λ&xs. λunused. xs
+        }
+      };
+      1: λ{
+        #T: λ{
+          0: λ{
+            #T: λ&rest. λunused. λ{
+              #T: λ&zs. λ{
+                #T: λ&xs. λunused. @rev1(#T{zs,#T{#T{1,#T{0,#T{rest,0}}},#T{xs,0}}})
+              }
+            }
+          };
+          1: λ{
+            #T: λ&rest. λunused. λ{
+              #T: λ&zs. λ{
+                #T: λ&xs. λunused. @dac(#T{rest,#T{#T{1,#T{1,#T{zs,0}}},#T{xs,0}}})
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@rev0 = λ{
+  #T: λ{
+    #T: λ{
+      0: λunused. λ{
+        #T: λ&ys. λ{
+          #T: λ&xs. λunused. @dac(#T{ys,#T{#T{0,0},#T{xs,0}}})
+        }
+      };
+      1: λ{
+        #T: λ&bit. λ{
+          #T: λ&rest. λunused. λ{
+            #T: λ&ys. λ{
+              #T: λ&xs. λunused. @rev0(#T{rest,#T{#T{1,#T{bit,#T{ys,0}}},#T{xs,0}}})
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@rev1 = λ{
+  #T: λ{
+    #T: λ{
+      0: λunused. λ{
+        #T: λ&ys. λ{
+          #T: λ&xs. λunused. @dic(#T{ys,#T{#T{0,0},#T{xs,0}}})
+        }
+      };
+      1: λ{
+        #T: λ&bit. λ{
+          #T: λ&rest. λunused. λ{
+            #T: λ&ys. λ{
+              #T: λ&xs. λunused. @rev1(#T{rest,#T{#T{1,#T{bit,#T{ys,0}}},#T{xs,0}}})
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@main = @dic(#T{@counter,#T{@acc,#T{@input,0}}})
