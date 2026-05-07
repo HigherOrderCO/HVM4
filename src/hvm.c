@@ -145,12 +145,14 @@ typedef struct {
 #define HEAP_CAP (1ULL << VAL_BITS)
 #define BOOK_CAP (1ULL << EXT_BITS)
 #define WNF_CAP  (1ULL << 32)
+#define HEAP_FREE_MAX 16
 
 // Heap Globals
 // ============
 
 static Term *HEAP;
 static u64   HEAP_NEXT = 1;
+static u64   HEAP_FREE[HEAP_FREE_MAX + 1];
 
 // Book Globals
 // ============
@@ -315,6 +317,13 @@ fn u32 term_arity(Term t) {
 // ====
 
 fn u64 heap_alloc(u64 size) {
+  if (__builtin_expect(size > 0 && size <= HEAP_FREE_MAX, 1)) {
+    u64 at = HEAP_FREE[size];
+    if (__builtin_expect(at != 0, 0)) {
+      HEAP_FREE[size] = (u64)HEAP[at];
+      return at;
+    }
+  }
   u64 at   = HEAP_NEXT;
   u64 next = at + size;
   if (__builtin_expect(next <= HEAP_CAP && next >= at, 1)) {
@@ -323,6 +332,14 @@ fn u64 heap_alloc(u64 size) {
   }
   fprintf(stderr, "Out of heap memory (need %llu words)\n", (unsigned long long)size);
   exit(1);
+}
+
+fn void heap_free(u64 loc, u64 size) {
+  if (__builtin_expect(loc == 0 || size == 0 || size > HEAP_FREE_MAX, 0)) {
+    return;
+  }
+  HEAP[loc] = (Term)HEAP_FREE[size];
+  HEAP_FREE[size] = loc;
 }
 
 fn u64 heap_alloc_total(void) {
@@ -344,6 +361,17 @@ fn Term heap_take(u64 loc) {
 
 fn void heap_set(u64 loc, Term val) {
   HEAP[loc] = val;
+}
+
+fn void heap_free_term(Term term) {
+  if (term_tag(term) == ALO && term_ext(term) > 0) {
+    heap_free(term_val(term), 1);
+    return;
+  }
+  u32 size = term_arity(term);
+  if (size != 0) {
+    heap_free(term_val(term), size);
+  }
 }
 
 // Term Constructors
@@ -516,22 +544,28 @@ fn Term term_new_op2(u32 opr, Term x, Term y) {
 
 // DynSup(lab, a, b): dynamic superposition, strict on lab
 // Layout: heap_read(loc+0) = lab, heap_read(loc+1) = a, heap_read(loc+2) = b
-fn Term term_new_dsu(Term lab, Term a, Term b) {
-  u64 loc = heap_alloc(3);
+fn Term term_new_dsu_at(u64 loc, Term lab, Term a, Term b) {
   heap_set(loc + 0, lab);
   heap_set(loc + 1, a);
   heap_set(loc + 2, b);
   return term_new(0, DSU, 0, loc);
 }
 
+fn Term term_new_dsu(Term lab, Term a, Term b) {
+  return term_new_dsu_at(heap_alloc(3), lab, a, b);
+}
+
 // DynDup(lab, val, bod): dynamic DUP binder, strict on lab
 // Layout: heap_read(loc+0) = lab, heap_read(loc+1) = val, heap_read(loc+2) = bod
-fn Term term_new_ddu(Term lab, Term val, Term bod) {
-  u64 loc = heap_alloc(3);
+fn Term term_new_ddu_at(u64 loc, Term lab, Term val, Term bod) {
   heap_set(loc + 0, lab);
   heap_set(loc + 1, val);
   heap_set(loc + 2, bod);
   return term_new(0, DDU, 0, loc);
+}
+
+fn Term term_new_ddu(Term lab, Term val, Term bod) {
+  return term_new_ddu_at(heap_alloc(3), lab, val, bod);
 }
 
 // Eql(a, b): structural equality, strict on a first then b
@@ -3735,6 +3769,8 @@ fn Term wnf_app_lam(Term lam, Term arg) {
   u32  lam_ext = term_ext(lam);
   Term body    = heap_read(loc);
   if (lam_ext & LAM_ERA_MASK) {
+    heap_free_term(arg);
+    heap_free(loc, 1);
     return body;
   }
   heap_subst_var(loc, arg);
@@ -3802,7 +3838,10 @@ fn Term wnf_app_mat_ctr(Term mat, Term ctr) {
     ITRS_INC("APP-MAT-CTR-MAT");
     u32 ari = term_tag(ctr) - C00;
     Term res = heap_read(mat_loc);
+    Term nxt = heap_read(mat_loc + 1);
+    heap_free_term(nxt);
     if (ari == 0) {
+      heap_free(mat_loc, 2);
       return res;
     }
     u64 ctr_loc = term_val(ctr);
@@ -3810,6 +3849,7 @@ fn Term wnf_app_mat_ctr(Term mat, Term ctr) {
     Term arg0 = heap_read(ctr_loc + 0);
     res = term_new_app_at(mat_loc, res, arg0);
     if (ari == 1) {
+      heap_free(ctr_loc, 1);
       return res;
     }
     // Reuse CTR node storage for the second APP.
@@ -3822,10 +3862,13 @@ fn Term wnf_app_mat_ctr(Term mat, Term ctr) {
     for (u32 i = 2; i < ari; i++) {
       res = term_new_app_at(apps + 2 * (u64)(i - 2), res, heap_read(ctr_loc + i));
     }
+    heap_free(ctr_loc + 2, ari - 2);
     return res;
   } else {
     ITRS_INC("APP-MAT-CTR-MIS");
+    Term h = heap_read(mat_loc + 0);
     Term g = heap_read(mat_loc + 1);
+    heap_free_term(h);
     return term_new_app_at(mat_loc, g, ctr);
   }
 }
@@ -3843,10 +3886,16 @@ fn Term wnf_app_mat_num(Term mat, Term num) {
   u64 num_val = term_val(num);
   if (mat_ext == num_val) {
     ITRS_INC("APP-MAT-NUM-MAT");
-    return heap_read(mat_loc + 0);
+    Term res = heap_read(mat_loc + 0);
+    Term nxt = heap_read(mat_loc + 1);
+    heap_free_term(nxt);
+    heap_free(mat_loc, 2);
+    return res;
   } else {
     ITRS_INC("APP-MAT-NUM-MIS");
+    Term h = heap_read(mat_loc + 0);
     Term g = heap_read(mat_loc + 1);
+    heap_free_term(h);
     return term_new_app_at(mat_loc, g, num);
   }
 }
@@ -3886,6 +3935,7 @@ fn Term wnf_dup_lam(u32 lab, u64 loc, u8 side, Term lam) {
   Term bod            = heap_read(lam_loc);
 
   if (lam_ext & LAM_ERA_MASK) {
+    heap_free(lam_loc, 1);
     u64  a      = heap_alloc(3);
     heap_set(a + 2, bod);
     Copy B      = term_clone_at(a + 2, lab);
@@ -3927,6 +3977,7 @@ fn Term wnf_dup_sup(u32 lab, u64 loc, u8 side, Term sup) {
   if (lab == sup_lab) {
     Term tm0 = heap_read(sup_loc + 0);
     Term tm1 = heap_read(sup_loc + 1);
+    heap_free(sup_loc, 2);
     return heap_subst_cop(side, loc, tm0, tm1);
   } else {
     u64 base = heap_alloc(4);
@@ -4050,6 +4101,9 @@ fn Term wnf_alo_nod(u64 alo_loc, u64 ls_loc, u32 len, Term book) {
   u32 ari = term_arity(book);
   Term args[16];
   if (ari == 0) {
+    if (len > 0) {
+      heap_free(alo_loc, 1);
+    }
     return book;
   }
   args[0] = term_new_alo_at(alo_loc, ls_loc, len, loc + 0);
@@ -4117,11 +4171,11 @@ fn Term wnf_op2_num_sup(u32 opr, Term x, Term sup) {
 // (↑x op y)
 // ---------- OP2-INC-X
 // ↑(x op y)
-fn Term wnf_op2_inc_x(u32 opr, Term inc, Term y) {
+fn Term wnf_op2_inc_x(u64 op2_loc, u32 opr, Term inc, Term y) {
   ITRS_INC("OP2-INC-X");
   u64  inc_loc = term_val(inc);
   Term x       = heap_read(inc_loc);
-  Term op      = term_new_op2(opr, x, y);
+  Term op      = term_new_op2_at(op2_loc, opr, x, y);
   heap_set(inc_loc, op);
   return inc;
 }
@@ -4149,10 +4203,12 @@ fn Term wnf_dsu_era() {
 // &(#n){a, b}
 // ----------- DSU-NUM
 // &n{a, b}
-fn Term wnf_dsu_num(Term lab_num, Term a, Term b) {
+fn Term wnf_dsu_num(u64 dsu_loc, Term lab_num, Term a, Term b) {
   ITRS_INC("DSU-NUM");
   u32 lab = term_val(lab_num);
-  return term_new_sup(lab, a, b);
+  Term sup = term_new_sup_at(dsu_loc, lab, a, b);
+  heap_free(dsu_loc + 2, 1);
+  return sup;
 }
 
 // &(&L{x,y}){a, b}
@@ -4160,14 +4216,14 @@ fn Term wnf_dsu_num(Term lab_num, Term a, Term b) {
 // ! A &L = a
 // ! B &L = b
 // &L{&(x){A₀,B₀}, &(y){A₁,B₁}}
-fn Term wnf_dsu_sup(Term lab_sup, Term a, Term b) {
+fn Term wnf_dsu_sup(u64 dsu_loc, Term lab_sup, Term a, Term b) {
   ITRS_INC("DSU-SUP");
   u32  lab     = term_ext(lab_sup);
   u64  sup_loc = term_val(lab_sup);
   Copy A;
   Copy B;
   term_clone2(lab, a, b, &A, &B);
-  Term ds0     = term_new_dsu(heap_read(sup_loc + 0), A.k0, B.k0);
+  Term ds0     = term_new_dsu_at(dsu_loc, heap_read(sup_loc + 0), A.k0, B.k0);
   Term ds1     = term_new_dsu(heap_read(sup_loc + 1), A.k1, B.k1);
   return term_new_sup_at(sup_loc, lab, ds0, ds1);
 }
@@ -4175,11 +4231,11 @@ fn Term wnf_dsu_sup(Term lab_sup, Term a, Term b) {
 // &(↑x){a, b}
 // ------------ DSU-INC
 // ↑(&(x){a, b})
-fn Term wnf_dsu_inc(Term inc, Term a, Term b) {
+fn Term wnf_dsu_inc(u64 dsu_loc, Term inc, Term a, Term b) {
   ITRS_INC("DSU-INC");
   u64  inc_loc = term_val(inc);
   Term x       = heap_read(inc_loc);
-  Term new_dsu = term_new_dsu(x, a, b);
+  Term new_dsu = term_new_dsu_at(dsu_loc, x, a, b);
   heap_set(inc_loc, new_dsu);
   return inc;
 }
@@ -4196,11 +4252,12 @@ fn Term wnf_ddu_era() {
 // ---------------- DDU-NUM
 // ! X &n = v
 // b(X₀, X₁)
-fn Term wnf_ddu_num(Term lab_num, Term val, Term bod) {
+fn Term wnf_ddu_num(u64 ddu_loc, Term lab_num, Term val, Term bod) {
   ITRS_INC("DDU-NUM");
   u32 lab   = term_val(lab_num);
-  Copy V    = term_clone(lab, val);
-  Term app0 = term_new_app(bod, V.k0);
+  heap_set(ddu_loc + 2, val);
+  Copy V    = term_clone_at(ddu_loc + 2, lab);
+  Term app0 = term_new_app_at(ddu_loc, bod, V.k0);
   Term app1 = term_new_app(app0, V.k1);
   return app1;
 }
@@ -4210,14 +4267,14 @@ fn Term wnf_ddu_num(Term lab_num, Term val, Term bod) {
 // ! V &L = v
 // ! B &L = b
 // &L{! X &(x) = V₀; B₀, ! X &(y) = V₁; B₁}
-fn Term wnf_ddu_sup(Term lab_sup, Term val, Term bod) {
+fn Term wnf_ddu_sup(u64 ddu_loc, Term lab_sup, Term val, Term bod) {
   ITRS_INC("DDU-SUP");
   u32  lab     = term_ext(lab_sup);
   u64  sup_loc = term_val(lab_sup);
   Copy V;
   Copy B;
   term_clone2(lab, val, bod, &V, &B);
-  Term dd0     = term_new_ddu(heap_read(sup_loc + 0), V.k0, B.k0);
+  Term dd0     = term_new_ddu_at(ddu_loc, heap_read(sup_loc + 0), V.k0, B.k0);
   Term dd1     = term_new_ddu(heap_read(sup_loc + 1), V.k1, B.k1);
   return term_new_sup_at(sup_loc, lab, dd0, dd1);
 }
@@ -4225,11 +4282,11 @@ fn Term wnf_ddu_sup(Term lab_sup, Term val, Term bod) {
 // ! X &(↑x) = v; b
 // ---------------- DDU-INC
 // ↑(! X &(x) = v; b)
-fn Term wnf_ddu_inc(Term inc, Term val, Term bod) {
+fn Term wnf_ddu_inc(u64 ddu_loc, Term inc, Term val, Term bod) {
   ITRS_INC("DDU-INC");
   u64  inc_loc = term_val(inc);
   Term x       = heap_read(inc_loc);
-  Term new_ddu = term_new_ddu(x, val, bod);
+  Term new_ddu = term_new_ddu_at(ddu_loc, x, val, bod);
   heap_set(inc_loc, new_ddu);
   return inc;
 }
@@ -4266,6 +4323,7 @@ fn Term wnf_use_val(Term use, Term val) {
   ITRS_INC("USE-VAL");
   u64  loc = term_val(use);
   Term f   = heap_read(loc);
+  heap_free(loc, 1);
   return term_new_app(f, val);
 }
 
@@ -4361,19 +4419,29 @@ fn Term wnf_eql_num(Term a, Term b) {
 // ax ← X
 // bx ← X
 // af === bf
-fn Term wnf_eql_lam(Term a, Term b) {
+fn Term wnf_eql_lam(u64 eql_loc, Term a, Term b) {
   ITRS_INC("EQL-LAM");
   u64  a_loc = term_val(a);
   u64  b_loc = term_val(b);
+  u32  a_ext = term_ext(a);
+  u32  b_ext = term_ext(b);
   Term af    = heap_read(a_loc);
   Term bf    = heap_read(b_loc);
   // Generate fresh name for substitution
   u32 fresh = FRESH++;
   Term nam = term_new_nam(fresh);
   // Substitute both variable locations with the same name
-  heap_subst_var(a_loc, nam);
-  heap_subst_var(b_loc, nam);
-  return term_new_eql(af, bf);
+  if (a_ext & LAM_ERA_MASK) {
+    heap_free(a_loc, 1);
+  } else {
+    heap_subst_var(a_loc, nam);
+  }
+  if (b_ext & LAM_ERA_MASK) {
+    heap_free(b_loc, 1);
+  } else {
+    heap_subst_var(b_loc, nam);
+  }
+  return term_new_eql_at(eql_loc, af, bf);
 }
 
 // (#K{a0,a1...} === #K{b0,b1...})  (same tag)
@@ -4394,6 +4462,9 @@ fn Term wnf_eql_ctr(u64 eql_loc, Term a, Term b) {
 
   // Different constructor tags or names -> #0
   if (a_tag != b_tag || a_ext != b_ext) {
+    heap_free(eql_loc, 2);
+    heap_free_term(a);
+    heap_free_term(b);
     return term_new_num(0);
   }
 
@@ -4401,6 +4472,7 @@ fn Term wnf_eql_ctr(u64 eql_loc, Term a, Term b) {
 
   // Arity 0: equal
   if (arity == 0) {
+    heap_free(eql_loc, 2);
     return term_new_num(1);
   }
 
@@ -4409,21 +4481,39 @@ fn Term wnf_eql_ctr(u64 eql_loc, Term a, Term b) {
 
   // SUC (1n+): recursive natural - wrap in INC for priority
   if (a_ext == SYM_SUC && arity == 1) {
-    Term eq = term_new_eql_at(eql_loc, heap_read(a_loc), heap_read(b_loc));
+    Term a0 = heap_read(a_loc);
+    Term b0 = heap_read(b_loc);
+    heap_free(a_loc, 1);
+    heap_free(b_loc, 1);
+    Term eq = term_new_eql_at(eql_loc, a0, b0);
     return term_new_inc(eq);
   }
 
   // CON (<>): recursive list - wrap tail and whole in INC
   if (a_ext == SYM_CON && arity == 2) {
-    Term eq_h = term_new_eql_at(eql_loc, heap_read(a_loc), heap_read(b_loc));
-    Term eq_t = term_new_inc(term_new_eql(heap_read(a_loc + 1), heap_read(b_loc + 1)));
+    Term a0 = heap_read(a_loc + 0);
+    Term a1 = heap_read(a_loc + 1);
+    Term b0 = heap_read(b_loc + 0);
+    Term b1 = heap_read(b_loc + 1);
+    heap_free(a_loc, 2);
+    heap_free(b_loc, 2);
+    Term eq_h = term_new_eql_at(eql_loc, a0, b0);
+    Term eq_t = term_new_inc(term_new_eql(a1, b1));
     return term_new_inc(term_new_and(eq_h, eq_t));
   }
 
   // Other constructors: no INC, just AND chain
-  Term result = term_new_eql_at(eql_loc, heap_read(a_loc), heap_read(b_loc));
+  Term a_args[16];
+  Term b_args[16];
+  for (u32 i = 0; i < arity; i++) {
+    a_args[i] = heap_read(a_loc + i);
+    b_args[i] = heap_read(b_loc + i);
+  }
+  heap_free(a_loc, arity);
+  heap_free(b_loc, arity);
+  Term result = term_new_eql_at(eql_loc, a_args[0], b_args[0]);
   for (u32 i = 1; i < arity; i++) {
-    Term eq_i = term_new_eql(heap_read(a_loc + i), heap_read(b_loc + i));
+    Term eq_i = term_new_eql(a_args[i], b_args[i]);
     result = term_new_and(result, eq_i);
   }
   return result;
@@ -4443,6 +4533,9 @@ fn Term wnf_eql_mat(u64 eql_loc, Term a, Term b) {
 
   // Different match tags -> #0
   if (a_ext != b_ext) {
+    heap_free(eql_loc, 2);
+    heap_free_term(a);
+    heap_free_term(b);
     return term_new_num(0);
   }
 
@@ -4452,6 +4545,8 @@ fn Term wnf_eql_mat(u64 eql_loc, Term a, Term b) {
   Term am    = heap_read(a_loc + 1);
   Term bh    = heap_read(b_loc + 0);
   Term bm    = heap_read(b_loc + 1);
+  heap_free(a_loc, 2);
+  heap_free(b_loc, 2);
 
   // (ah === bh) .&. (am === bm)
   Term eq_h = term_new_eql(ah, bh);
@@ -4468,6 +4563,8 @@ fn Term wnf_eql_use(u64 eql_loc, Term a, Term b) {
   u64  b_loc = term_val(b);
   Term af    = heap_read(a_loc);
   Term bf    = heap_read(b_loc);
+  heap_free(a_loc, 1);
+  heap_free(b_loc, 1);
   return term_new_eql_at(eql_loc, af, bf);
 }
 
@@ -4500,6 +4597,8 @@ fn Term wnf_eql_dry(u64 eql_loc, Term a, Term b) {
   Term ax    = heap_read(a_loc + 1);
   Term bf    = heap_read(b_loc + 0);
   Term bx    = heap_read(b_loc + 1);
+  heap_free(a_loc, 2);
+  heap_free(b_loc, 2);
 
   // (af === bf) .&. (ax === bx)
   Term eq_f = term_new_eql(af, bf);
@@ -4646,6 +4745,7 @@ fn Term wnf_uns(Term uns) {
   ITRS_INC("WNF-UNS");
   u64  uns_loc = term_val(uns);
   Term bod     = heap_read(uns_loc + 0);
+  heap_free(uns_loc, 1);
   u64  loc     = heap_alloc(2);
   Term x_var   = term_new_var(loc + 0);
   Term y_var   = term_new_var(loc + 1);
@@ -4747,6 +4847,7 @@ __attribute__((hot)) fn Term wnf(Term term) {
         Term cell = heap_read(loc);
         if (term_sub_get(cell)) {
           next = term_sub_set(cell, 0);
+          heap_free(loc, 1);
           goto enter;
         }
         whnf = next;
@@ -4759,6 +4860,7 @@ __attribute__((hot)) fn Term wnf(Term term) {
         Term cell = heap_take(loc);
         if (term_sub_get(cell)) {
           next = term_sub_set(cell, 0);
+          heap_free(loc, 1);
           goto enter;
         }
         stack[s_pos++] = next;
@@ -4777,6 +4879,7 @@ __attribute__((hot)) fn Term wnf(Term term) {
       case DUP: {
         u64  loc  = term_val(next);
         Term body = heap_read(loc + 1);
+        heap_free(loc + 1, 1);
         next = body;
         goto enter;
       }
@@ -4816,6 +4919,9 @@ __attribute__((hot)) fn Term wnf(Term term) {
         switch (term_tag(book)) {
           case VAR:
           case BJV: {
+            if (len > 0) {
+              heap_free(alo_loc, 1);
+            }
             next = wnf_alo_var(ls_loc, len, book);
             goto enter;
           }
@@ -4823,6 +4929,9 @@ __attribute__((hot)) fn Term wnf(Term term) {
           case DP1:
           case BJ0:
           case BJ1: {
+            if (len > 0) {
+              heap_free(alo_loc, 1);
+            }
             next = wnf_alo_cop(ls_loc, len, book);
             goto enter;
           }
@@ -4857,6 +4966,9 @@ __attribute__((hot)) fn Term wnf(Term term) {
           case REF:
           case ERA:
           case ANY: {
+            if (len > 0) {
+              heap_free(alo_loc, 1);
+            }
             next = book;
             goto enter;
           }
@@ -4959,6 +5071,8 @@ __attribute__((hot)) fn Term wnf(Term term) {
 
           switch (term_tag(whnf)) {
             case ERA: {
+              heap_free(app_loc, 2);
+              heap_free_term(arg);
               whnf = wnf_app_era();
               continue;
             }
@@ -4974,6 +5088,7 @@ __attribute__((hot)) fn Term wnf(Term term) {
               continue;
             }
             case LAM: {
+              heap_free(app_loc, 2);
               next = wnf_app_lam(whnf, arg);
               goto enter;
             }
@@ -4987,11 +5102,13 @@ __attribute__((hot)) fn Term wnf(Term term) {
             }
             case MAT:
             case SWI: {
+              heap_free(app_loc, 2);
               stack[s_pos++] = whnf;
               next = arg;
               goto enter;
             }
             case USE: {
+              heap_free(app_loc, 2);
               stack[s_pos++] = whnf;
               next = arg;
               goto enter;
@@ -5020,6 +5137,7 @@ __attribute__((hot)) fn Term wnf(Term term) {
           Term mat = frame;
           switch (term_tag(whnf)) {
             case ERA: {
+              heap_free_term(mat);
               whnf = wnf_app_era();
               continue;
             }
@@ -5062,6 +5180,7 @@ __attribute__((hot)) fn Term wnf(Term term) {
           Term use = frame;
           switch (term_tag(whnf)) {
             case ERA: {
+              heap_free_term(use);
               whnf = wnf_use_era();
               continue;
             }
@@ -5142,16 +5261,20 @@ __attribute__((hot)) fn Term wnf(Term term) {
 
           switch (term_tag(whnf)) {
             case ERA: {
+              heap_free(loc, 2);
+              heap_free_term(y);
               whnf = wnf_op2_era();
               continue;
             }
             case NUM: {
               u8 y_tag = term_tag(y);
               if (y_tag == NUM) {
+                heap_free(loc, 2);
                 whnf = wnf_op2_num_num_raw(opr, (u32)term_val(whnf), (u32)term_val(y));
                 continue;
               }
               // x is NUM, now reduce y: push F_OP2_NUM frame
+              heap_free(loc, 2);
               stack[s_pos++] = term_new(0, F_OP2_NUM, opr, term_val(whnf));
               next = y;
               goto enter;
@@ -5161,7 +5284,7 @@ __attribute__((hot)) fn Term wnf(Term term) {
               continue;
             }
             case INC: {
-              whnf = wnf_op2_inc_x(opr, whnf, y);
+              whnf = wnf_op2_inc_x(loc, opr, whnf, y);
               continue;
             }
             default: {
@@ -5216,10 +5339,14 @@ __attribute__((hot)) fn Term wnf(Term term) {
 
           switch (term_tag(whnf)) {
             case ERA: {
+              heap_free(loc, 2);
+              heap_free_term(b);
               whnf = wnf_eql_era_l();
               continue;
             }
             case ANY: {
+              heap_free(loc, 2);
+              heap_free_term(b);
               whnf = wnf_eql_any_l();
               continue;
             }
@@ -5251,10 +5378,14 @@ __attribute__((hot)) fn Term wnf(Term term) {
 
           switch (term_tag(whnf)) {
             case ERA: {
+              heap_free(loc, 2);
+              heap_free_term(a);
               whnf = wnf_eql_era_r();
               continue;
             }
             case ANY: {
+              heap_free(loc, 2);
+              heap_free_term(a);
               whnf = wnf_eql_any_r();
               continue;
             }
@@ -5273,17 +5404,20 @@ __attribute__((hot)) fn Term wnf(Term term) {
 
               // ANY === x or x === ANY
               if (a_tag == ANY || b_tag == ANY) {
+                heap_free(loc, 2);
+                heap_free_term(a_tag == ANY ? whnf : a);
                 whnf = wnf_eql_any_r();
                 continue;
               }
               // NUM === NUM
               if (a_tag == NUM && b_tag == NUM) {
+                heap_free(loc, 2);
                 whnf = wnf_eql_num(a, whnf);
                 continue;
               }
               // LAM === LAM
               if (a_tag == LAM && b_tag == LAM) {
-                next = wnf_eql_lam(a, whnf);
+                next = wnf_eql_lam(loc, a, whnf);
                 goto enter;
               }
               // CTR === CTR
@@ -5304,6 +5438,7 @@ __attribute__((hot)) fn Term wnf(Term term) {
               // NAM/BJ* === NAM/BJ*
               if ((a_tag == NAM || a_tag == BJV || a_tag == BJ0 || a_tag == BJ1) &&
                   (b_tag == NAM || b_tag == BJV || b_tag == BJ0 || b_tag == BJ1)) {
+                heap_free(loc, 2);
                 whnf = wnf_eql_nam(a, whnf);
                 continue;
               }
@@ -5314,6 +5449,9 @@ __attribute__((hot)) fn Term wnf(Term term) {
               }
               // Otherwise: not equal
               ITRS_INC("EQL-NOT");
+              heap_free(loc, 2);
+              heap_free_term(a);
+              heap_free_term(whnf);
               whnf = term_new_num(0);
               continue;
             }
@@ -5330,19 +5468,22 @@ __attribute__((hot)) fn Term wnf(Term term) {
 
           switch (term_tag(whnf)) {
             case ERA: {
+              heap_free(loc, 3);
+              heap_free_term(a);
+              heap_free_term(b);
               whnf = wnf_dsu_era();
               continue;
             }
             case NUM: {
-              whnf = wnf_dsu_num(whnf, a, b);
+              whnf = wnf_dsu_num(loc, whnf, a, b);
               continue;
             }
             case SUP: {
-              whnf = wnf_dsu_sup(whnf, a, b);
+              whnf = wnf_dsu_sup(loc, whnf, a, b);
               continue;
             }
             case INC: {
-              whnf = wnf_dsu_inc(whnf, a, b);
+              whnf = wnf_dsu_inc(loc, whnf, a, b);
               continue;
             }
             default: {
@@ -5363,19 +5504,22 @@ __attribute__((hot)) fn Term wnf(Term term) {
 
           switch (term_tag(whnf)) {
             case ERA: {
+              heap_free(loc, 3);
+              heap_free_term(val);
+              heap_free_term(bod);
               whnf = wnf_ddu_era();
               continue;
             }
             case NUM: {
-              next = wnf_ddu_num(whnf, val, bod);
+              next = wnf_ddu_num(loc, whnf, val, bod);
               goto enter;
             }
             case SUP: {
-              whnf = wnf_ddu_sup(whnf, val, bod);
+              whnf = wnf_ddu_sup(loc, whnf, val, bod);
               continue;
             }
             case INC: {
-              whnf = wnf_ddu_inc(whnf, val, bod);
+              whnf = wnf_ddu_inc(loc, whnf, val, bod);
               continue;
             }
             default: {
@@ -5395,6 +5539,8 @@ __attribute__((hot)) fn Term wnf(Term term) {
 
           switch (term_tag(whnf)) {
             case ERA: {
+              heap_free(loc, 2);
+              heap_free_term(b);
               whnf = wnf_and_era();
               continue;
             }
@@ -5407,6 +5553,10 @@ __attribute__((hot)) fn Term wnf(Term term) {
               continue;
             }
             case NUM: {
+              heap_free(loc, 2);
+              if (term_val(whnf) == 0) {
+                heap_free_term(b);
+              }
               next = wnf_and_num(whnf, b);
               goto enter;
             }
@@ -5427,6 +5577,8 @@ __attribute__((hot)) fn Term wnf(Term term) {
 
           switch (term_tag(whnf)) {
             case ERA: {
+              heap_free(loc, 2);
+              heap_free_term(b);
               whnf = wnf_or_era();
               continue;
             }
@@ -5439,6 +5591,10 @@ __attribute__((hot)) fn Term wnf(Term term) {
               continue;
             }
             case NUM: {
+              heap_free(loc, 2);
+              if (term_val(whnf) != 0) {
+                heap_free_term(b);
+              }
               next = wnf_or_num(whnf, b);
               goto enter;
             }
@@ -5577,6 +5733,7 @@ fn void runtime_init(int debug, int silent, int steps_enable) {
   }
 
   HEAP_NEXT = 1;
+  memset(HEAP_FREE, 0, sizeof(HEAP_FREE));
   symbols_init();
   DEBUG        = debug;
   SILENT       = silent;
