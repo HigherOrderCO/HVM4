@@ -87,14 +87,14 @@ typedef struct {
 
 // LAM Ext Flags
 // =============
-#define LAM_ERA_MASK 0x20000  // binder unused in lambda body
+#define LAM_ERA_MASK 0x800000u  // binder unused in lambda body
 
 // Stack frame tags (0x40+) - internal to WNF, encode reduction state
 // Note: regular term tags (APP, MAT, USE, DP0, DP1, OP2, DSU, DDU) also used as frames
 // These frames reuse existing heap nodes to avoid allocation
 #define F_OP2_NUM     0x43  // (x op □): ext=opr, val=x_num_val
 #define F_EQL_L       0x44  // (□ === b): val=eql_loc, b at HEAP[eql_loc+1]
-#define F_EQL_R       0x45  // (a === □): val=eql_loc, a stored in ext as heap loc
+#define F_EQL_R       0x45  // (a === □): val=eql_loc, a stored at HEAP[eql_loc]
 
 // Operation codes (stored in EXT field of OP2)
 #define OP_ADD 0
@@ -118,33 +118,32 @@ typedef struct {
 // Bit Layout
 // ==========
 
-#define SUB_BITS 1
-#define TAG_BITS 7
-#define EXT_BITS 18
-#define VAL_BITS 38
-#define SUB_SHIFT 63
+// The high bit of the tag byte is the SUB flag. `term_tag()` returns only the
+// low 7 constructor bits, keeping the public tag space unchanged.
+#define TAG_BITS 8
+#define EXT_BITS 24
+#define VAL_BITS 32
 #define TAG_SHIFT 56
-#define EXT_SHIFT 38
+#define EXT_SHIFT 32
 #define VAL_SHIFT 0
 
-#define SUB_MASK 0x1
-#define TAG_MASK 0x7F
-#define EXT_MASK 0x3FFFF
-#define VAL_MASK 0x3FFFFFFFFFULL
+#define TAG_SUB_MASK (1u << (TAG_BITS - 1))
+#define TAG_MASK     (TAG_SUB_MASK - 1u)
+#define EXT_MASK     ((1u << EXT_BITS) - 1u)
+#define VAL_MASK     ((u64)UINT32_MAX)
 
 // Packed ALO pair node (1 word):
-// - high 38 bits: bind-list head location (absolute)
-// - low 24 bits: static/book term location (absolute, truncated to 24 bits)
-#define ALO_TM_BITS 24
-#define ALO_LS_BITS 38
-#define ALO_TM_MASK 0xFFFFFFULL
-#define ALO_LS_MASK 0x3FFFFFFFFFULL
+// - high 32 bits: bind-list head location
+// - low 32 bits: static/book term location
+#define ALO_TM_BITS 32
+#define ALO_TM_MASK VAL_MASK
+#define ALO_LS_MASK VAL_MASK
 
 // Capacities
 // ==========
 
-#define HEAP_CAP (1ULL << 38)
-#define BOOK_CAP (1ULL << 24)
+#define HEAP_CAP (1ULL << VAL_BITS)
+#define BOOK_CAP (1ULL << EXT_BITS)
 #define WNF_CAP  (1ULL << 32)
 
 // Heap Globals
@@ -224,7 +223,7 @@ static char  *PARSE_SEEN_FILES[1024];
 static u32    PARSE_SEEN_FILES_LEN = 0;
 static PBind  PARSE_BINDS[16384];
 static u32    PARSE_BINDS_LEN = 0;
-static u32    PARSE_FRESH_LAB = 0x20000; // start near top of 18-bit label space
+static u32    PARSE_FRESH_LAB = 0x800000u; // start near top of 24-bit label space
 static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 = right branch (DP1)
 #define PARSE_DYN_LAB EXT_MASK
 
@@ -232,18 +231,19 @@ static int    PARSE_FORK_SIDE = -1;      // -1 = off, 0 = left branch (DP0), 1 =
 // ====
 
 fn Term term_new(u8 sub, u8 tag, u32 ext, u64 val) {
-  return ((u64)sub << SUB_SHIFT)
-       | ((u64)(tag & TAG_MASK) << TAG_SHIFT)
+  u64 tag_byte = ((u64)(tag & TAG_MASK)) | ((u64)(sub != 0) << 7);
+  return (tag_byte << TAG_SHIFT)
        | ((u64)(ext & EXT_MASK) << EXT_SHIFT)
        | ((u64)(val & VAL_MASK));
 }
 
 fn u8 term_sub_get(Term t) {
-  return (t >> SUB_SHIFT) & SUB_MASK;
+  return ((t >> TAG_SHIFT) & TAG_SUB_MASK) != 0;
 }
 
 fn Term term_sub_set(Term t, u8 sub) {
-  return (t & ~(((u64)SUB_MASK) << SUB_SHIFT)) | (((u64)(sub & SUB_MASK)) << SUB_SHIFT);
+  Term mask = ((u64)TAG_SUB_MASK) << TAG_SHIFT;
+  return sub != 0 ? (t | mask) : (t & ~mask);
 }
 
 fn u8 term_tag(Term t) {
@@ -254,8 +254,8 @@ fn u32 term_ext(Term t) {
   return (t >> EXT_SHIFT) & EXT_MASK;
 }
 
-fn u64 term_val(Term t) {
-  return (t >> VAL_SHIFT) & VAL_MASK;
+fn u32 term_val(Term t) {
+  return (u32)((t >> VAL_SHIFT) & VAL_MASK);
 }
 
 static const u8 TERM_ARITY[TAG_MASK + 1] = {
@@ -897,7 +897,7 @@ fn void sys_munmap_anon(void *ptr, size_t bytes) {
 // Name table globals
 // ==================
 // Single global intern table shared by refs, defs, ctors, labels, and names.
-// IDs are 18-bit and stored in EXT fields.
+// IDs are 24-bit and stored in EXT fields.
 
 typedef struct {
   char **data;
@@ -2047,7 +2047,7 @@ fn Term parse_auto_dup(Term body, u32 lvl, u32 base, u8 tgt, u32 ext, u32 uses) 
   u32 n = uses - 1;
   if (PARSE_FRESH_LAB >= PARSE_DYN_LAB || PARSE_FRESH_LAB + n > PARSE_DYN_LAB) {
     fprintf(stderr, "\033[1;31mPARSE_ERROR\033[0m\n");
-    fprintf(stderr, "- out of auto-dup labels in 18-bit space\n");
+    fprintf(stderr, "- out of auto-dup labels in 24-bit space\n");
     exit(1);
   }
   u32 lab = PARSE_FRESH_LAB;
@@ -2105,7 +2105,7 @@ fn u32 parse_name(PState *s) {
   return id;
 }
 
-// Parses a name as a 18-bit base64 number.
+// Parses a name as a 24-bit base64 number.
 // Used for NAM (stuck names) and static labels that must stay numeric.
 fn u32 parse_name_num(PState *s) {
   parse_skip(s);
@@ -2121,7 +2121,7 @@ fn u32 parse_name_num(PState *s) {
       fprintf(stderr, "\033[1;31mPARSE_ERROR\033[0m (%s:%d:%d)\n", s->file, s->line, s->col);
       fprintf(stderr, "- base64 name '");
       print_name(stderr, k);
-      fprintf(stderr, "' exceeds 18-bit limit (max 0x%05X)\n", EXT_MASK);
+      fprintf(stderr, "' exceeds 24-bit limit (max 0x%06X)\n", EXT_MASK);
       exit(1);
     }
     parse_advance(s);
@@ -2348,7 +2348,7 @@ fn Term parse_term_lam(PState *s, u32 depth) {
       char c = parse_peek(s);
       if (c == ',' || c == ';' || c == '.') {
         if (PARSE_FRESH_LAB >= PARSE_DYN_LAB) {
-          parse_error(s, "available auto-dup label (< 0x3FFFF)", parse_peek(s));
+          parse_error(s, "available auto-dup label (< 0xFFFFFF)", parse_peek(s));
         }
         lab = PARSE_FRESH_LAB++;
       } else {
@@ -2515,7 +2515,7 @@ fn int parse_term_dup_pat(PState *s, u32 depth, Term *out) {
   }
   if (fresh) {
     if (PARSE_FRESH_LAB >= PARSE_DYN_LAB) {
-      parse_error(s, "available auto-dup label (< 0x3FFFF)", parse_peek(s));
+      parse_error(s, "available auto-dup label (< 0xFFFFFF)", parse_peek(s));
     }
     lab = PARSE_FRESH_LAB++;
   }
@@ -2704,7 +2704,7 @@ fn Term parse_term_dup(PState *s, u32 depth) {
   u32 lab;
   if (parse_peek(s) == '=') {
     if (PARSE_FRESH_LAB >= PARSE_DYN_LAB) {
-      parse_error(s, "available auto-dup label (< 0x3FFFF)", parse_peek(s));
+      parse_error(s, "available auto-dup label (< 0xFFFFFF)", parse_peek(s));
     }
     lab = PARSE_FRESH_LAB++;
   } else {
@@ -5640,11 +5640,6 @@ fn int runtime_prepare(u32 *main_id, const char *src_path, char *src) {
   }
 
   parse_program(src_path, src);
-
-  if (HEAP_NEXT > (ALO_TM_MASK + 1)) {
-    fprintf(stderr, "Error: static book exceeds 24-bit location space (%llu words used)\n", (unsigned long long)HEAP_NEXT);
-    return 0;
-  }
 
   if (!runtime_entry("main", main_id)) {
     fprintf(stderr, "Error: @main not defined\n");
