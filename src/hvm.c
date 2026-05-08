@@ -6470,7 +6470,7 @@ fn void fast_run_free(FastRun *run) {
 #define FO_CODE_CAP (1U << 20)
 #define FO_STACK_CAP (1U << 20)
 #define FO_CTX_CAP (1U << 20)
-#define FO_NODE_CAP (1U << 22)
+#define FO_NODE_CAP (1U << 24)
 #define FO_CALL_CAP 65536
 #define FO_BIND_CAP 256
 
@@ -6546,6 +6546,8 @@ typedef struct {
   u64      itrs;
   const char *fail_reason;
   u32      fail_tag;
+  u32      trace_pc;
+  u8       trace_op;
   int      failed;
 } FoRun;
 
@@ -6961,7 +6963,9 @@ fn FoTerm fo_run(FoRun *run) {
   int have_term = 0;
 
   while (!run->failed) {
+    run->trace_pc = pc;
     FoOp op = run->code[pc++];
+    run->trace_op = op.op;
     switch (op.op) {
       case FO_NUM: {
         if (!fo_stack_push(run, vals, &vsp, fo_num(op.ext))) {
@@ -7025,6 +7029,7 @@ fn FoTerm fo_run(FoRun *run) {
         break;
       }
       case FO_TAIL: {
+        tsp = 0;
         if (!fo_call_enter(run, op, vals, &vsp, terms, &tsp, &term)) {
           return 0;
         }
@@ -7032,7 +7037,6 @@ fn FoTerm fo_run(FoRun *run) {
         fidx = op.ext;
         pc = run->fn_start[fidx];
         cur = frm;
-        tsp = 0;
         break;
       }
       case FO_LAM: {
@@ -7224,9 +7228,11 @@ fn int fo_eval_main(u32 main_id, Term *out, u64 *itrs) {
     return 1;
   }
   if (getenv("HVM_FO_TRACE") != NULL) {
-    fprintf(stderr, "[fo] run fallback: reason=%s tag=%u code=%u itrs=%llu\n",
+    fprintf(stderr, "[fo] run fallback: reason=%s tag=%u pc=%u op=%u code=%u itrs=%llu\n",
       run.fail_reason != NULL ? run.fail_reason : "?",
       run.fail_tag,
+      run.trace_pc,
+      run.trace_op,
       run.code_len,
       (unsigned long long)run.itrs);
   }
