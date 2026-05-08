@@ -175,6 +175,7 @@ typedef struct {
   u32 depth;
   u32 lab;
   u32 uses;
+  int side;
   u8  dup;
 } Bind;
 
@@ -186,6 +187,7 @@ static Bind  BINDS[MAX_BIND];
 static u32   BIND_LEN = 0;
 static u64   ITRS = 0;
 static u64   ALLOCS = 0;
+static u32   FRESH_LAB = 0;
 static EnvBlock *ENV_BLOCK = NULL;
 static ValBlock *VAL_BLOCK = NULL;
 static ItemBlock *ITEM_BLOCK = NULL;
@@ -404,6 +406,22 @@ static u32 parse_name(Parser *p) {
   return name_intern(p->src + beg, p->pos - beg);
 }
 
+static u32 fresh_label(void) {
+  char buf[32];
+  snprintf(buf, sizeof(buf), "_L%u", FRESH_LAB++);
+  return name_intern(buf, (u32)strlen(buf));
+}
+
+static u32 parse_optional_label(Parser *p) {
+  skip(p);
+  if (p->pos >= p->len) return fresh_label();
+  char c = p->src[p->pos];
+  if (c == '=' || c == '.' || c == ',' || c == ';' || c == '{') {
+    return fresh_label();
+  }
+  return parse_name(p);
+}
+
 static int sep(Parser *p) {
   skip(p);
   if (p->pos < p->len && (p->src[p->pos] == ',' || p->src[p->pos] == ';')) {
@@ -424,7 +442,13 @@ static int sub1(Parser *p) {
 static void bind_push(u32 name, u32 lab, u8 dup) {
   if (BIND_LEN >= MAX_BIND) die("too many binders");
   u32 depth = BIND_LEN + 1;
-  BINDS[BIND_LEN++] = (Bind){name, depth, lab, 0, dup};
+  BINDS[BIND_LEN++] = (Bind){name, depth, lab, 0, -1, dup};
+}
+
+static void bind_push_side(u32 name, u32 lab, int side) {
+  if (BIND_LEN >= MAX_BIND) die("too many binders");
+  u32 depth = BIND_LEN + 1;
+  BINDS[BIND_LEN++] = (Bind){name, depth, lab, 0, side, 1};
 }
 
 static void bind_pop(void) {
@@ -501,11 +525,31 @@ static Term *parse_lam(Parser *p) {
   u32 name = parse_name(p);
   Term *lam = term_new(T_LAM);
   bind_push(name, 0, 0);
-  if (sep(p)) {
-    lam->kid[0] = parse_lam(p);
+  if (take(p, "&")) {
+    u32 lab = parse_optional_label(p);
+    Term *val = term_new(T_VAR);
+    val->arity = 1;
+    val->ext = 0;
+    BINDS[BIND_LEN - 1].uses++;
+    Term *dup = term_new(T_DUP);
+    dup->ext = lab;
+    dup->kid[0] = val;
+    bind_push(name, lab, 1);
+    if (sep(p)) {
+      dup->kid[1] = parse_lam(p);
+    } else {
+      need(p, ".");
+      dup->kid[1] = parse_term(p);
+    }
+    bind_pop();
+    lam->kid[0] = dup;
   } else {
-    need(p, ".");
-    lam->kid[0] = parse_term(p);
+    if (sep(p)) {
+      lam->kid[0] = parse_lam(p);
+    } else {
+      need(p, ".");
+      lam->kid[0] = parse_term(p);
+    }
   }
   if (BINDS[BIND_LEN - 1].uses == 0) {
     lam->aux = 1;
@@ -515,9 +559,49 @@ static Term *parse_lam(Parser *p) {
 }
 
 static Term *parse_dup(Parser *p) {
+  if (take(p, "&")) {
+    u32 first = starts(p, "{") ? fresh_label() : parse_name(p);
+    if (!take(p, "{")) {
+      u32 name = first;
+      need(p, "&");
+      u32 lab = parse_optional_label(p);
+      need(p, "=");
+      Term *val = parse_term(p);
+      sep(p);
+      Term *dup = term_new(T_DUP);
+      dup->ext = lab;
+      dup->kid[0] = val;
+      bind_push(name, lab, 1);
+      dup->kid[1] = parse_term(p);
+      bind_pop();
+      return dup;
+    }
+    u32 lab = first;
+    take(p, "&");
+    u32 name0 = parse_name(p);
+    sep(p);
+    take(p, "&");
+    u32 name1 = parse_name(p);
+    sep(p);
+    need(p, "}");
+    need(p, "=");
+    Term *val = parse_term(p);
+    sep(p);
+    Term *dup = term_new(T_DUP);
+    dup->ext = lab;
+    dup->kid[0] = val;
+    bind_push_side(name0, lab, 0);
+    bind_push_side(name1, lab, 1);
+    BINDS[BIND_LEN - 2].depth = BIND_LEN;
+    BINDS[BIND_LEN - 1].depth = BIND_LEN;
+    dup->kid[1] = parse_term(p);
+    bind_pop();
+    bind_pop();
+    return dup;
+  }
   u32 name = parse_name(p);
   need(p, "&");
-  u32 lab = parse_name(p);
+  u32 lab = parse_optional_label(p);
   need(p, "=");
   Term *val = parse_term(p);
   sep(p);
@@ -569,6 +653,9 @@ static Term *parse_var(Parser *p) {
     exit(1);
   }
   Term *v = term_new(side == 0 ? T_DP0 : side == 1 ? T_DP1 : T_VAR);
+  if (side < 0 && b->side >= 0) {
+    v->tag = b->side == 0 ? T_DP0 : T_DP1;
+  }
   v->ext = b->lab;
   v->arity = BIND_LEN - b->depth + 1;
   b->uses++;
