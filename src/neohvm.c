@@ -939,14 +939,9 @@ static Code *compile_app(Term *term, int tail) {
   }
   if (argc == 1) {
     if (fun->tag == T_REF) {
-      if (!tail) {
-        Code *c = code_new(BC_ARG);
-        c->sub = compile_term_ctx(args[0], 0);
-        c->next = compile_term_ctx(fun, 0);
-        return c;
-      }
       Code *c = code_new(BC_CALL_REF);
       c->ext = fun->ext;
+      c->arity = 1;
       c->sub = compile_term_ctx(args[0], 0);
       return c;
     }
@@ -1562,7 +1557,7 @@ static inline Val *apply_mat(Code *mat, Env *env, u32 gap, Val *arg) {
   return eval_code(body, env, gap, args, argc);
 }
 
-static Val *apply_fun(Val *fun, Arg *arg) {
+ALWAYS_INLINE Val *apply_fun(Val *fun, Arg *arg) {
   fun = force(fun);
   switch (fun->tag) {
     case V_LAM:
@@ -1695,8 +1690,24 @@ do_arg:
 
 do_args:
   if (argc + pc->arity > MAX_ARGS) die("argument stack overflow");
-  for (u32 i = 0; i < pc->arity; i++) {
-    args[argc++] = arg_code(pc->term->kid[i]->code, env, gap);
+  if (pc->arity == 4) {
+    args[argc++] = arg_code(pc->term->kid[0]->code, env, gap);
+    args[argc++] = arg_code(pc->term->kid[1]->code, env, gap);
+    args[argc++] = arg_code(pc->term->kid[2]->code, env, gap);
+    args[argc++] = arg_code(pc->term->kid[3]->code, env, gap);
+  } else if (pc->arity == 3) {
+    args[argc++] = arg_code(pc->term->kid[0]->code, env, gap);
+    args[argc++] = arg_code(pc->term->kid[1]->code, env, gap);
+    args[argc++] = arg_code(pc->term->kid[2]->code, env, gap);
+  } else if (pc->arity == 2) {
+    args[argc++] = arg_code(pc->term->kid[0]->code, env, gap);
+    args[argc++] = arg_code(pc->term->kid[1]->code, env, gap);
+  } else if (pc->arity == 1) {
+    args[argc++] = arg_code(pc->term->kid[0]->code, env, gap);
+  } else {
+    for (u32 i = 0; i < pc->arity; i++) {
+      args[argc++] = arg_code(pc->term->kid[i]->code, env, gap);
+    }
   }
   pc = pc->next;
   goto *pc->jump;
