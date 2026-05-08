@@ -142,6 +142,7 @@ struct Code {
   Cases *cases;
   Code *sub;
   Code *next;
+  void *jump;
 };
 
 struct Cases {
@@ -293,6 +294,7 @@ static Code *code_new(u8 op) {
   c->cases = NULL;
   c->sub = NULL;
   c->next = NULL;
+  c->jump = NULL;
   return c;
 }
 
@@ -756,6 +758,7 @@ static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc);
 static Val *force(Val *v);
 static inline Val *mk_lam(Code *code, Env *env, u32 gap);
 static inline Val *mk_mat(Code *code, Env *env, u32 gap);
+static void thread_code(Code *code, void **dispatch, u32 depth);
 
 static Code *compile_term(Term *term) {
   if (term->code) return term->code;
@@ -890,6 +893,46 @@ static void compile_program_terms(void) {
         REF_CACHE[i]->arity = DEFS[i]->code->aux;
       }
     }
+  }
+}
+
+static void thread_code(Code *code, void **dispatch, u32 depth) {
+  if (code == NULL || depth > 64 || code->jump != NULL) return;
+  code->jump = dispatch[code->op];
+  switch (code->op) {
+    case BC_ARGS:
+      thread_code(code->next, dispatch, depth + 1);
+      for (u32 i = 0; i < code->arity; i++) {
+        thread_code(code->term->kid[i]->code, dispatch, depth + 1);
+      }
+      return;
+    case BC_ARG:
+    case BC_DUP:
+      thread_code(code->sub, dispatch, depth + 1);
+      thread_code(code->next, dispatch, depth + 1);
+      return;
+    case BC_CTR:
+      for (u32 i = 0; i < code->arity; i++) {
+        thread_code(code->term->kid[i]->code, dispatch, depth + 1);
+      }
+      return;
+    case BC_LAM:
+      thread_code(code->sub, dispatch, depth + 1);
+      return;
+    case BC_MAT:
+      if (code->cases != NULL) {
+        thread_code(code->cases->ctr, dispatch, depth + 1);
+        thread_code(code->cases->num0, dispatch, depth + 1);
+        thread_code(code->cases->num1, dispatch, depth + 1);
+        thread_code(code->cases->dft, dispatch, depth + 1);
+      }
+      return;
+    case BC_SUP:
+      thread_code(code->term->kid[0]->code, dispatch, depth + 1);
+      thread_code(code->term->kid[1]->code, dispatch, depth + 1);
+      return;
+    default:
+      return;
   }
 }
 
@@ -1454,14 +1497,21 @@ static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc) {
     &&do_arg, &&do_args, &&do_var, &&do_dp0, &&do_dp1, &&do_ref, &&do_num,
     &&do_ctr, &&do_lam, &&do_mat, &&do_dup, &&do_sup, &&do_era
   };
+  static int threaded = 0;
+  if (!threaded) {
+    for (u32 i = 0; i < NAME_LEN; i++) {
+      if (DEFS[i]) thread_code(DEFS[i]->code, dispatch, 0);
+    }
+    threaded = 1;
+  }
   Val *val = NULL;
-  goto *dispatch[pc->op];
+  goto *pc->jump;
 
 do_arg:
   if (argc >= MAX_ARGS) die("argument stack overflow");
   args[argc++] = arg_code(pc->sub, env, gap);
   pc = pc->next;
-  goto *dispatch[pc->op];
+  goto *pc->jump;
 
 do_args:
   if (argc + pc->arity > MAX_ARGS) die("argument stack overflow");
@@ -1469,7 +1519,7 @@ do_args:
     args[argc++] = arg_code(pc->term->kid[i]->code, env, gap);
   }
   pc = pc->next;
-  goto *dispatch[pc->op];
+  goto *pc->jump;
 
 do_ref:
   if (pc->ext >= MAX_NAMES || DEFS[pc->ext] == NULL) die("unknown reference");
@@ -1480,7 +1530,7 @@ do_ref:
   pc = DEFS[pc->ext]->code;
   env = NULL;
   gap = 0;
-  goto *dispatch[pc->op];
+  goto *pc->jump;
 
 do_var:
   if (pc->ext == 1 && gap == 0) {
@@ -1526,7 +1576,7 @@ do_lam:
       gap = 0;
     }
     pc = pc->sub;
-    goto *dispatch[pc->op];
+    goto *pc->jump;
   }
 
 do_mat:
@@ -1548,7 +1598,7 @@ do_mat:
         push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
       }
       pc = body;
-      goto *dispatch[pc->op];
+      goto *pc->jump;
     }
   }
   ITRS++;
@@ -1568,7 +1618,7 @@ do_mat:
       push_ctr_val_args(arg, args, &argc);
     }
     pc = body;
-    goto *dispatch[pc->op];
+    goto *pc->jump;
   }
 
 do_dup:
@@ -1579,7 +1629,7 @@ do_dup:
     env = env_push(v, env, gap + 1);
     gap = 0;
     pc = pc->next;
-    goto *dispatch[pc->op];
+    goto *pc->jump;
   }
 
 do_sup:
@@ -1606,7 +1656,7 @@ apply_value:
         gap = 0;
       }
       pc = val->code;
-      goto *dispatch[pc->op];
+      goto *pc->jump;
     }
     case V_MAT: {
       Arg *raw = &args[argc - 1];
@@ -1625,7 +1675,7 @@ apply_value:
           env = val->env;
           gap = val->ext;
           pc = body;
-          goto *dispatch[pc->op];
+          goto *pc->jump;
         }
       }
       ITRS++;
@@ -1646,7 +1696,7 @@ apply_value:
       env = val->env;
       gap = val->ext;
       pc = body;
-      goto *dispatch[pc->op];
+      goto *pc->jump;
     }
     case V_SUP: {
       Arg arg = args[--argc];
