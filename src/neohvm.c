@@ -57,6 +57,7 @@ enum {
   V_SUP,
   V_VAR,
   V_APP,
+  V_PRJ,
   V_ERA
 };
 
@@ -889,6 +890,14 @@ static inline Val *mk_app(Val *fun, Val *arg) {
   return v;
 }
 
+static inline Val *mk_prj(Val *fun, u32 lab, u8 side) {
+  Val *v = val_new(V_PRJ);
+  v->ext = lab;
+  v->arity = side;
+  v->fst = fun;
+  return v;
+}
+
 ALWAYS_INLINE Val *force_fun_arg(Val *v) {
   if (v->tag != V_THUNK && v->tag != V_LTHUNK) return v;
   switch (v->code->op) {
@@ -943,6 +952,26 @@ ALWAYS_INLINE Val *project(Val *v, u32 lab, u8 side) {
   if (v->tag == V_SUP) {
     if (v->ext == lab) return side == 0 ? v->fst : v->snd;
     return mk_sup(v->ext, project(v->fst, lab, side), project(v->snd, lab, side));
+  }
+  if (v->tag == V_CTR) {
+    Val *ctr = val_new(V_CTR);
+    ctr->ext = v->ext;
+    ctr->arity = v->arity;
+    if (v->arity == 2) {
+      ctr->fst = project(v->fst, lab, side);
+      ctr->snd = project(v->snd, lab, side);
+    } else if (v->arity == 1) {
+      ctr->fst = project(v->fst, lab, side);
+    } else if (v->arity > 2) {
+      ctr->item = items_new(v->arity);
+      for (u32 i = 0; i < v->arity; i++) {
+        ctr->item[i] = project(v->item[i], lab, side);
+      }
+    }
+    return ctr;
+  }
+  if (v->tag == V_MAT) {
+    return mk_prj(v, lab, side);
   }
   return v;
 }
@@ -1063,6 +1092,10 @@ static Val *apply_fun(Val *fun, Arg *arg) {
     case V_VAR:
     case V_APP:
       return mk_app(fun, arg->val != NULL ? arg->val : mk_thunk(arg->code, arg->env, arg->gap));
+    case V_PRJ: {
+      Val *res = apply_fun(fun->fst, arg);
+      return project(res, fun->ext, fun->arity);
+    }
     default:
       die("cannot apply value");
   }
@@ -1269,6 +1302,11 @@ apply_value:
       val = apply_sup(val, &arg);
       goto apply_value;
     }
+    case V_PRJ: {
+      Arg arg = args[--argc];
+      val = apply_fun(val, &arg);
+      goto apply_value;
+    }
     default:
       if (val->tag == V_VAR || val->tag == V_APP) {
         Arg arg = args[--argc];
@@ -1379,6 +1417,10 @@ static void print_val_at(Val *v, u32 depth) {
       putchar('(');
       print_val_at(v->snd, depth);
       putchar(')');
+      return;
+    case V_PRJ:
+      print_val_at(v->fst, depth);
+      printf("%s", v->arity == 0 ? "₀" : "₁");
       return;
     case V_ERA:
       printf("&{}");
