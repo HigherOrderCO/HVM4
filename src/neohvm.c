@@ -105,6 +105,7 @@ typedef struct EnvBlock EnvBlock;
 typedef struct ValBlock ValBlock;
 typedef struct ItemBlock ItemBlock;
 typedef struct CodeBlock CodeBlock;
+typedef struct LamDupBlock LamDupBlock;
 
 struct EnvBlock {
   EnvBlock *next;
@@ -185,6 +186,12 @@ struct CodeBlock {
   Code       item[65536];
 };
 
+struct LamDupBlock {
+  LamDupBlock *next;
+  u32          used;
+  LamDup       item[65536];
+};
+
 typedef struct {
   char *src;
   u32   pos;
@@ -215,6 +222,7 @@ static EnvBlock *ENV_BLOCK = NULL;
 static ValBlock *VAL_BLOCK = NULL;
 static ItemBlock *ITEM_BLOCK = NULL;
 static CodeBlock *CODE_BLOCK = NULL;
+static LamDupBlock *LAMDUP_BLOCK = NULL;
 static Val NUM_CACHE[2] = {
   {.tag = V_NUM, .ext = 0, .arity = 0, .env = NULL, .code = NULL},
   {.tag = V_NUM, .ext = 1, .arity = 0, .env = NULL, .code = NULL},
@@ -319,6 +327,17 @@ static Val **items_new(u32 len) {
   Val **items = &ITEM_BLOCK->item[ITEM_BLOCK->used];
   ITEM_BLOCK->used += len;
   return items;
+}
+
+static LamDup *lamdup_new(void) {
+  if (LAMDUP_BLOCK == NULL || LAMDUP_BLOCK->used >= 65536) {
+    LamDupBlock *block = (LamDupBlock*)malloc(sizeof(LamDupBlock));
+    if (!block) die("out of memory");
+    block->next = LAMDUP_BLOCK;
+    block->used = 0;
+    LAMDUP_BLOCK = block;
+  }
+  return &LAMDUP_BLOCK->item[LAMDUP_BLOCK->used++];
 }
 
 ALWAYS_INLINE Env *env_cell(Val *val, Env *next, u32 span) {
@@ -1111,8 +1130,7 @@ static inline Val *mk_box(void) {
 }
 
 static Val *mk_dlam(Val *lam, u32 lab) {
-  LamDup *dup = (LamDup*)malloc(sizeof(LamDup));
-  if (!dup) die("out of memory");
+  LamDup *dup = lamdup_new();
   dup->lam = lam;
   dup->lab = lab;
   dup->box[0] = mk_box();
