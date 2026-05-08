@@ -1374,7 +1374,6 @@ static Val *apply_default(Code *dft, Env *env, u32 gap, Val *arg) {
   if (dft == NULL) return mk_num(0);
   Arg none[MAX_ARGS];
   Val *fun = eval_code(dft, env, gap, none, 0);
-  fun = force(fun);
   switch (fun->tag) {
     case V_LAM:
     case V_MAT:
