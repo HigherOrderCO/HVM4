@@ -350,6 +350,12 @@ ALWAYS_INLINE u32 env_span(Env *env) {
 ALWAYS_INLINE Env *env_at(Env *env, u32 lvl, u32 gap) {
   if (lvl == 0) die("bad variable level");
   if (lvl <= gap) die("erased variable reached");
+  if (gap == 0 && lvl == 2 && env != NULL && env_span(env) == 1) {
+    env = env_next(env);
+    if (!env) die("unbound variable");
+    if (!env->val) die("erased variable reached");
+    return env;
+  }
   lvl -= gap;
   if (lvl == 1) {
     if (!env) die("unbound variable");
@@ -1031,6 +1037,9 @@ ALWAYS_INLINE Val *bind_arg(Arg *arg) {
       return mk_num(arg->code->ext);
     case BC_CTR:
       return make_ctr(arg->code, arg->env, arg->gap);
+    case BC_REF:
+      if (arg->code->ext < MAX_NAMES && REF_CACHE[arg->code->ext] != NULL) return REF_CACHE[arg->code->ext];
+      return force_arg(arg);
     case BC_SUP:
     case BC_ERA:
       return mk_lthunk(arg->code, arg->env, arg->gap);
@@ -1379,13 +1388,22 @@ do_ref:
   goto *dispatch[pc->op];
 
 do_var:
-  val = env_at(env, pc->ext, gap)->val;
+  if (pc->ext == 1 && gap == 0) {
+    if (!env) die("unbound variable");
+    if (!env->val) die("erased variable reached");
+    val = env->val;
+  } else {
+    val = env_at(env, pc->ext, gap)->val;
+  }
   goto apply_value;
 
 do_dp0:
 do_dp1: {
     Env *e = env_at(env, pc->ext, gap);
-    val = project(e->val, pc->arity, pc->op == BC_DP0 ? 0 : 1);
+    val = e->val;
+    if (val->tag != V_LAM || val->code->sup_lab != pc->arity || val->code->sup_has) {
+      val = project(val, pc->arity, pc->op == BC_DP0 ? 0 : 1);
+    }
     goto apply_value;
   }
 
