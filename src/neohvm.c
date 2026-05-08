@@ -26,6 +26,7 @@ typedef struct Val Val;
 typedef struct Code Code;
 typedef struct Arg Arg;
 typedef struct Cases Cases;
+typedef struct LamDup LamDup;
 
 enum {
   T_VAR,
@@ -58,6 +59,9 @@ enum {
   V_VAR,
   V_APP,
   V_PRJ,
+  V_DLAM,
+  V_PLAM,
+  V_BOX,
   V_ERA
 };
 
@@ -122,8 +126,11 @@ struct Val {
 struct Code {
   u8    op;
   u8    aux;
+  u8    sup_has;
+  u8    pad;
   u32   ext;
   u32   arity;
+  u32   sup_lab;
   Term *term;
   Cases *cases;
   Code *sub;
@@ -144,6 +151,12 @@ struct Arg {
   Code *code;
   Env  *env;
   u32   gap;
+};
+
+struct LamDup {
+  Val *lam;
+  Val *box[2];
+  u32  lab;
 };
 
 struct ValBlock {
@@ -263,8 +276,11 @@ static Code *code_new(u8 op) {
   Code *c = &CODE_BLOCK->item[CODE_BLOCK->used++];
   c->op = op;
   c->aux = 0;
+  c->sup_has = 0;
+  c->pad = 0;
   c->ext = 0;
   c->arity = 0;
+  c->sup_lab = UINT32_MAX;
   c->term = NULL;
   c->cases = NULL;
   c->sub = NULL;
@@ -829,6 +845,53 @@ static void compile_program_terms(void) {
   }
 }
 
+static int code_has_sup_label(Code *code, u32 lab, u32 depth) {
+  if (code == NULL || depth > 64) return 0;
+  if (code->sup_lab == lab) return code->sup_has;
+  int has = 0;
+  switch (code->op) {
+    case BC_ARG:
+    case BC_DUP:
+      has = code_has_sup_label(code->sub, lab, depth + 1)
+          || code_has_sup_label(code->next, lab, depth + 1);
+      break;
+    case BC_CTR:
+      for (u32 i = 0; i < code->arity; i++) {
+        if (code_has_sup_label(code->term->kid[i]->code, lab, depth + 1)) {
+          has = 1;
+          break;
+        }
+      }
+      break;
+    case BC_LAM:
+      has = code_has_sup_label(code->sub, lab, depth + 1);
+      break;
+    case BC_MAT:
+      if (code->cases != NULL) {
+        has = code_has_sup_label(code->cases->ctr, lab, depth + 1)
+           || code_has_sup_label(code->cases->num0, lab, depth + 1)
+           || code_has_sup_label(code->cases->num1, lab, depth + 1)
+           || code_has_sup_label(code->cases->dft, lab, depth + 1);
+      }
+      break;
+    case BC_REF:
+      has = code->ext < MAX_NAMES && DEFS[code->ext] != NULL
+        ? code_has_sup_label(DEFS[code->ext]->code, lab, depth + 1)
+        : 0;
+      break;
+    case BC_SUP:
+      has = code->ext == lab
+          || code_has_sup_label(code->term->kid[0]->code, lab, depth + 1)
+          || code_has_sup_label(code->term->kid[1]->code, lab, depth + 1);
+      break;
+    default:
+      break;
+  }
+  code->sup_lab = lab;
+  code->sup_has = (u8)has;
+  return has;
+}
+
 ALWAYS_INLINE Val *mk_thunk(Code *code, Env *env, u32 gap) {
   Val *v = val_new(V_THUNK);
   v->code = code;
@@ -898,6 +961,34 @@ static inline Val *mk_prj(Val *fun, u32 lab, u8 side) {
   return v;
 }
 
+static inline Val *mk_box(void) {
+  Val *v = val_new(V_BOX);
+  v->fst = NULL;
+  return v;
+}
+
+static Val *mk_dlam(Val *lam, u32 lab) {
+  LamDup *dup = (LamDup*)malloc(sizeof(LamDup));
+  if (!dup) die("out of memory");
+  dup->lam = lam;
+  dup->lab = lab;
+  dup->box[0] = mk_box();
+  dup->box[1] = mk_box();
+  Val *v = val_new(V_DLAM);
+  v->ext = lab;
+  v->fst = lam;
+  v->snd = (Val*)dup;
+  return v;
+}
+
+static inline Val *mk_plam(Val *lam, u32 lab, u8 side) {
+  Val *v = val_new(V_PLAM);
+  v->ext = lab;
+  v->arity = side;
+  v->fst = lam;
+  return v;
+}
+
 ALWAYS_INLINE Val *force_fun_arg(Val *v) {
   if (v->tag != V_THUNK && v->tag != V_LTHUNK) return v;
   switch (v->code->op) {
@@ -948,12 +1039,13 @@ ALWAYS_INLINE Val *bind_arg(Arg *arg) {
 
 ALWAYS_INLINE Val *project(Val *v, u32 lab, u8 side) {
   v = force(v);
-  ITRS++;
   if (v->tag == V_SUP) {
+    ITRS++;
     if (v->ext == lab) return side == 0 ? v->fst : v->snd;
     return mk_sup(v->ext, project(v->fst, lab, side), project(v->snd, lab, side));
   }
   if (v->tag == V_CTR) {
+    ITRS++;
     Val *ctr = val_new(V_CTR);
     ctr->ext = v->ext;
     ctr->arity = v->arity;
@@ -971,7 +1063,19 @@ ALWAYS_INLINE Val *project(Val *v, u32 lab, u8 side) {
     return ctr;
   }
   if (v->tag == V_MAT) {
+    ITRS++;
     return mk_prj(v, lab, side);
+  }
+  if (v->tag == V_DLAM) {
+    ITRS++;
+    return mk_plam(v, lab, side);
+  }
+  if (v->tag == V_LAM) {
+    if (code_has_sup_label(v->code, lab, 0)) {
+      ITRS++;
+      return mk_plam(mk_dlam(v, lab), lab, side);
+    }
+    return v;
   }
   return v;
 }
@@ -1011,6 +1115,58 @@ ALWAYS_INLINE Code *mat_pick(Code *mat, Val *arg) {
   return m ? m->kid[0]->code : NULL;
 }
 
+ALWAYS_INLINE Code *mat_pick_code(Code *mat, Code *arg) {
+  if (arg->op == BC_NUM) {
+    if (arg->ext == 0 && mat->cases->num0) return mat->cases->num0;
+    if (arg->ext == 1 && mat->cases->num1) return mat->cases->num1;
+  } else if (arg->op == BC_CTR) {
+    if (mat->cases->ctr && arg->ext == mat->cases->ctr_ext) return mat->cases->ctr;
+  } else {
+    return NULL;
+  }
+  for (Term *m = mat->cases->chain; m != NULL && m->tag == T_MAT; m = m->kid[1]) {
+    if (m->aux == M_NUM && arg->op == BC_NUM && m->ext == arg->ext) return m->kid[0]->code;
+    if (m->aux == M_CTR && arg->op == BC_CTR && m->ext == arg->ext) return m->kid[0]->code;
+  }
+  return NULL;
+}
+
+ALWAYS_INLINE void push_ctr_code_args(Code *ctr, Env *env, u32 gap, Arg *args, u32 *argc) {
+  if (ctr->arity == 2) {
+    if (*argc + 2 > MAX_ARGS) die("argument stack overflow");
+    args[(*argc)++] = arg_code(ctr->next, env, gap);
+    args[(*argc)++] = arg_code(ctr->sub, env, gap);
+    return;
+  }
+  if (ctr->arity == 1) {
+    if (*argc >= MAX_ARGS) die("argument stack overflow");
+    args[(*argc)++] = arg_code(ctr->sub, env, gap);
+    return;
+  }
+  for (u32 i = ctr->arity; i > 0; i--) {
+    if (*argc >= MAX_ARGS) die("argument stack overflow");
+    args[(*argc)++] = arg_code(ctr->term->kid[i - 1]->code, env, gap);
+  }
+}
+
+ALWAYS_INLINE void push_ctr_val_args(Val *ctr, Arg *args, u32 *argc) {
+  if (ctr->arity == 2) {
+    if (*argc + 2 > MAX_ARGS) die("argument stack overflow");
+    args[(*argc)++] = arg_val(ctr->snd);
+    args[(*argc)++] = arg_val(ctr->fst);
+    return;
+  }
+  if (ctr->arity == 1) {
+    if (*argc >= MAX_ARGS) die("argument stack overflow");
+    args[(*argc)++] = arg_val(ctr->fst);
+    return;
+  }
+  for (u32 i = ctr->arity; i > 0; i--) {
+    if (*argc >= MAX_ARGS) die("argument stack overflow");
+    args[(*argc)++] = arg_val(ctr_get(ctr, i - 1));
+  }
+}
+
 static Val *apply_fun(Val *fun, Arg *arg);
 static Val *apply_sup(Val *sup, Arg *arg);
 
@@ -1047,6 +1203,34 @@ static inline Val *apply_lam(Val *lam, Arg *arg) {
   return eval_code(lam->code, env, gap, none, 0);
 }
 
+static Val *apply_plam(Val *plam, Arg *arg) {
+  ITRS++;
+  Val *src = force(plam->fst);
+  LamDup *dup = NULL;
+  Val *lam = src;
+  if (src->tag == V_DLAM) {
+    dup = (LamDup*)src->snd;
+    lam = dup->lam;
+  }
+  lam = force(lam);
+  if (lam->tag != V_LAM) die("projected non-lambda");
+  Env *env = lam->env;
+  u32 gap = lam->ext;
+  if (lam->arity) {
+    gap++;
+  } else {
+    Val *got = bind_arg(arg);
+    Val *var = dup ? dup->box[1 - plam->arity] : mk_var(0);
+    if (dup) dup->box[plam->arity]->fst = got;
+    Val *sup = plam->arity == 0 ? mk_sup(plam->ext, got, var) : mk_sup(plam->ext, var, got);
+    env = env_push(sup, env, gap + 1);
+    gap = 0;
+  }
+  Arg none[MAX_ARGS];
+  Val *body = eval_code(lam->code, env, gap, none, 0);
+  return project(body, plam->ext, plam->arity);
+}
+
 static inline Val *apply_mat(Code *mat, Env *env, u32 gap, Val *arg) {
   if (arg->tag == V_SUP) {
     Arg one[1];
@@ -1061,10 +1245,7 @@ static inline Val *apply_mat(Code *mat, Env *env, u32 gap, Val *arg) {
   Arg args[MAX_ARGS];
   u32 argc = 0;
   if (arg->tag == V_CTR) {
-    for (u32 i = arg->arity; i > 0; i--) {
-      if (argc >= MAX_ARGS) die("argument stack overflow");
-      args[argc++] = arg_val(ctr_get(arg, i - 1));
-    }
+    push_ctr_val_args(arg, args, &argc);
   }
   return eval_code(body, env, gap, args, argc);
 }
@@ -1075,6 +1256,18 @@ static Val *apply_fun(Val *fun, Arg *arg) {
     case V_LAM:
       return apply_lam(fun, arg);
     case V_MAT: {
+      if (arg->val == NULL && (arg->code->op == BC_CTR || arg->code->op == BC_NUM)) {
+        Code *body = mat_pick_code(fun->code, arg->code);
+        if (body) {
+          ITRS++;
+          Arg args[MAX_ARGS];
+          u32 argc = 0;
+          if (arg->code->op == BC_CTR) {
+            push_ctr_code_args(arg->code, arg->env, arg->gap, args, &argc);
+          }
+          return eval_code(body, fun->env, fun->ext, args, argc);
+        }
+      }
       ITRS++;
       Val *val = force_arg(arg);
       return apply_mat(fun->code, fun->env, fun->ext, val);
@@ -1096,6 +1289,11 @@ static Val *apply_fun(Val *fun, Arg *arg) {
       Val *res = apply_fun(fun->fst, arg);
       return project(res, fun->ext, fun->arity);
     }
+    case V_PLAM:
+      return apply_plam(fun, arg);
+    case V_BOX:
+      if (fun->fst) return apply_fun(fun->fst, arg);
+      return mk_app(fun, arg->val != NULL ? arg->val : mk_thunk(arg->code, arg->env, arg->gap));
     default:
       die("cannot apply value");
   }
@@ -1216,6 +1414,21 @@ do_mat:
     val = mk_mat(pc, env, gap);
     goto apply_value;
   }
+  {
+    Arg *raw = &args[argc - 1];
+    if (raw->val == NULL && (raw->code->op == BC_CTR || raw->code->op == BC_NUM)) {
+      Code *body = mat_pick_code(pc, raw->code);
+      if (body) {
+        ITRS++;
+        argc--;
+        if (raw->code->op == BC_CTR) {
+          push_ctr_code_args(raw->code, raw->env, raw->gap, args, &argc);
+        }
+        pc = body;
+        goto *dispatch[pc->op];
+      }
+    }
+  }
   ITRS++;
   {
     Val *arg = force_arg(&args[--argc]);
@@ -1229,10 +1442,7 @@ do_mat:
       goto apply_value;
     }
     if (arg->tag == V_CTR) {
-      for (u32 i = arg->arity; i > 0; i--) {
-        if (argc >= MAX_ARGS) die("argument stack overflow");
-        args[argc++] = arg_val(ctr_get(arg, i - 1));
-      }
+      push_ctr_val_args(arg, args, &argc);
     }
     pc = body;
     goto *dispatch[pc->op];
@@ -1242,6 +1452,7 @@ do_dup:
   ITRS++;
   {
     Val *v = force(mk_thunk(pc->sub, env, gap));
+    if (v->tag == V_LAM && code_has_sup_label(v->code, pc->ext, 0)) v = mk_dlam(v, pc->ext);
     env = env_push(v, env, gap + 1);
     gap = 0;
     pc = pc->next;
@@ -1275,6 +1486,21 @@ apply_value:
       goto *dispatch[pc->op];
     }
     case V_MAT: {
+      Arg *raw = &args[argc - 1];
+      if (raw->val == NULL && (raw->code->op == BC_CTR || raw->code->op == BC_NUM)) {
+        Code *body = mat_pick_code(val->code, raw->code);
+        if (body) {
+          ITRS++;
+          argc--;
+          if (raw->code->op == BC_CTR) {
+            push_ctr_code_args(raw->code, raw->env, raw->gap, args, &argc);
+          }
+          env = val->env;
+          gap = val->ext;
+          pc = body;
+          goto *dispatch[pc->op];
+        }
+      }
       ITRS++;
       Val *arg = force_arg(&args[--argc]);
       if (arg->tag == V_SUP) {
@@ -1287,10 +1513,7 @@ apply_value:
         goto apply_value;
       }
       if (arg->tag == V_CTR) {
-        for (u32 i = arg->arity; i > 0; i--) {
-          if (argc >= MAX_ARGS) die("argument stack overflow");
-          args[argc++] = arg_val(ctr_get(arg, i - 1));
-        }
+        push_ctr_val_args(arg, args, &argc);
       }
       env = val->env;
       gap = val->ext;
@@ -1307,8 +1530,13 @@ apply_value:
       val = apply_fun(val, &arg);
       goto apply_value;
     }
+    case V_PLAM: {
+      Arg arg = args[--argc];
+      val = apply_plam(val, &arg);
+      goto apply_value;
+    }
     default:
-      if (val->tag == V_VAR || val->tag == V_APP) {
+      if (val->tag == V_VAR || val->tag == V_APP || val->tag == V_BOX) {
         Arg arg = args[--argc];
         val = mk_app(val, arg.val != NULL ? arg.val : mk_thunk(arg.code, arg.env, arg.gap));
         goto apply_value;
@@ -1325,8 +1553,14 @@ static Val *eval_term(Term *term, Env *env) {
 
 static Val *force(Val *v) {
   while (v->tag == V_THUNK || v->tag == V_LTHUNK) {
+    u8 tag = v->tag;
     Arg args[MAX_ARGS];
-    v = eval_code(v->code, v->env, v->ext, args, 0);
+    Val *res = eval_code(v->code, v->env, v->ext, args, 0);
+    if (tag == V_LTHUNK && res != v) {
+      *v = *res;
+    } else {
+      v = res;
+    }
   }
   return v;
 }
@@ -1368,12 +1602,32 @@ static void print_mat_val(Val *v, u32 depth) {
 }
 
 static void print_val_at(Val *v, u32 depth) {
+  if (v->tag == V_BOX) {
+    if (v->fst) {
+      printf("@{");
+      print_val_at(v->fst, depth);
+      putchar('}');
+    } else {
+      print_var_name(depth);
+    }
+    return;
+  }
   v = force(v);
   switch (v->tag) {
     case V_NUM:
       printf("%u", v->ext);
       return;
     case V_CTR:
+      if (v->arity == 2) {
+        v->fst = force(v->fst);
+        v->snd = force(v->snd);
+      } else if (v->arity == 1) {
+        v->fst = force(v->fst);
+      } else {
+        for (u32 i = 0; i < v->arity; i++) {
+          v->item[i] = force(v->item[i]);
+        }
+      }
       printf("#%s{", NAMES[v->ext]);
       for (u32 i = 0; i < v->arity; i++) {
         if (i) putchar(',');
@@ -1419,6 +1673,10 @@ static void print_val_at(Val *v, u32 depth) {
       putchar(')');
       return;
     case V_PRJ:
+      print_val_at(v->fst, depth);
+      printf("%s", v->arity == 0 ? "₀" : "₁");
+      return;
+    case V_PLAM:
       print_val_at(v->fst, depth);
       printf("%s", v->arity == 0 ? "₀" : "₁");
       return;
