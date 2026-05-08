@@ -67,6 +67,7 @@ enum {
 
 enum {
   BC_ARG,
+  BC_ARGS,
   BC_VAR,
   BC_DP0,
   BC_DP1,
@@ -743,6 +744,7 @@ static void parse_program(char *src) {
 }
 
 static Code *compile_term(Term *term);
+static Code *compile_app(Term *term);
 static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc);
 static Val *force(Val *v);
 static inline Val *mk_lam(Code *code, Env *env, u32 gap);
@@ -754,9 +756,7 @@ static Code *compile_term(Term *term) {
   Code *c = NULL;
   switch (term->tag) {
     case T_APP:
-      c = code_new(BC_ARG);
-      c->sub = compile_term(term->kid[1]);
-      c->next = compile_term(term->kid[0]);
+      c = compile_app(term);
       break;
     case T_VAR:
       c = code_new(BC_VAR);
@@ -837,6 +837,31 @@ static Code *compile_term(Term *term) {
   return c;
 }
 
+static Code *compile_app(Term *term) {
+  Term *args[MAX_ARGS];
+  u32 argc = 0;
+  Term *fun = term;
+  while (fun->tag == T_APP && argc < MAX_ARGS) {
+    args[argc++] = fun->kid[1];
+    fun = fun->kid[0];
+  }
+  if (argc == 1) {
+    Code *c = code_new(BC_ARG);
+    c->sub = compile_term(args[0]);
+    c->next = compile_term(fun);
+    return c;
+  }
+  Code *c = code_new(BC_ARGS);
+  c->arity = argc;
+  c->term = term_new(T_APP);
+  for (u32 i = 0; i < argc; i++) {
+    c->term->kid[i] = args[i];
+    compile_term(args[i]);
+  }
+  c->next = compile_term(fun);
+  return c;
+}
+
 static void compile_program_terms(void) {
   for (u32 i = 0; i < NAME_LEN; i++) {
     if (DEFS[i]) compile_term(DEFS[i]);
@@ -861,6 +886,12 @@ static int mark_ref_code(Code *code, u32 depth) {
   if (code->pad != 0) return code->pad == 2;
   int has = 0;
   switch (code->op) {
+    case BC_ARGS:
+      has = mark_ref_code(code->next, depth + 1);
+      for (u32 i = 0; !has && i < code->arity; i++) {
+        has = mark_ref_code(code->term->kid[i]->code, depth + 1);
+      }
+      break;
     case BC_ARG:
     case BC_DUP:
       has = mark_ref_code(code->sub, depth + 1)
@@ -904,6 +935,12 @@ static int code_has_sup_label(Code *code, u32 lab, u32 depth) {
   if (code->sup_lab == lab) return code->sup_has;
   int has = 0;
   switch (code->op) {
+    case BC_ARGS:
+      has = code_has_sup_label(code->next, lab, depth + 1);
+      for (u32 i = 0; !has && i < code->arity; i++) {
+        has = code_has_sup_label(code->term->kid[i]->code, lab, depth + 1);
+      }
+      break;
     case BC_ARG:
     case BC_DUP:
       has = code_has_sup_label(code->sub, lab, depth + 1)
@@ -1054,6 +1091,7 @@ ALWAYS_INLINE Val *force_fun_arg(Val *v) {
       return force(v);
     case BC_REF:
     case BC_ARG:
+    case BC_ARGS:
     case BC_DUP:
       return READBACK ? force(v) : v;
     default:
@@ -1446,7 +1484,7 @@ ALWAYS_INLINE Val *make_field(Code *kid, Env *env, u32 gap) {
 
 static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc) {
   static void *dispatch[] = {
-    &&do_arg, &&do_var, &&do_dp0, &&do_dp1, &&do_ref, &&do_num,
+    &&do_arg, &&do_args, &&do_var, &&do_dp0, &&do_dp1, &&do_ref, &&do_num,
     &&do_ctr, &&do_lam, &&do_mat, &&do_dup, &&do_sup, &&do_era
   };
   Val *val = NULL;
@@ -1455,6 +1493,14 @@ static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc) {
 do_arg:
   if (argc >= MAX_ARGS) die("argument stack overflow");
   args[argc++] = arg_code(pc->sub, env, gap);
+  pc = pc->next;
+  goto *dispatch[pc->op];
+
+do_args:
+  if (argc + pc->arity > MAX_ARGS) die("argument stack overflow");
+  for (u32 i = 0; i < pc->arity; i++) {
+    args[argc++] = arg_code(pc->term->kid[i]->code, env, gap);
+  }
   pc = pc->next;
   goto *dispatch[pc->op];
 
