@@ -758,6 +758,7 @@ static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc);
 static Val *force(Val *v);
 static inline Val *mk_lam(Code *code, Env *env, u32 gap);
 static inline Val *mk_mat(Code *code, Env *env, u32 gap);
+static void link_refs_code(Code *code, u32 depth);
 static void thread_code(Code *code, void **dispatch, u32 depth);
 
 static Code *compile_term(Term *term) {
@@ -885,6 +886,9 @@ static void compile_program_terms(void) {
     if (DEFS[i]) compile_term(DEFS[i]);
   }
   for (u32 i = 0; i < NAME_LEN; i++) {
+    if (DEFS[i]) link_refs_code(DEFS[i]->code, 0);
+  }
+  for (u32 i = 0; i < NAME_LEN; i++) {
     if (DEFS[i] && (DEFS[i]->code->op == BC_LAM || DEFS[i]->code->op == BC_MAT)) {
       REF_CACHE[i] = DEFS[i]->code->op == BC_LAM
         ? mk_lam(DEFS[i]->code->sub, NULL, 0)
@@ -893,6 +897,48 @@ static void compile_program_terms(void) {
         REF_CACHE[i]->arity = DEFS[i]->code->aux;
       }
     }
+  }
+}
+
+static void link_refs_code(Code *code, u32 depth) {
+  if (code == NULL || depth > 64) return;
+  switch (code->op) {
+    case BC_ARGS:
+      link_refs_code(code->next, depth + 1);
+      for (u32 i = 0; i < code->arity; i++) {
+        link_refs_code(code->term->kid[i]->code, depth + 1);
+      }
+      return;
+    case BC_ARG:
+    case BC_DUP:
+      link_refs_code(code->sub, depth + 1);
+      link_refs_code(code->next, depth + 1);
+      return;
+    case BC_CTR:
+      for (u32 i = 0; i < code->arity; i++) {
+        link_refs_code(code->term->kid[i]->code, depth + 1);
+      }
+      return;
+    case BC_LAM:
+      link_refs_code(code->sub, depth + 1);
+      return;
+    case BC_MAT:
+      if (code->cases != NULL) {
+        link_refs_code(code->cases->ctr, depth + 1);
+        link_refs_code(code->cases->num0, depth + 1);
+        link_refs_code(code->cases->num1, depth + 1);
+        link_refs_code(code->cases->dft, depth + 1);
+      }
+      return;
+    case BC_REF:
+      code->sub = code->ext < MAX_NAMES && DEFS[code->ext] != NULL ? DEFS[code->ext]->code : NULL;
+      return;
+    case BC_SUP:
+      link_refs_code(code->term->kid[0]->code, depth + 1);
+      link_refs_code(code->term->kid[1]->code, depth + 1);
+      return;
+    default:
+      return;
   }
 }
 
@@ -1522,12 +1568,12 @@ do_args:
   goto *pc->jump;
 
 do_ref:
-  if (pc->ext >= MAX_NAMES || DEFS[pc->ext] == NULL) die("unknown reference");
+  if (pc->sub == NULL) die("unknown reference");
   if (argc == 0 && REF_CACHE[pc->ext] != NULL) {
     val = REF_CACHE[pc->ext];
     goto apply_value;
   }
-  pc = DEFS[pc->ext]->code;
+  pc = pc->sub;
   env = NULL;
   gap = 0;
   goto *pc->jump;
