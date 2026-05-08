@@ -1073,6 +1073,11 @@ ALWAYS_INLINE Val *project(Val *v, u32 lab, u8 side) {
     return mk_plam(v, lab, side);
   }
   if (v->tag == V_LAM) {
+    if (v->code->sup_lab == lab) {
+      if (!v->code->sup_has) return v;
+      ITRS++;
+      return mk_plam(mk_dlam(v, lab), lab, side);
+    }
     if (code_has_sup_label(v->code, lab, 0)) {
       ITRS++;
       return mk_plam(mk_dlam(v, lab), lab, side);
