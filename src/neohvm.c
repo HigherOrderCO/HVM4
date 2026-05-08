@@ -81,6 +81,12 @@ enum {
   BC_ERA
 };
 
+enum {
+  CK_NONE,
+  CK_NUM,
+  CK_VAR
+};
+
 struct Term {
   u8    tag;
   u8    aux;
@@ -745,6 +751,7 @@ static void parse_program(char *src) {
 
 static Code *compile_term(Term *term);
 static Code *compile_app(Term *term);
+static u8 compile_ctr_field_kind(Code *code);
 static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc);
 static Val *force(Val *v);
 static inline Val *mk_lam(Code *code, Env *env, u32 gap);
@@ -788,6 +795,9 @@ static Code *compile_term(Term *term) {
       if (term->arity > 0) c->sub = compile_term(term->kid[0]);
       if (term->arity > 1) c->next = compile_term(term->kid[1]);
       for (u32 i = 2; i < term->arity; i++) compile_term(term->kid[i]);
+      if (term->arity == 2) {
+        c->aux = compile_ctr_field_kind(c->sub) | (compile_ctr_field_kind(c->next) << 2);
+      }
       break;
     case T_LAM:
       c = code_new(BC_LAM);
@@ -835,6 +845,12 @@ static Code *compile_term(Term *term) {
   }
   term->code = c;
   return c;
+}
+
+static u8 compile_ctr_field_kind(Code *code) {
+  if (code->op == BC_NUM) return CK_NUM;
+  if (code->op == BC_VAR) return CK_VAR;
+  return CK_NONE;
 }
 
 static Code *compile_app(Term *term) {
@@ -1457,13 +1473,19 @@ static __attribute__((noinline)) Val *apply_sup(Val *sup, Arg *arg) {
 
 ALWAYS_INLINE Val *make_field(Code *kid, Env *env, u32 gap);
 
+ALWAYS_INLINE Val *make_atom_field(Code *kid, Env *env, u32 gap, u8 kind) {
+  if (kind == CK_NUM) return mk_num(kid->ext);
+  if (kind == CK_VAR) return env_at(env, kid->ext, gap)->val;
+  return make_field(kid, env, gap);
+}
+
 ALWAYS_INLINE Val *make_ctr(Code *pc, Env *env, u32 gap) {
   Val *val = val_new(V_CTR);
   val->ext = pc->ext;
   val->arity = pc->arity;
   if (val->arity == 2) {
-    val->fst = make_field(pc->sub, env, gap);
-    val->snd = make_field(pc->next, env, gap);
+    val->fst = make_atom_field(pc->sub, env, gap, pc->aux & 3);
+    val->snd = make_atom_field(pc->next, env, gap, pc->aux >> 2);
   } else if (val->arity == 1) {
     val->fst = make_field(pc->sub, env, gap);
   } else if (val->arity > 2) {
