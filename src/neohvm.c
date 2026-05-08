@@ -14,6 +14,8 @@ typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
+#define ALWAYS_INLINE static inline __attribute__((always_inline))
+
 #define MAX_NAMES 16384
 #define MAX_BIND  4096
 #define MAX_ARGS  4
@@ -53,6 +55,8 @@ enum {
   V_LAM,
   V_MAT,
   V_SUP,
+  V_VAR,
+  V_APP,
   V_ERA
 };
 
@@ -130,6 +134,7 @@ struct Cases {
   Code *ctr;
   Code *num0;
   Code *num1;
+  Code *dft;
   u32   ctr_ext;
 };
 
@@ -230,7 +235,7 @@ static Term *term_new(u8 tag) {
   return (t->tag = tag), t;
 }
 
-static inline Val *val_new(u8 tag) {
+ALWAYS_INLINE Val *val_new(u8 tag) {
   if (VAL_BLOCK == NULL || VAL_BLOCK->used >= 65536) {
     ValBlock *block = (ValBlock*)malloc(sizeof(ValBlock));
     if (!block) die("out of memory");
@@ -287,8 +292,7 @@ static Val **items_new(u32 len) {
   return items;
 }
 
-static inline Env *env_push(Val *val, Env *next, u32 span) {
-  if (span == 0 || span > 16) die("environment span too wide");
+ALWAYS_INLINE Env *env_cell(Val *val, Env *next, u32 span) {
   if (ENV_BLOCK == NULL || ENV_BLOCK->used >= 65536) {
     EnvBlock *block = (EnvBlock*)malloc(sizeof(EnvBlock));
     if (!block) die("out of memory");
@@ -302,20 +306,34 @@ static inline Env *env_push(Val *val, Env *next, u32 span) {
   return e;
 }
 
-static inline Env *env_next(Env *env) {
+ALWAYS_INLINE Env *env_push(Val *val, Env *next, u32 span) {
+  if (span == 0) die("bad environment span");
+  if (span <= 16) return env_cell(val, next, span);
+  u32 rest = span - 16;
+  Env *tail = next;
+  while (rest > 0) {
+    u32 chunk = rest > 16 ? 16 : rest;
+    tail = env_cell(NULL, tail, chunk);
+    rest -= chunk;
+  }
+  return env_cell(val, tail, 16);
+}
+
+ALWAYS_INLINE Env *env_next(Env *env) {
   return (Env*)(env->next_span & ~(uintptr_t)15);
 }
 
-static inline u32 env_span(Env *env) {
+ALWAYS_INLINE u32 env_span(Env *env) {
   return (u32)(env->next_span & (uintptr_t)15) + 1;
 }
 
-static inline Env *env_at(Env *env, u32 lvl, u32 gap) {
+ALWAYS_INLINE Env *env_at(Env *env, u32 lvl, u32 gap) {
   if (lvl == 0) die("bad variable level");
   if (lvl <= gap) die("erased variable reached");
   lvl -= gap;
   if (lvl == 1) {
     if (!env) die("unbound variable");
+    if (!env->val) die("erased variable reached");
     return env;
   }
   for (;;) {
@@ -326,6 +344,7 @@ static inline Env *env_at(Env *env, u32 lvl, u32 gap) {
     env = env_next(env);
     if (lvl == 1) {
       if (!env) die("unbound variable");
+      if (!env->val) die("erased variable reached");
       return env;
     }
   }
@@ -429,6 +448,7 @@ static Term *parse_lam(Parser *p) {
     Term *head = NULL;
     Term **tail = &head;
     while (!starts(p, "}")) {
+      Parser save = *p;
       Term *m = term_new(T_MAT);
       if (take(p, "#")) {
         m->aux = M_CTR;
@@ -440,10 +460,34 @@ static Term *parse_lam(Parser *p) {
           n = n * 10 + (u32)(p->src[p->pos++] - '0');
         }
         m->ext = n;
+      } else if (take(p, "_")) {
+        skip(p);
+        if (!take(p, ":")) {
+          *p = save;
+          *tail = parse_term(p);
+          sep(p);
+          need(p, "}");
+          return head ? head : *tail;
+        }
+        *tail = parse_term(p);
+        sep(p);
+        need(p, "}");
+        return head ? head : *tail;
       } else {
-        die("expected match case");
+        *p = save;
+        *tail = parse_term(p);
+        sep(p);
+        need(p, "}");
+        return head ? head : *tail;
       }
-      need(p, ":");
+      skip(p);
+      if (!take(p, ":")) {
+        *p = save;
+        *tail = parse_term(p);
+        sep(p);
+        need(p, "}");
+        return head ? head : *tail;
+      }
       m->kid[0] = parse_term(p);
       *tail = m;
       tail = &m->kid[1];
@@ -642,7 +686,8 @@ static Code *compile_term(Term *term) {
       c = code_new(BC_MAT);
       c->term = term;
       c->cases = cases_new(term);
-      for (Term *m = term; m && m->tag == T_MAT; m = m->kid[1]) {
+      Term *m = term;
+      for (; m && m->tag == T_MAT; m = m->kid[1]) {
         compile_term(m->kid[0]);
         if (m->aux == M_NUM && m->ext == 0) {
           c->cases->num0 = m->kid[0]->code;
@@ -652,6 +697,9 @@ static Code *compile_term(Term *term) {
           c->cases->ctr_ext = m->ext;
           c->cases->ctr = m->kid[0]->code;
         }
+      }
+      if (m != NULL) {
+        c->cases->dft = compile_term(m);
       }
       break;
     case T_DUP:
@@ -693,7 +741,7 @@ static void compile_program_terms(void) {
   }
 }
 
-static inline Val *mk_thunk(Code *code, Env *env, u32 gap) {
+ALWAYS_INLINE Val *mk_thunk(Code *code, Env *env, u32 gap) {
   Val *v = val_new(V_THUNK);
   v->code = code;
   v->env = env;
@@ -701,7 +749,7 @@ static inline Val *mk_thunk(Code *code, Env *env, u32 gap) {
   return v;
 }
 
-static inline Val *mk_lthunk(Code *code, Env *env, u32 gap) {
+ALWAYS_INLINE Val *mk_lthunk(Code *code, Env *env, u32 gap) {
   Val *v = val_new(V_LTHUNK);
   v->code = code;
   v->env = env;
@@ -709,14 +757,14 @@ static inline Val *mk_lthunk(Code *code, Env *env, u32 gap) {
   return v;
 }
 
-static inline Val *mk_num(u32 n) {
+ALWAYS_INLINE Val *mk_num(u32 n) {
   if (n < 2) return &NUM_CACHE[n];
   Val *v = val_new(V_NUM);
   v->ext = n;
   return v;
 }
 
-static inline Val *mk_lam(Code *code, Env *env, u32 gap) {
+ALWAYS_INLINE Val *mk_lam(Code *code, Env *env, u32 gap) {
   Val *v = val_new(V_LAM);
   v->code = code;
   v->env = env;
@@ -725,7 +773,7 @@ static inline Val *mk_lam(Code *code, Env *env, u32 gap) {
   return v;
 }
 
-static inline Val *mk_mat(Code *code, Env *env, u32 gap) {
+ALWAYS_INLINE Val *mk_mat(Code *code, Env *env, u32 gap) {
   Val *v = val_new(V_MAT);
   v->code = code;
   v->env = env;
@@ -733,7 +781,7 @@ static inline Val *mk_mat(Code *code, Env *env, u32 gap) {
   return v;
 }
 
-static inline Val *mk_sup(u32 lab, Val *a, Val *b) {
+ALWAYS_INLINE Val *mk_sup(u32 lab, Val *a, Val *b) {
   Val *v = val_new(V_SUP);
   v->ext = lab;
   v->fst = a;
@@ -741,7 +789,20 @@ static inline Val *mk_sup(u32 lab, Val *a, Val *b) {
   return v;
 }
 
-static inline Val *force_fun_arg(Val *v) {
+static inline Val *mk_var(u32 idx) {
+  Val *v = val_new(V_VAR);
+  v->ext = idx;
+  return v;
+}
+
+static inline Val *mk_app(Val *fun, Val *arg) {
+  Val *v = val_new(V_APP);
+  v->fst = fun;
+  v->snd = arg;
+  return v;
+}
+
+ALWAYS_INLINE Val *force_fun_arg(Val *v) {
   if (v->tag != V_THUNK && v->tag != V_LTHUNK) return v;
   switch (v->code->op) {
     case BC_VAR:
@@ -758,23 +819,23 @@ static inline Val *force_fun_arg(Val *v) {
   }
 }
 
-static inline Arg arg_code(Code *code, Env *env, u32 gap) {
+ALWAYS_INLINE Arg arg_code(Code *code, Env *env, u32 gap) {
   return (Arg){.val = NULL, .code = code, .env = env, .gap = gap};
 }
 
-static inline Arg arg_val(Val *val) {
+ALWAYS_INLINE Arg arg_val(Val *val) {
   return (Arg){.val = val, .code = NULL, .env = NULL, .gap = 0};
 }
 
 static inline Val *make_ctr(Code *pc, Env *env, u32 gap);
 
-static inline Val *force_arg(Arg *arg) {
+ALWAYS_INLINE Val *force_arg(Arg *arg) {
   if (arg->val != NULL) return force(arg->val);
   Arg none[MAX_ARGS];
   return force(eval_code(arg->code, arg->env, arg->gap, none, 0));
 }
 
-static inline Val *bind_arg(Arg *arg) {
+ALWAYS_INLINE Val *bind_arg(Arg *arg) {
   if (arg->val != NULL) return force_fun_arg(arg->val);
   switch (arg->code->op) {
     case BC_NUM:
@@ -789,7 +850,7 @@ static inline Val *bind_arg(Arg *arg) {
   }
 }
 
-static inline Val *project(Val *v, u32 lab, u8 side) {
+ALWAYS_INLINE Val *project(Val *v, u32 lab, u8 side) {
   v = force(v);
   ITRS++;
   if (v->tag == V_SUP) {
@@ -799,12 +860,12 @@ static inline Val *project(Val *v, u32 lab, u8 side) {
   return v;
 }
 
-static inline int mat_hits(Term *m, Val *arg) {
+ALWAYS_INLINE int mat_hits(Term *m, Val *arg) {
   return (m->aux == M_NUM && arg->tag == V_NUM && m->ext == arg->ext)
       || (m->aux == M_CTR && arg->tag == V_CTR && m->ext == arg->ext);
 }
 
-static inline Val *ctr_get(Val *ctr, u32 idx) {
+ALWAYS_INLINE Val *ctr_get(Val *ctr, u32 idx) {
   if (idx == 0 && ctr->arity <= 2) return ctr->fst;
   if (idx == 1 && ctr->arity <= 2) return ctr->snd;
   return ctr->item[idx];
@@ -822,7 +883,7 @@ static inline Term *mat_find(Term *mat, Val *arg) {
   return NULL;
 }
 
-static inline Code *mat_pick(Code *mat, Val *arg) {
+ALWAYS_INLINE Code *mat_pick(Code *mat, Val *arg) {
   Cases *cases = mat->cases;
   if (arg->tag == V_NUM) {
     if (arg->ext == 0 && cases->num0) return cases->num0;
@@ -834,9 +895,115 @@ static inline Code *mat_pick(Code *mat, Val *arg) {
   return m ? m->kid[0]->code : NULL;
 }
 
-static inline Val *make_field(Code *kid, Env *env, u32 gap);
+static Val *apply_fun(Val *fun, Arg *arg);
+static Val *apply_sup(Val *sup, Arg *arg);
 
-static inline Val *make_ctr(Code *pc, Env *env, u32 gap) {
+static Val *apply_default(Code *dft, Env *env, u32 gap, Val *arg) {
+  if (dft == NULL) return mk_num(0);
+  Arg none[MAX_ARGS];
+  Val *fun = eval_code(dft, env, gap, none, 0);
+  fun = force(fun);
+  switch (fun->tag) {
+    case V_LAM:
+    case V_MAT:
+    case V_SUP:
+    case V_VAR:
+    case V_APP: {
+      Arg one = arg_val(arg);
+      return apply_fun(fun, &one);
+    }
+    default:
+      return fun;
+  }
+}
+
+static inline Val *apply_lam(Val *lam, Arg *arg) {
+  ITRS++;
+  Env *env = lam->env;
+  u32 gap = lam->ext;
+  if (lam->arity) {
+    gap++;
+  } else {
+    env = env_push(bind_arg(arg), env, gap + 1);
+    gap = 0;
+  }
+  Arg none[MAX_ARGS];
+  return eval_code(lam->code, env, gap, none, 0);
+}
+
+static inline Val *apply_mat(Code *mat, Env *env, u32 gap, Val *arg) {
+  if (arg->tag == V_SUP) {
+    Arg one[1];
+    one[0] = arg_val(arg->fst);
+    Val *fst = eval_code(mat, env, gap, one, 1);
+    one[0] = arg_val(arg->snd);
+    Val *snd = eval_code(mat, env, gap, one, 1);
+    return mk_sup(arg->ext, fst, snd);
+  }
+  Code *body = mat_pick(mat, arg);
+  if (!body) return apply_default(mat->cases->dft, env, gap, arg);
+  Arg args[MAX_ARGS];
+  u32 argc = 0;
+  if (arg->tag == V_CTR) {
+    for (u32 i = arg->arity; i > 0; i--) {
+      if (argc >= MAX_ARGS) die("argument stack overflow");
+      args[argc++] = arg_val(ctr_get(arg, i - 1));
+    }
+  }
+  return eval_code(body, env, gap, args, argc);
+}
+
+static Val *apply_fun(Val *fun, Arg *arg) {
+  fun = force(fun);
+  switch (fun->tag) {
+    case V_LAM:
+      return apply_lam(fun, arg);
+    case V_MAT: {
+      ITRS++;
+      Val *val = force_arg(arg);
+      return apply_mat(fun->code, fun->env, fun->ext, val);
+    }
+    case V_SUP: {
+      Arg shared;
+      if (arg->val == NULL) {
+        shared = arg_val(mk_thunk(arg->code, arg->env, arg->gap));
+        arg = &shared;
+      }
+      Val *fst = apply_fun(fun->fst, arg);
+      Val *snd = apply_fun(fun->snd, arg);
+      return mk_sup(fun->ext, fst, snd);
+    }
+    case V_VAR:
+    case V_APP:
+      return mk_app(fun, arg->val != NULL ? arg->val : mk_thunk(arg->code, arg->env, arg->gap));
+    default:
+      die("cannot apply value");
+  }
+  return fun;
+}
+
+static __attribute__((noinline)) Val *apply_sup(Val *sup, Arg *arg) {
+  if ((sup->fst->tag == V_THUNK || sup->fst->tag == V_LTHUNK)
+  &&  (sup->snd->tag == V_THUNK || sup->snd->tag == V_LTHUNK)) {
+    if (arg->val == NULL) *arg = arg_val(mk_thunk(arg->code, arg->env, arg->gap));
+    Arg one[1] = {*arg};
+    Val *fst = eval_code(sup->fst->code, sup->fst->env, sup->fst->ext, one, 1);
+    one[0] = *arg;
+    Val *snd = eval_code(sup->snd->code, sup->snd->env, sup->snd->ext, one, 1);
+    return mk_sup(sup->ext, fst, snd);
+  }
+  if (sup->fst->tag == V_LAM && sup->snd->tag == V_LAM) {
+    if (arg->val == NULL) *arg = arg_val(mk_thunk(arg->code, arg->env, arg->gap));
+    Val *fst = apply_lam(sup->fst, arg);
+    Val *snd = apply_lam(sup->snd, arg);
+    return mk_sup(sup->ext, fst, snd);
+  }
+  return apply_fun(sup, arg);
+}
+
+ALWAYS_INLINE Val *make_field(Code *kid, Env *env, u32 gap);
+
+ALWAYS_INLINE Val *make_ctr(Code *pc, Env *env, u32 gap) {
   Val *val = val_new(V_CTR);
   val->ext = pc->ext;
   val->arity = pc->arity;
@@ -854,7 +1021,7 @@ static inline Val *make_ctr(Code *pc, Env *env, u32 gap) {
   return val;
 }
 
-static inline Val *make_field(Code *kid, Env *env, u32 gap) {
+ALWAYS_INLINE Val *make_field(Code *kid, Env *env, u32 gap) {
   if (kid->op == BC_NUM) return mk_num(kid->ext);
   if (kid->op == BC_VAR) return env_at(env, kid->ext, gap)->val;
   if (env != NULL && kid->op == BC_CTR) return make_ctr(kid, env, gap);
@@ -932,8 +1099,15 @@ do_mat:
   ITRS++;
   {
     Val *arg = force_arg(&args[--argc]);
+    if (arg->tag == V_SUP) {
+      val = apply_mat(pc, env, gap, arg);
+      goto apply_value;
+    }
     Code *body = mat_pick(pc, arg);
-    if (!body) die("match failure");
+    if (!body) {
+      val = apply_default(pc->cases->dft, env, gap, arg);
+      goto apply_value;
+    }
     if (arg->tag == V_CTR) {
       for (u32 i = arg->arity; i > 0; i--) {
         if (argc >= MAX_ARGS) die("argument stack overflow");
@@ -983,8 +1157,15 @@ apply_value:
     case V_MAT: {
       ITRS++;
       Val *arg = force_arg(&args[--argc]);
+      if (arg->tag == V_SUP) {
+        val = apply_mat(val->code, val->env, val->ext, arg);
+        goto apply_value;
+      }
       Code *body = mat_pick(val->code, arg);
-      if (!body) die("match failure");
+      if (!body) {
+        val = apply_default(val->code->cases->dft, val->env, val->ext, arg);
+        goto apply_value;
+      }
       if (arg->tag == V_CTR) {
         for (u32 i = arg->arity; i > 0; i--) {
           if (argc >= MAX_ARGS) die("argument stack overflow");
@@ -998,15 +1179,15 @@ apply_value:
     }
     case V_SUP: {
       Arg arg = args[--argc];
-      if (arg.val == NULL) arg = arg_val(mk_thunk(arg.code, arg.env, arg.gap));
-      Arg one[1] = {arg};
-      Val *l = eval_code(val->fst->code, val->fst->env, val->fst->ext, one, 1);
-      one[0] = arg;
-      Val *r = eval_code(val->snd->code, val->snd->env, val->snd->ext, one, 1);
-      val = mk_sup(val->ext, l, r);
+      val = apply_sup(val, &arg);
       goto apply_value;
     }
     default:
+      if (val->tag == V_VAR || val->tag == V_APP) {
+        Arg arg = args[--argc];
+        val = mk_app(val, arg.val != NULL ? arg.val : mk_thunk(arg.code, arg.env, arg.gap));
+        goto apply_value;
+      }
       die("cannot apply value");
   }
   return val;
@@ -1025,7 +1206,43 @@ static Val *force(Val *v) {
   return v;
 }
 
-static void print_val(Val *v) {
+static void print_var_name(u32 idx) {
+  if (idx < 26) {
+    putchar((char)('a' + idx));
+  } else {
+    printf("x%u", idx);
+  }
+}
+
+static void print_val_at(Val *v, u32 depth);
+
+static void print_mat_val(Val *v, u32 depth) {
+  printf("λ{");
+  int first = 1;
+  Term *m = v->code->cases->chain;
+  for (; m && m->tag == T_MAT; m = m->kid[1]) {
+    if (!first) putchar(';');
+    first = 0;
+    if (m->aux == M_CTR) {
+      printf("#%s", NAMES[m->ext]);
+    } else {
+      printf("%u", m->ext);
+    }
+    putchar(':');
+    Arg none[MAX_ARGS];
+    Val *body = eval_code(m->kid[0]->code, v->env, v->ext, none, 0);
+    print_val_at(body, depth);
+  }
+  if (m != NULL) {
+    if (!first) putchar(';');
+    Arg none[MAX_ARGS];
+    Val *body = eval_code(m->code, v->env, v->ext, none, 0);
+    print_val_at(body, depth);
+  }
+  putchar('}');
+}
+
+static void print_val_at(Val *v, u32 depth) {
   v = force(v);
   switch (v->tag) {
     case V_NUM:
@@ -1035,22 +1252,46 @@ static void print_val(Val *v) {
       printf("#%s{", NAMES[v->ext]);
       for (u32 i = 0; i < v->arity; i++) {
         if (i) putchar(',');
-        print_val(ctr_get(v, i));
+        print_val_at(ctr_get(v, i), depth);
       }
       putchar('}');
       return;
-    case V_LAM:
-      printf("<lam>");
+    case V_LAM: {
+      putchar('\xCE');
+      putchar('\xBB');
+      print_var_name(depth);
+      putchar('.');
+      Env *env = v->env;
+      u32 gap = v->ext;
+      if (v->arity) {
+        gap++;
+      } else {
+        env = env_push(mk_var(depth), env, gap + 1);
+        gap = 0;
+      }
+      Arg none[MAX_ARGS];
+      Val *body = eval_code(v->code, env, gap, none, 0);
+      print_val_at(body, depth + 1);
       return;
+    }
     case V_MAT:
-      printf("<mat>");
+      print_mat_val(v, depth);
       return;
     case V_SUP:
       printf("&%s{", NAMES[v->ext]);
-      print_val(v->fst);
+      print_val_at(v->fst, depth);
       putchar(',');
-      print_val(v->snd);
+      print_val_at(v->snd, depth);
       putchar('}');
+      return;
+    case V_VAR:
+      print_var_name(v->ext);
+      return;
+    case V_APP:
+      print_val_at(v->fst, depth);
+      putchar('(');
+      print_val_at(v->snd, depth);
+      putchar(')');
       return;
     case V_ERA:
       printf("&{}");
@@ -1059,6 +1300,10 @@ static void print_val(Val *v) {
       printf("<?>");
       return;
   }
+}
+
+static void print_val(Val *v) {
+  print_val_at(v, 0);
 }
 
 int main(int argc, char **argv) {
