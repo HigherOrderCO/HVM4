@@ -6498,6 +6498,7 @@ fn void fast_run_free(FastRun *run) {
 #define FO_APPLY 16
 #define FO_JUMP 17
 #define FO_MAT_BIND 18
+#define FO_NUM_SWITCH 19
 
 typedef u64 FoTerm;
 
@@ -6684,29 +6685,6 @@ fn u32 fo_node_alloc(FoRun *run) {
     return 0;
   }
   return ++run->node_len;
-}
-
-fn FoTerm fo_ctr(FoRun *run, u8 tag, u32 ext, u32 ari, FoTerm *args) {
-  if (ari > 2) {
-    fo_fail_because(run, "wide-constructor", tag);
-    return 0;
-  }
-  u32 loc = fo_node_alloc(run);
-  if (run->failed) {
-    return 0;
-  }
-  run->node_tag[loc] = tag;
-  run->node_ari[loc] = ari;
-  run->node_ext[loc] = ext;
-  run->node_refs[loc] = 0;
-  run->node_next[loc] = 0;
-  if (ari > 0) {
-    run->node_arg0[loc] = args[0];
-    if (ari > 1) {
-      run->node_arg1[loc] = args[1];
-    }
-  }
-  return loc;
 }
 
 fn FoTerm fo_closure(FoRun *run, u32 start, u32 cap, u32 src, FoTerm *ctx, u32 frm) {
@@ -7077,6 +7055,23 @@ fn int fo_compile_func(FoRun *run, u64 loc, FoScope scope) {
     case MAT:
     case SWI: {
       u64 mat_loc = term_val(term);
+      if (term_tag(term) == SWI && term_ext(term) == 0 && term_tag(heap_read(mat_loc + 1)) == SWI) {
+        Term one = heap_read(mat_loc + 1);
+        if (term_ext(one) == 1) {
+          u64 one_loc = term_val(one);
+          u32 pos = 0;
+          fo_emit(run, FO_NUM_SWITCH, 0, 0, 0, 0, &pos);
+          if (!fo_compile_func(run, one_loc + 1, scope)) {
+            return 0;
+          }
+          run->code[pos].ext = run->code_len;
+          if (!fo_compile_func(run, mat_loc + 0, scope)) {
+            return 0;
+          }
+          run->code[pos].aux = run->code_len;
+          return fo_compile_func(run, one_loc + 0, scope);
+        }
+      }
       if (term_tag(term) == MAT) {
         u32 ctor_ari = 0;
         FoScope bind_scope = scope;
@@ -7180,102 +7175,6 @@ fn FoTerm fo_stack_pop(FoRun *run, FoTerm *stack, u32 *sp) {
   return stack[--(*sp)];
 }
 
-fn int fo_call_enter(FoRun *run, FoOp *op, FoTerm *vals, u32 *vsp, FoTerm *terms, u32 *tsp, FoTerm *term) {
-  if (op->ari == 0 || *vsp < op->ari || op->ext >= run->fn_count) {
-    fo_fail_because(run, "call-enter", op->op);
-    return 0;
-  }
-  for (u32 i = op->ari; i > 1; i--) {
-    FoTerm arg = fo_stack_pop(run, vals, vsp);
-    if (run->failed || !fo_stack_push(run, terms, tsp, arg)) {
-      return 0;
-    }
-  }
-  *term = fo_stack_pop(run, vals, vsp);
-  return !run->failed;
-}
-
-fn int fo_apply_enter(
-  FoRun *run,
-  FoTerm fun,
-  u32 argc,
-  int tail,
-  FoTerm *vals,
-  u32 *vsp,
-  FoTerm *terms,
-  u32 *tsp,
-  FoTerm *ctx,
-  FoFrame *calls,
-  u32 *csp,
-  u32 *pc,
-  u32 *frm,
-  u32 *cur,
-  u32 *fidx,
-  FoTerm *term
-) {
-  if (argc == 0 || *vsp < argc) {
-    fo_fail_because(run, "apply-args", argc);
-    return 0;
-  }
-  if (!tail) {
-    if (*csp >= FO_CALL_CAP) {
-      fo_fail_because(run, "call-stack", 0);
-      return 0;
-    }
-    calls[(*csp)++] = (FoFrame){*pc, *frm, *cur, *fidx};
-  }
-  for (u32 i = argc; i > 1; i--) {
-    FoTerm arg = fo_stack_pop(run, vals, vsp);
-    if (run->failed || !fo_stack_push(run, terms, tsp, arg)) {
-      return 0;
-    }
-  }
-  *term = fo_stack_pop(run, vals, vsp);
-  if (run->failed) {
-    return 0;
-  }
-  if (fo_is_fun(fun)) {
-    u32 fun_idx = fo_fun_val(fun);
-    if (fun_idx >= run->fn_count) {
-      fo_fail_because(run, "apply-fun", fun_idx);
-      return 0;
-    }
-    *fidx = fun_idx;
-    *pc = run->fn_start[fun_idx];
-    *frm = *cur;
-    return 1;
-  }
-  if (fo_is_clo(fun)) {
-    u32 loc = fo_clo_val(fun);
-    u32 cap = run->clo_cap[loc];
-    u32 base = run->clo_base[loc];
-    if (*cur + cap >= FO_CTX_CAP) {
-      fo_fail_because(run, "apply-ctx", cap);
-      return 0;
-    }
-    u32 dst = *cur;
-    if (run->clo_refs[loc] == 0) {
-      for (u32 i = 0; i < cap; i++) {
-        ctx[dst + i] = run->clo_ctx[base + i];
-      }
-    } else {
-      for (u32 i = 0; i < cap; i++) {
-        FoTerm val = run->clo_ctx[base + i];
-        fo_retain(run, val);
-        ctx[dst + i] = val;
-      }
-      run->clo_refs[loc]--;
-    }
-    *pc = run->clo_start[loc];
-    *frm = dst;
-    *cur = dst + cap;
-    *fidx = UINT32_MAX;
-    return 1;
-  }
-  fo_fail_because(run, "apply-value", 0);
-  return 0;
-}
-
 fn FoTerm fo_run(FoRun *run) {
   FoTerm *vals = run->vals;
   FoTerm *terms = run->terms;
@@ -7371,11 +7270,24 @@ fn FoTerm fo_run(FoRun *run) {
         break;
       }
       case FO_CALL: {
-        if (csp >= FO_CALL_CAP || !fo_call_enter(run, op, vals, &vsp, terms, &tsp, &term)) {
-          if (csp >= FO_CALL_CAP) {
-            fo_fail_because(run, "call-stack", 0);
-          }
+        if (op->ari == 0 || vsp < op->ari || op->ext >= run->fn_count) {
+          fo_fail_because(run, "call-enter", op->op);
           return 0;
+        }
+        if (csp >= FO_CALL_CAP) {
+          fo_fail_because(run, "call-stack", 0);
+          return 0;
+        }
+        if (op->ari == 1) {
+          term = vals[--vsp];
+        } else {
+          for (u32 i = op->ari; i > 1; i--) {
+            FoTerm arg = vals[--vsp];
+            if (!fo_stack_push(run, terms, &tsp, arg)) {
+              return 0;
+            }
+          }
+          term = vals[--vsp];
         }
         have_term = 1;
         calls[csp++] = (FoFrame){pc, frm, cur, fidx};
@@ -7386,8 +7298,20 @@ fn FoTerm fo_run(FoRun *run) {
       }
       case FO_TAIL: {
         tsp = 0;
-        if (!fo_call_enter(run, op, vals, &vsp, terms, &tsp, &term)) {
+        if (op->ari == 0 || vsp < op->ari || op->ext >= run->fn_count) {
+          fo_fail_because(run, "call-enter", op->op);
           return 0;
+        }
+        if (op->ari == 1) {
+          term = vals[--vsp];
+        } else {
+          for (u32 i = op->ari; i > 1; i--) {
+            FoTerm arg = vals[--vsp];
+            if (!fo_stack_push(run, terms, &tsp, arg)) {
+              return 0;
+            }
+          }
+          term = vals[--vsp];
         }
         have_term = 1;
         fidx = op->ext;
@@ -7641,6 +7565,31 @@ fn FoTerm fo_run(FoRun *run) {
         term = 0;
         have_term = 0;
         pc = op->aux;
+        break;
+      }
+      case FO_NUM_SWITCH: {
+        if (!have_term) {
+          term = fo_stack_pop(run, terms, &tsp);
+          if (run->failed) {
+            return 0;
+          }
+          have_term = 1;
+        }
+        if (!fo_is_num(term)) {
+          break;
+        }
+        u32 val = fo_num_val(term);
+        if (val == 0) {
+          run->itrs++;
+          term = 0;
+          have_term = 0;
+          pc = op->ext;
+        } else if (val == 1) {
+          run->itrs++;
+          term = 0;
+          have_term = 0;
+          pc = op->aux;
+        }
         break;
       }
       case FO_END: {
