@@ -54,6 +54,8 @@ enum {
   V_NUM,
   V_CTR,
   V_LAM,
+  V_ELAM,
+  V_SLAM,
   V_MAT,
   V_SUP,
   V_VAR,
@@ -75,6 +77,8 @@ enum {
   BC_NUM,
   BC_CTR,
   BC_LAM,
+  BC_ELAM,
+  BC_SLAM,
   BC_MAT,
   BC_DUP,
   BC_SUP,
@@ -223,6 +227,7 @@ static ValBlock *VAL_BLOCK = NULL;
 static ItemBlock *ITEM_BLOCK = NULL;
 static CodeBlock *CODE_BLOCK = NULL;
 static LamDupBlock *LAMDUP_BLOCK = NULL;
+static Val *VAL_FREE = NULL;
 static Val NUM_CACHE[2] = {
   {.tag = V_NUM, .ext = 0, .arity = 0, .env = NULL, .code = NULL},
   {.tag = V_NUM, .ext = 1, .arity = 0, .env = NULL, .code = NULL},
@@ -269,17 +274,42 @@ static Term *term_new(u8 tag) {
 }
 
 ALWAYS_INLINE Val *val_new(u8 tag) {
-  if (VAL_BLOCK == NULL || VAL_BLOCK->used >= 65536) {
+  Val *v;
+  if (VAL_FREE != NULL) {
+    v = VAL_FREE;
+    VAL_FREE = VAL_FREE->fst;
+  } else if (VAL_BLOCK == NULL || VAL_BLOCK->used >= 65536) {
     ValBlock *block = (ValBlock*)malloc(sizeof(ValBlock));
     if (!block) die("out of memory");
     block->next = VAL_BLOCK;
     block->used = 0;
     VAL_BLOCK = block;
+    v = &VAL_BLOCK->item[VAL_BLOCK->used++];
+  } else {
+    v = &VAL_BLOCK->item[VAL_BLOCK->used++];
   }
-  Val *v = &VAL_BLOCK->item[VAL_BLOCK->used++];
   v->tag = tag;
   ALLOCS++;
   return v;
+}
+
+ALWAYS_INLINE void val_free(Val *v) {
+  v->fst = VAL_FREE;
+  VAL_FREE = v;
+  ALLOCS--;
+}
+
+ALWAYS_INLINE void val_free_ctr(Val *v) {
+  if (v->tag == V_CTR && v->pad == 0) val_free(v);
+}
+
+ALWAYS_INLINE Val *share_value(Val *v) {
+  if (v->tag == V_CTR) v->pad = 1;
+  return v;
+}
+
+ALWAYS_INLINE int is_lam(Val *v) {
+  return v->tag == V_LAM || v->tag == V_ELAM || v->tag == V_SLAM;
 }
 
 static Code *code_new(u8 op) {
@@ -603,6 +633,7 @@ static Term *parse_lam(Parser *p) {
       lam->kid[0] = parse_term(p);
     }
   }
+  lam->arity = BINDS[BIND_LEN - 1].uses;
   if (BINDS[BIND_LEN - 1].uses == 0) {
     lam->aux = 1;
   }
@@ -775,6 +806,7 @@ static Code *compile_app(Term *term);
 static u8 compile_ctr_field_kind(Code *code);
 static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc);
 ALWAYS_INLINE Val *force(Val *v);
+ALWAYS_INLINE Val *mk_lam_tag(u8 tag, Code *code, Env *env, u32 gap);
 static inline Val *mk_lam(Code *code, Env *env, u32 gap);
 static inline Val *mk_mat(Code *code, Env *env, u32 gap);
 static void link_refs_code(Code *code, u32 depth);
@@ -822,8 +854,9 @@ static Code *compile_term(Term *term) {
       }
       break;
     case T_LAM:
-      c = code_new(BC_LAM);
+      c = code_new(term->aux ? BC_ELAM : term->arity > 1 ? BC_SLAM : BC_LAM);
       c->aux = term->aux;
+      c->arity = term->arity;
       c->sub = compile_term(term->kid[0]);
       break;
     case T_MAT:
@@ -908,13 +941,13 @@ static void compile_program_terms(void) {
     if (DEFS[i]) link_refs_code(DEFS[i]->code, 0);
   }
   for (u32 i = 0; i < NAME_LEN; i++) {
-    if (DEFS[i] && (DEFS[i]->code->op == BC_LAM || DEFS[i]->code->op == BC_MAT)) {
-      REF_CACHE[i] = DEFS[i]->code->op == BC_LAM
-        ? mk_lam(DEFS[i]->code->sub, NULL, 0)
-        : mk_mat(DEFS[i]->code, NULL, 0);
-      if (DEFS[i]->code->op == BC_LAM) {
-        REF_CACHE[i]->arity = DEFS[i]->code->aux;
-      }
+    if (!DEFS[i]) continue;
+    u8 op = DEFS[i]->code->op;
+    if (op == BC_MAT) {
+      REF_CACHE[i] = mk_mat(DEFS[i]->code, NULL, 0);
+    } else if (op == BC_LAM || op == BC_ELAM || op == BC_SLAM) {
+      u8 tag = op == BC_ELAM ? V_ELAM : op == BC_SLAM ? V_SLAM : V_LAM;
+      REF_CACHE[i] = mk_lam_tag(tag, DEFS[i]->code->sub, NULL, 0);
     }
   }
 }
@@ -939,6 +972,8 @@ static void link_refs_code(Code *code, u32 depth) {
       }
       return;
     case BC_LAM:
+    case BC_ELAM:
+    case BC_SLAM:
       link_refs_code(code->sub, depth + 1);
       return;
     case BC_MAT:
@@ -982,6 +1017,8 @@ static void thread_code(Code *code, void **dispatch, u32 depth) {
       }
       return;
     case BC_LAM:
+    case BC_ELAM:
+    case BC_SLAM:
       thread_code(code->sub, dispatch, depth + 1);
       return;
     case BC_MAT:
@@ -1026,6 +1063,8 @@ static int code_has_sup_label(Code *code, u32 lab, u32 depth) {
       }
       break;
     case BC_LAM:
+    case BC_ELAM:
+    case BC_SLAM:
       has = code_has_sup_label(code->sub, lab, depth + 1);
       break;
     case BC_MAT:
@@ -1077,13 +1116,18 @@ ALWAYS_INLINE Val *mk_num(u32 n) {
   return v;
 }
 
-ALWAYS_INLINE Val *mk_lam(Code *code, Env *env, u32 gap) {
-  Val *v = val_new(V_LAM);
+ALWAYS_INLINE Val *mk_lam_tag(u8 tag, Code *code, Env *env, u32 gap) {
+  Val *v = val_new(tag);
   v->code = code;
   v->env = env;
   v->ext = gap;
   v->arity = 0;
+  v->pad = 0;
   return v;
+}
+
+ALWAYS_INLINE Val *mk_lam(Code *code, Env *env, u32 gap) {
+  return mk_lam_tag(V_LAM, code, env, gap);
 }
 
 ALWAYS_INLINE Val *mk_mat(Code *code, Env *env, u32 gap) {
@@ -1157,6 +1201,8 @@ ALWAYS_INLINE Val *force_fun_arg(Val *v) {
     case BC_DP0:
     case BC_DP1:
     case BC_LAM:
+    case BC_ELAM:
+    case BC_SLAM:
     case BC_MAT:
       return force(v);
     case BC_REF:
@@ -1215,6 +1261,7 @@ ALWAYS_INLINE Val *project(Val *v, u32 lab, u8 side) {
     Val *ctr = val_new(V_CTR);
     ctr->ext = v->ext;
     ctr->arity = v->arity;
+    ctr->pad = 0;
     if (v->arity == 2) {
       ctr->fst = project(v->fst, lab, side);
       ctr->snd = project(v->snd, lab, side);
@@ -1236,7 +1283,7 @@ ALWAYS_INLINE Val *project(Val *v, u32 lab, u8 side) {
     ITRS++;
     return mk_plam(v, lab, side);
   }
-  if (v->tag == V_LAM) {
+  if (is_lam(v)) {
     if (v->code->sup_lab == lab) {
       if (!v->code->sup_has) return v;
       ITRS++;
@@ -1376,6 +1423,8 @@ static Val *apply_default(Code *dft, Env *env, u32 gap, Val *arg) {
   Val *fun = eval_code(dft, env, gap, none, 0);
   switch (fun->tag) {
     case V_LAM:
+    case V_ELAM:
+    case V_SLAM:
     case V_MAT:
     case V_SUP:
     case V_VAR:
@@ -1392,8 +1441,11 @@ static inline Val *apply_lam(Val *lam, Arg *arg) {
   ITRS++;
   Env *env = lam->env;
   u32 gap = lam->ext;
-  if (lam->arity) {
+  if (lam->tag == V_ELAM) {
     gap++;
+  } else if (lam->tag == V_SLAM) {
+    env = env_push(share_value(bind_arg(arg)), env, gap + 1);
+    gap = 0;
   } else {
     env = env_push(bind_arg(arg), env, gap + 1);
     gap = 0;
@@ -1412,13 +1464,13 @@ static Val *apply_plam(Val *plam, Arg *arg) {
     lam = dup->lam;
   }
   lam = force(lam);
-  if (lam->tag != V_LAM) die("projected non-lambda");
+  if (!is_lam(lam)) die("projected non-lambda");
   Env *env = lam->env;
   u32 gap = lam->ext;
-  if (lam->arity) {
+  if (lam->tag == V_ELAM) {
     gap++;
   } else {
-    Val *got = bind_arg(arg);
+    Val *got = lam->tag == V_SLAM ? share_value(bind_arg(arg)) : bind_arg(arg);
     Val *var = dup ? dup->box[1 - plam->arity] : mk_var(0);
     if (dup) dup->box[plam->arity]->fst = got;
     Val *sup = plam->arity == 0 ? mk_sup(plam->ext, got, var) : mk_sup(plam->ext, var, got);
@@ -1445,6 +1497,7 @@ static inline Val *apply_mat(Code *mat, Env *env, u32 gap, Val *arg) {
   u32 argc = 0;
   if (arg->tag == V_CTR) {
     push_ctr_val_args(arg, args, &argc);
+    val_free_ctr(arg);
   }
   return eval_code(body, env, gap, args, argc);
 }
@@ -1453,6 +1506,8 @@ static Val *apply_fun(Val *fun, Arg *arg) {
   fun = force(fun);
   switch (fun->tag) {
     case V_LAM:
+    case V_ELAM:
+    case V_SLAM:
       return apply_lam(fun, arg);
     case V_MAT: {
       Env *arg_env;
@@ -1513,7 +1568,7 @@ static __attribute__((noinline)) Val *apply_sup(Val *sup, Arg *arg) {
     Val *snd = eval_code(sup->snd->code, sup->snd->env, sup->snd->ext, one, 1);
     return mk_sup(sup->ext, fst, snd);
   }
-  if (sup->fst->tag == V_LAM && sup->snd->tag == V_LAM) {
+  if (is_lam(sup->fst) && is_lam(sup->snd)) {
     if (arg->val == NULL) *arg = arg_val(mk_thunk(arg->code, arg->env, arg->gap));
     Val *fst = apply_lam(sup->fst, arg);
     Val *snd = apply_lam(sup->snd, arg);
@@ -1534,6 +1589,7 @@ ALWAYS_INLINE Val *make_ctr(Code *pc, Env *env, u32 gap) {
   Val *val = val_new(V_CTR);
   val->ext = pc->ext;
   val->arity = pc->arity;
+  val->pad = 0;
   if (val->arity == 2) {
     val->fst = make_atom_field(pc->sub, env, gap, pc->aux & 3);
     val->snd = make_atom_field(pc->next, env, gap, pc->aux >> 2);
@@ -1558,7 +1614,7 @@ ALWAYS_INLINE Val *make_field(Code *kid, Env *env, u32 gap) {
 static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc) {
   static void *dispatch[] = {
     &&do_arg, &&do_args, &&do_var, &&do_dp0, &&do_dp1, &&do_ref, &&do_num,
-    &&do_ctr, &&do_lam, &&do_mat, &&do_dup, &&do_sup, &&do_era
+    &&do_ctr, &&do_lam, &&do_elam, &&do_slam, &&do_mat, &&do_dup, &&do_sup, &&do_era
   };
   static int threaded = 0;
   if (!threaded) {
@@ -1609,7 +1665,7 @@ do_dp0:
 do_dp1: {
     Env *e = env_at(env, pc->ext, gap);
     val = e->val;
-    if (val->tag != V_LAM || val->code->sup_lab != pc->arity || val->code->sup_has) {
+    if (!is_lam(val) || val->code->sup_lab != pc->arity || val->code->sup_has) {
       val = project(val, pc->arity, pc->op == BC_DP0 ? 0 : 1);
     }
     goto apply_value;
@@ -1626,18 +1682,40 @@ do_ctr:
 do_lam:
   if (argc == 0) {
     val = mk_lam(pc->sub, env, gap);
-    val->arity = pc->aux;
     goto apply_ready;
   }
   ITRS++;
   {
     Arg *arg = &args[--argc];
-    if (pc->aux) {
-      gap++;
-    } else {
-      env = env_push(bind_arg(arg), env, gap + 1);
-      gap = 0;
-    }
+    env = env_push(bind_arg(arg), env, gap + 1);
+    gap = 0;
+    pc = pc->sub;
+    goto *pc->jump;
+  }
+
+do_elam:
+  if (argc == 0) {
+    val = mk_lam_tag(V_ELAM, pc->sub, env, gap);
+    goto apply_ready;
+  }
+  ITRS++;
+  {
+    argc--;
+    gap++;
+    pc = pc->sub;
+    goto *pc->jump;
+  }
+
+do_slam:
+  if (argc == 0) {
+    val = mk_lam_tag(V_SLAM, pc->sub, env, gap);
+    goto apply_ready;
+  }
+  ITRS++;
+  {
+    Arg *arg = &args[--argc];
+    env = env_push(share_value(bind_arg(arg)), env, gap + 1);
+    gap = 0;
     pc = pc->sub;
     goto *pc->jump;
   }
@@ -1679,6 +1757,7 @@ do_mat:
     }
     if (arg->tag == V_CTR) {
       push_ctr_val_args(arg, args, &argc);
+      val_free_ctr(arg);
     }
     pc = body;
     goto *pc->jump;
@@ -1688,7 +1767,7 @@ do_dup:
   ITRS++;
   {
     Val *v = force(mk_thunk(pc->sub, env, gap));
-    if (v->tag == V_LAM && code_has_sup_label(v->code, pc->ext, 0)) v = mk_dlam(v, pc->ext);
+    if (is_lam(v) && code_has_sup_label(v->code, pc->ext, 0)) v = mk_dlam(v, pc->ext);
     env = env_push(v, env, gap + 1);
     gap = 0;
     pc = pc->next;
@@ -1713,12 +1792,26 @@ apply_ready:
       Arg *arg = &args[--argc];
       env = val->env;
       gap = val->ext;
-      if (val->arity) {
-        gap++;
-      } else {
-        env = env_push(bind_arg(arg), env, gap + 1);
-        gap = 0;
-      }
+      env = env_push(bind_arg(arg), env, gap + 1);
+      gap = 0;
+      pc = val->code;
+      goto *pc->jump;
+    }
+    case V_ELAM: {
+      ITRS++;
+      argc--;
+      env = val->env;
+      gap = val->ext + 1;
+      pc = val->code;
+      goto *pc->jump;
+    }
+    case V_SLAM: {
+      ITRS++;
+      Arg *arg = &args[--argc];
+      env = val->env;
+      gap = val->ext;
+      env = env_push(share_value(bind_arg(arg)), env, gap + 1);
+      gap = 0;
       pc = val->code;
       goto *pc->jump;
     }
@@ -1756,6 +1849,7 @@ apply_ready:
       }
       if (arg->tag == V_CTR) {
         push_ctr_val_args(arg, args, &argc);
+        val_free_ctr(arg);
       }
       env = val->env;
       gap = val->ext;
@@ -1800,6 +1894,10 @@ ALWAYS_INLINE Val *force(Val *v) {
     Val *res = eval_code(v->code, v->env, v->ext, args, 0);
     if (tag == V_LTHUNK && res != v) {
       *v = *res;
+      if (v->tag == V_CTR) {
+        v->pad = 1;
+        val_free_ctr(res);
+      }
     } else {
       v = res;
     }
@@ -1885,14 +1983,16 @@ static void print_val_at(Val *v, u32 depth) {
       }
       putchar('}');
       return;
-    case V_LAM: {
+    case V_LAM:
+    case V_ELAM:
+    case V_SLAM: {
       putchar('\xCE');
       putchar('\xBB');
       print_var_name(depth);
       putchar('.');
       Env *env = v->env;
       u32 gap = v->ext;
-      if (v->arity) {
+      if (v->tag == V_ELAM) {
         gap++;
       } else {
         env = env_push(mk_var(depth), env, gap + 1);
