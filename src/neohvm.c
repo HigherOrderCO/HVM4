@@ -74,6 +74,7 @@ enum {
   BC_DP0,
   BC_DP1,
   BC_REF,
+  BC_CALL_REF,
   BC_NUM,
   BC_CTR,
   BC_LAM,
@@ -817,7 +818,8 @@ static void parse_program(char *src) {
 }
 
 static Code *compile_term(Term *term);
-static Code *compile_app(Term *term);
+static Code *compile_term_ctx(Term *term, int tail);
+static Code *compile_app(Term *term, int tail);
 static u8 compile_ctr_field_kind(Code *code);
 static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc);
 ALWAYS_INLINE Val *force(Val *v);
@@ -828,11 +830,15 @@ static void link_refs_code(Code *code, u32 depth);
 static void thread_code(Code *code, void **dispatch, u32 depth);
 
 static Code *compile_term(Term *term) {
+  return compile_term_ctx(term, 0);
+}
+
+static Code *compile_term_ctx(Term *term, int tail) {
   if (term->code) return term->code;
   Code *c = NULL;
   switch (term->tag) {
     case T_APP:
-      c = compile_app(term);
+      c = compile_app(term, tail);
       break;
     case T_VAR:
       c = code_new(BC_VAR);
@@ -861,9 +867,9 @@ static Code *compile_term(Term *term) {
       c->ext = term->ext;
       c->arity = term->arity;
       c->term = term;
-      if (term->arity > 0) c->sub = compile_term(term->kid[0]);
-      if (term->arity > 1) c->next = compile_term(term->kid[1]);
-      for (u32 i = 2; i < term->arity; i++) compile_term(term->kid[i]);
+      if (term->arity > 0) c->sub = compile_term_ctx(term->kid[0], 0);
+      if (term->arity > 1) c->next = compile_term_ctx(term->kid[1], 0);
+      for (u32 i = 2; i < term->arity; i++) compile_term_ctx(term->kid[i], 0);
       if (term->arity == 2) {
         c->aux = compile_ctr_field_kind(c->sub) | (compile_ctr_field_kind(c->next) << 2);
       }
@@ -872,7 +878,7 @@ static Code *compile_term(Term *term) {
       c = code_new(term->aux ? BC_ELAM : term->arity > 1 ? BC_SLAM : BC_LAM);
       c->aux = term->aux;
       c->arity = term->arity;
-      c->sub = compile_term(term->kid[0]);
+      c->sub = compile_term_ctx(term->kid[0], 1);
       break;
     case T_MAT:
       c = code_new(BC_MAT);
@@ -880,7 +886,7 @@ static Code *compile_term(Term *term) {
       c->cases = cases_new(term);
       Term *m = term;
       for (; m && m->tag == T_MAT; m = m->kid[1]) {
-        compile_term(m->kid[0]);
+        compile_term_ctx(m->kid[0], 1);
         if (m->aux == M_NUM && m->ext == 0) {
           c->cases->num0 = m->kid[0]->code;
         } else if (m->aux == M_NUM && m->ext == 1) {
@@ -891,21 +897,21 @@ static Code *compile_term(Term *term) {
         }
       }
       if (m != NULL) {
-        c->cases->dft = compile_term(m);
+        c->cases->dft = compile_term_ctx(m, 1);
       }
       break;
     case T_DUP:
       c = code_new(BC_DUP);
       c->ext = term->ext;
-      c->sub = compile_term(term->kid[0]);
-      c->next = compile_term(term->kid[1]);
+      c->sub = compile_term_ctx(term->kid[0], 0);
+      c->next = compile_term_ctx(term->kid[1], 1);
       break;
     case T_SUP:
       c = code_new(BC_SUP);
       c->ext = term->ext;
       c->term = term;
-      compile_term(term->kid[0]);
-      compile_term(term->kid[1]);
+      compile_term_ctx(term->kid[0], 0);
+      compile_term_ctx(term->kid[1], 0);
       break;
     case T_ERA:
       c = code_new(BC_ERA);
@@ -923,7 +929,7 @@ static u8 compile_ctr_field_kind(Code *code) {
   return CK_NONE;
 }
 
-static Code *compile_app(Term *term) {
+static Code *compile_app(Term *term, int tail) {
   Term *args[MAX_ARGS];
   u32 argc = 0;
   Term *fun = term;
@@ -932,9 +938,21 @@ static Code *compile_app(Term *term) {
     fun = fun->kid[0];
   }
   if (argc == 1) {
+    if (fun->tag == T_REF) {
+      if (!tail) {
+        Code *c = code_new(BC_ARG);
+        c->sub = compile_term_ctx(args[0], 0);
+        c->next = compile_term_ctx(fun, 0);
+        return c;
+      }
+      Code *c = code_new(BC_CALL_REF);
+      c->ext = fun->ext;
+      c->sub = compile_term_ctx(args[0], 0);
+      return c;
+    }
     Code *c = code_new(BC_ARG);
-    c->sub = compile_term(args[0]);
-    c->next = compile_term(fun);
+    c->sub = compile_term_ctx(args[0], 0);
+    c->next = compile_term_ctx(fun, 0);
     return c;
   }
   Code *c = code_new(BC_ARGS);
@@ -942,15 +960,15 @@ static Code *compile_app(Term *term) {
   c->term = term_new(T_APP);
   for (u32 i = 0; i < argc; i++) {
     c->term->kid[i] = args[i];
-    compile_term(args[i]);
+    compile_term_ctx(args[i], 0);
   }
-  c->next = compile_term(fun);
+  c->next = compile_term_ctx(fun, 0);
   return c;
 }
 
 static void compile_program_terms(void) {
   for (u32 i = 0; i < NAME_LEN; i++) {
-    if (DEFS[i]) compile_term(DEFS[i]);
+    if (DEFS[i]) compile_term_ctx(DEFS[i], 1);
   }
   for (u32 i = 0; i < NAME_LEN; i++) {
     if (DEFS[i]) link_refs_code(DEFS[i]->code, 0);
@@ -1002,6 +1020,10 @@ static void link_refs_code(Code *code, u32 depth) {
     case BC_REF:
       code->sub = code->ext < MAX_NAMES && DEFS[code->ext] != NULL ? DEFS[code->ext]->code : NULL;
       return;
+    case BC_CALL_REF:
+      link_refs_code(code->sub, depth + 1);
+      code->next = code->ext < MAX_NAMES && DEFS[code->ext] != NULL ? DEFS[code->ext]->code : NULL;
+      return;
     case BC_SUP:
       link_refs_code(code->term->kid[0]->code, depth + 1);
       link_refs_code(code->term->kid[1]->code, depth + 1);
@@ -1023,6 +1045,10 @@ static void thread_code(Code *code, void **dispatch, u32 depth) {
       return;
     case BC_ARG:
     case BC_DUP:
+      thread_code(code->sub, dispatch, depth + 1);
+      thread_code(code->next, dispatch, depth + 1);
+      return;
+    case BC_CALL_REF:
       thread_code(code->sub, dispatch, depth + 1);
       thread_code(code->next, dispatch, depth + 1);
       return;
@@ -1094,6 +1120,12 @@ static int code_has_sup_label(Code *code, u32 lab, u32 depth) {
       has = code->ext < MAX_NAMES && DEFS[code->ext] != NULL
         ? code_has_sup_label(DEFS[code->ext]->code, lab, depth + 1)
         : 0;
+      break;
+    case BC_CALL_REF:
+      has = code_has_sup_label(code->sub, lab, depth + 1)
+         || (code->ext < MAX_NAMES && DEFS[code->ext] != NULL
+          ? code_has_sup_label(DEFS[code->ext]->code, lab, depth + 1)
+          : 0);
       break;
     case BC_SUP:
       has = code->ext == lab
@@ -1221,6 +1253,7 @@ ALWAYS_INLINE Val *force_fun_arg(Val *v) {
     case BC_MAT:
       return force(v);
     case BC_REF:
+    case BC_CALL_REF:
     case BC_ARG:
     case BC_ARGS:
     case BC_DUP:
@@ -1641,7 +1674,7 @@ ALWAYS_INLINE Val *make_field(Code *kid, Env *env, u32 gap) {
 
 static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc) {
   static void *dispatch[] = {
-    &&do_arg, &&do_args, &&do_var, &&do_dp0, &&do_dp1, &&do_ref, &&do_num,
+    &&do_arg, &&do_args, &&do_var, &&do_dp0, &&do_dp1, &&do_ref, &&do_call_ref, &&do_num,
     &&do_ctr, &&do_lam, &&do_elam, &&do_slam, &&do_mat, &&do_dup, &&do_sup, &&do_era
   };
   static int threaded = 0;
@@ -1675,6 +1708,15 @@ do_ref:
     goto apply_ready;
   }
   pc = pc->sub;
+  env = NULL;
+  gap = 0;
+  goto *pc->jump;
+
+do_call_ref:
+  if (pc->next == NULL) die("unknown reference");
+  if (argc >= MAX_ARGS) die("argument stack overflow");
+  args[argc++] = arg_code(pc->sub, env, gap);
+  pc = pc->next;
   env = NULL;
   gap = 0;
   goto *pc->jump;
