@@ -220,7 +220,6 @@ static Val  *REF_CACHE[MAX_NAMES];
 static Bind  BINDS[MAX_BIND];
 static u32   BIND_LEN = 0;
 static u64   ITRS = 0;
-static u64   ALLOCS = 0;
 static u32   FRESH_LAB = 0;
 static int   READBACK = 0;
 static EnvBlock *ENV_BLOCK = NULL;
@@ -290,14 +289,23 @@ ALWAYS_INLINE Val *val_new(u8 tag) {
     v = &VAL_BLOCK->item[VAL_BLOCK->used++];
   }
   v->tag = tag;
-  ALLOCS++;
   return v;
 }
 
 ALWAYS_INLINE void val_free(Val *v) {
   v->fst = VAL_FREE;
   VAL_FREE = v;
-  ALLOCS--;
+}
+
+static u64 val_live_count(void) {
+  u64 live = 0;
+  for (ValBlock *block = VAL_BLOCK; block != NULL; block = block->next) {
+    live += block->used;
+  }
+  for (Val *v = VAL_FREE; v != NULL; v = v->fst) {
+    live--;
+  }
+  return live;
 }
 
 ALWAYS_INLINE Val *share_value(Val *v);
@@ -2315,7 +2323,7 @@ int main(int argc, char **argv) {
   }
   if (stats) {
     fprintf(stderr, "- Itrs: %llu interactions\n", (unsigned long long)ITRS);
-    fprintf(stderr, "- Heap: %llu nodes\n", (unsigned long long)ALLOCS);
+    fprintf(stderr, "- Heap: %llu nodes\n", (unsigned long long)val_live_count());
     fprintf(stderr, "- Time: %.3f seconds\n", elapsed);
     fprintf(stderr, "- Perf: %.2f M interactions/s\n", elapsed > 0 ? (double)ITRS / elapsed / 1000000.0 : 0.0);
   }
