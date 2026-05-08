@@ -6487,6 +6487,7 @@ fn void fast_run_free(FastRun *run) {
 #define FO_END 10
 #define FO_DUP 11
 #define FO_OP2 12
+#define FO_ENTER 13
 
 typedef u64 FoTerm;
 
@@ -6516,6 +6517,7 @@ typedef struct {
   FoBind data[FO_BIND_CAP];
   u32    len;
   u32    slots;
+  u32    level;
 } FoScope;
 
 typedef struct {
@@ -6667,6 +6669,18 @@ fn int fo_scope_find(FoRun *run, FoScope *scope, u8 tag, u32 ext, u32 lvl, u32 *
       return 1;
     }
   }
+  if (getenv("HVM_FO_TRACE") != NULL) {
+    fprintf(stderr, "[fo] scope miss tag=%u ext=%u lvl=%u slots=%u binds=%u\n",
+      tag, ext, lvl, scope->slots, scope->len);
+    for (u32 i = 0; i < scope->len; i++) {
+      fprintf(stderr, "[fo]   bind[%u] tag=%u ext=%u lvl=%u idx=%u\n",
+        i,
+        scope->data[i].tag,
+        scope->data[i].ext,
+        scope->data[i].lvl,
+        scope->data[i].idx);
+    }
+  }
   fo_fail_because(run, tag == BJV ? "scope-bjv" : "scope-bj", lvl);
   return 0;
 }
@@ -6712,15 +6726,17 @@ fn void fo_find_dup_levels(Term body, u32 lab, u32 fallback, u32 *lvl0, u32 *lvl
   }
 }
 
-fn int fo_collect_app(Term term, u64 *args, u32 *argc, Term *fun) {
+fn int fo_collect_app(u64 loc, u64 *args, u32 *argc, Term *fun, u64 *fun_loc) {
   *argc = 0;
+  Term term = heap_read(loc);
   while (term_tag(term) == APP) {
     if (*argc >= 16) {
       return 0;
     }
     u64 loc = term_val(term);
     args[(*argc)++] = loc + 1;
-    term = heap_read(loc + 0);
+    *fun_loc = loc + 0;
+    term = heap_read(*fun_loc);
   }
   *fun = term;
   return 1;
@@ -6786,13 +6802,9 @@ fn int fo_compile_expr(FoRun *run, u64 loc, FoScope scope, int tail) {
       u64 args[16];
       u32 argc = 0;
       Term fun = 0;
-      if (!fo_collect_app(term, args, &argc, &fun) || term_tag(fun) != REF || argc == 0) {
+      u64 fun_loc = 0;
+      if (!fo_collect_app(loc, args, &argc, &fun, &fun_loc) || argc == 0) {
         fo_fail_because(run, "app", term_tag(fun));
-        return 0;
-      }
-      u32 nam = term_ext(fun);
-      if (nam >= run->table_len || run->fn_of_name[nam] < 0) {
-        fo_fail_because(run, "call-target", term_tag(fun));
         return 0;
       }
       for (u32 i = argc; i > 0; i--) {
@@ -6800,11 +6812,21 @@ fn int fo_compile_expr(FoRun *run, u64 loc, FoScope scope, int tail) {
           return 0;
         }
       }
-      fo_emit(run, tail ? FO_TAIL : FO_CALL, 0, argc, (u32)run->fn_of_name[nam], 0, NULL);
-      if (!tail) {
+      if (term_tag(fun) == REF) {
+        u32 nam = term_ext(fun);
+        if (nam >= run->table_len || run->fn_of_name[nam] < 0) {
+          fo_fail_because(run, "call-target", term_tag(fun));
+          return 0;
+        }
+        fo_emit(run, tail ? FO_TAIL : FO_CALL, 0, argc, (u32)run->fn_of_name[nam], 0, NULL);
         return !run->failed;
       }
-      return !run->failed;
+      if (!tail || !fo_is_func_term(fun)) {
+        fo_fail_because(run, "app", term_tag(fun));
+        return !run->failed;
+      }
+      fo_emit(run, FO_ENTER, 0, argc, 0, 0, NULL);
+      return fo_compile_func(run, fun_loc, scope);
     }
     case OP2: {
       u64 op_loc = term_val(term);
@@ -6835,11 +6857,12 @@ fn int fo_compile_func(FoRun *run, u64 loc, FoScope scope) {
   switch (term_tag(term)) {
     case LAM: {
       u32 lam_ext = term_ext(term);
+      scope.level++;
       if (lam_ext & LAM_ERA_MASK) {
         fo_emit(run, FO_DEL, 0, 0, 0, 0, NULL);
       } else {
         fo_emit(run, FO_LAM, 0, 0, 0, 0, NULL);
-        if (!fo_scope_add(run, &scope, BJV, 0, lam_ext)) {
+        if (!fo_scope_add(run, &scope, BJV, 0, scope.level)) {
           return 0;
         }
       }
@@ -6851,11 +6874,19 @@ fn int fo_compile_func(FoRun *run, u64 loc, FoScope scope) {
       u32 lab = term_ext(term);
       u32 lvl0 = 0;
       u32 lvl1 = 0;
-      fo_find_dup_levels(heap_read(dup_loc + 1), lab, term_val(val), &lvl0, &lvl1);
+      u32 dup_level = scope.level + 1;
+      fo_find_dup_levels(heap_read(dup_loc + 1), lab, dup_level, &lvl0, &lvl1);
       if (!fo_compile_expr(run, dup_loc + 0, scope, 0)) {
         return 0;
       }
       fo_emit(run, FO_DUP, 0, 0, 0, 0, NULL);
+      scope.level = dup_level;
+      if (lvl0 > scope.level) {
+        scope.level = lvl0;
+      }
+      if (lvl1 > scope.level) {
+        scope.level = lvl1;
+      }
       if (!fo_scope_add(run, &scope, BJ0, lab, lvl0)) {
         return 0;
       }
@@ -7045,6 +7076,24 @@ fn FoTerm fo_run(FoRun *run) {
         fidx = op->ext;
         pc = run->fn_start[fidx];
         cur = frm;
+        break;
+      }
+      case FO_ENTER: {
+        if (op->ari == 0 || vsp < op->ari) {
+          fo_fail_because(run, "enter", op->ari);
+          return 0;
+        }
+        for (u32 i = op->ari; i > 1; i--) {
+          FoTerm arg = fo_stack_pop(run, vals, &vsp);
+          if (run->failed || !fo_stack_push(run, terms, &tsp, arg)) {
+            return 0;
+          }
+        }
+        term = fo_stack_pop(run, vals, &vsp);
+        if (run->failed) {
+          return 0;
+        }
+        have_term = 1;
         break;
       }
       case FO_LAM: {
