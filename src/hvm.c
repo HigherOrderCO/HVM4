@@ -6466,11 +6466,15 @@ fn void fast_run_free(FastRun *run) {
 // ------------------------------
 
 #define FO_NUM_BIT (1ULL << 63)
-#define FO_LOC_MASK (~FO_NUM_BIT)
+#define FO_FUN_BIT (1ULL << 62)
+#define FO_CLO_BIT (1ULL << 61)
+#define FO_LOC_MASK (FO_CLO_BIT - 1)
 #define FO_CODE_CAP (1U << 20)
 #define FO_STACK_CAP (1U << 20)
 #define FO_CTX_CAP (1U << 20)
 #define FO_NODE_CAP (1U << 24)
+#define FO_CLO_CAP (1U << 20)
+#define FO_CLO_CTX_CAP (1U << 22)
 #define FO_CALL_CAP 65536
 #define FO_BIND_CAP 256
 
@@ -6488,6 +6492,10 @@ fn void fast_run_free(FastRun *run) {
 #define FO_DUP 11
 #define FO_OP2 12
 #define FO_ENTER 13
+#define FO_FUN 14
+#define FO_CLO 15
+#define FO_APPLY 16
+#define FO_JUMP 17
 
 typedef u64 FoTerm;
 
@@ -6530,6 +6538,13 @@ typedef struct {
   u32     *node_next;
   FoTerm  *node_arg0;
   FoTerm  *node_arg1;
+  u32     *clo_start;
+  u32     *clo_cap;
+  u32     *clo_base;
+  u32     *clo_refs;
+  FoTerm  *clo_ctx;
+  u32      clo_len;
+  u32      clo_ctx_len;
   u32      node_len;
   u32      node_free;
   FoTerm  *vals;
@@ -6559,8 +6574,32 @@ fn int fo_is_num(FoTerm term) {
   return (term & FO_NUM_BIT) != 0;
 }
 
+fn int fo_is_fun(FoTerm term) {
+  return (term & FO_FUN_BIT) != 0;
+}
+
+fn int fo_is_clo(FoTerm term) {
+  return (term & FO_CLO_BIT) != 0;
+}
+
+fn FoTerm fo_fun(u32 fidx) {
+  return FO_FUN_BIT | fidx;
+}
+
+fn FoTerm fo_clo(u32 loc) {
+  return FO_CLO_BIT | loc;
+}
+
 fn u32 fo_num_val(FoTerm term) {
   return (u32)(term & UINT32_MAX);
+}
+
+fn u32 fo_fun_val(FoTerm term) {
+  return (u32)(term & FO_LOC_MASK);
+}
+
+fn u32 fo_clo_val(FoTerm term) {
+  return (u32)(term & FO_LOC_MASK);
 }
 
 fn void fo_fail(FoRun *run) {
@@ -6589,14 +6628,31 @@ fn int fo_is_func_term(Term term) {
   }
 }
 
+fn void fo_release(FoRun *run, FoTerm term);
+
 fn void fo_retain(FoRun *run, FoTerm term) {
-  if (!fo_is_num(term) && term != 0) {
+  if (fo_is_clo(term)) {
+    run->clo_refs[fo_clo_val(term)]++;
+  } else if (!fo_is_num(term) && !fo_is_fun(term) && term != 0) {
     run->node_refs[term]++;
   }
 }
 
 fn void fo_release(FoRun *run, FoTerm term) {
-  if (fo_is_num(term) || term == 0) {
+  if (fo_is_num(term) || fo_is_fun(term) || term == 0) {
+    return;
+  }
+  if (fo_is_clo(term)) {
+    u32 loc = fo_clo_val(term);
+    if (run->clo_refs[loc] > 0) {
+      run->clo_refs[loc]--;
+      return;
+    }
+    u32 base = run->clo_base[loc];
+    u32 cap = run->clo_cap[loc];
+    for (u32 i = 0; i < cap; i++) {
+      fo_release(run, run->clo_ctx[base + i]);
+    }
     return;
   }
   if (run->node_refs[term] > 0) {
@@ -6647,6 +6703,26 @@ fn FoTerm fo_ctr(FoRun *run, u8 tag, u32 ext, u32 ari, FoTerm *args) {
     }
   }
   return loc;
+}
+
+fn FoTerm fo_closure(FoRun *run, u32 start, u32 cap, FoTerm *ctx, u32 frm) {
+  if (run->clo_len + 1 >= FO_CLO_CAP || run->clo_ctx_len + cap >= FO_CLO_CTX_CAP) {
+    fo_fail_because(run, "closure-cap", cap);
+    return 0;
+  }
+  u32 loc = ++run->clo_len;
+  u32 base = run->clo_ctx_len;
+  run->clo_ctx_len += cap;
+  run->clo_start[loc] = start;
+  run->clo_cap[loc] = cap;
+  run->clo_base[loc] = base;
+  run->clo_refs[loc] = 0;
+  for (u32 i = 0; i < cap; i++) {
+    FoTerm val = ctx[frm + i];
+    run->clo_ctx[base + i] = val;
+    fo_retain(run, val);
+  }
+  return fo_clo(loc);
 }
 
 fn int fo_emit(FoRun *run, u8 op, u8 tag, u32 ari, u32 ext, u32 aux, u32 *pos) {
@@ -6793,10 +6869,31 @@ fn int fo_compile_expr(FoRun *run, u64 loc, FoScope scope, int tail) {
         return 0;
       }
       if (run->fn_of_name[nam] >= 0) {
-        fo_fail_because(run, "function-ref-expression", term_tag(term));
-        return 0;
+        fo_emit(run, FO_FUN, 0, 0, (u32)run->fn_of_name[nam], 0, NULL);
+        if (tail) {
+          fo_emit(run, FO_END, 0, 0, 0, 0, NULL);
+        }
+        return !run->failed;
       }
       return fo_compile_expr(run, BOOK[nam], scope, tail);
+    }
+    case LAM:
+    case MAT:
+    case SWI:
+    case DUP: {
+      if (tail) {
+        return fo_compile_func(run, loc, scope);
+      }
+      u32 clo_pos = 0;
+      u32 jump_pos = 0;
+      fo_emit(run, FO_CLO, 0, 0, scope.slots, 0, &clo_pos);
+      fo_emit(run, FO_JUMP, 0, 0, 0, 0, &jump_pos);
+      run->code[clo_pos].aux = run->code_len;
+      if (!fo_compile_func(run, loc, scope)) {
+        return 0;
+      }
+      run->code[jump_pos].aux = run->code_len;
+      return !run->failed;
     }
     case APP: {
       u64 args[16];
@@ -6819,6 +6916,13 @@ fn int fo_compile_expr(FoRun *run, u64 loc, FoScope scope, int tail) {
           return 0;
         }
         fo_emit(run, tail ? FO_TAIL : FO_CALL, 0, argc, (u32)run->fn_of_name[nam], 0, NULL);
+        return !run->failed;
+      }
+      if (term_tag(fun) == BJV || term_tag(fun) == BJ0 || term_tag(fun) == BJ1) {
+        if (!fo_compile_expr(run, fun_loc, scope, 0)) {
+          return 0;
+        }
+        fo_emit(run, FO_APPLY, tail ? 1 : 0, argc, 0, 0, NULL);
         return !run->failed;
       }
       if (!tail || !fo_is_func_term(fun)) {
@@ -6870,7 +6974,6 @@ fn int fo_compile_func(FoRun *run, u64 loc, FoScope scope) {
     }
     case DUP: {
       u64 dup_loc = term_val(term);
-      Term val = heap_read(dup_loc + 0);
       u32 lab = term_ext(term);
       u32 lvl0 = 0;
       u32 lvl1 = 0;
@@ -6986,6 +7089,81 @@ fn int fo_call_enter(FoRun *run, FoOp *op, FoTerm *vals, u32 *vsp, FoTerm *terms
   return !run->failed;
 }
 
+fn int fo_apply_enter(
+  FoRun *run,
+  FoTerm fun,
+  u32 argc,
+  int tail,
+  FoTerm *vals,
+  u32 *vsp,
+  FoTerm *terms,
+  u32 *tsp,
+  FoTerm *ctx,
+  FoFrame *calls,
+  u32 *csp,
+  u32 *pc,
+  u32 *frm,
+  u32 *cur,
+  u32 *fidx,
+  FoTerm *term
+) {
+  if (argc == 0 || *vsp < argc) {
+    fo_fail_because(run, "apply-args", argc);
+    return 0;
+  }
+  if (!tail) {
+    if (*csp >= FO_CALL_CAP) {
+      fo_fail_because(run, "call-stack", 0);
+      return 0;
+    }
+    calls[(*csp)++] = (FoFrame){*pc, *frm, *cur, *fidx};
+  }
+  for (u32 i = argc; i > 1; i--) {
+    FoTerm arg = fo_stack_pop(run, vals, vsp);
+    if (run->failed || !fo_stack_push(run, terms, tsp, arg)) {
+      return 0;
+    }
+  }
+  *term = fo_stack_pop(run, vals, vsp);
+  if (run->failed) {
+    return 0;
+  }
+  if (fo_is_fun(fun)) {
+    u32 fun_idx = fo_fun_val(fun);
+    if (fun_idx >= run->fn_count) {
+      fo_fail_because(run, "apply-fun", fun_idx);
+      return 0;
+    }
+    *fidx = fun_idx;
+    *pc = run->fn_start[fun_idx];
+    *frm = *cur;
+    return 1;
+  }
+  if (fo_is_clo(fun)) {
+    u32 loc = fo_clo_val(fun);
+    u32 cap = run->clo_cap[loc];
+    u32 base = run->clo_base[loc];
+    if (*cur + cap >= FO_CTX_CAP) {
+      fo_fail_because(run, "apply-ctx", cap);
+      return 0;
+    }
+    u32 dst = *cur;
+    for (u32 i = 0; i < cap; i++) {
+      FoTerm val = run->clo_ctx[base + i];
+      fo_retain(run, val);
+      ctx[dst + i] = val;
+    }
+    fo_release(run, fun);
+    *pc = run->clo_start[loc];
+    *frm = dst;
+    *cur = dst + cap;
+    *fidx = UINT32_MAX;
+    return 1;
+  }
+  fo_fail_because(run, "apply-value", 0);
+  return 0;
+}
+
 fn FoTerm fo_run(FoRun *run) {
   FoTerm *vals = run->vals;
   FoTerm *terms = run->terms;
@@ -7053,6 +7231,23 @@ fn FoTerm fo_run(FoRun *run) {
         }
         break;
       }
+      case FO_FUN: {
+        if (!fo_stack_push(run, vals, &vsp, fo_fun(op->ext))) {
+          return 0;
+        }
+        break;
+      }
+      case FO_CLO: {
+        FoTerm clo = fo_closure(run, op->aux, op->ext, ctx, frm);
+        if (run->failed || !fo_stack_push(run, vals, &vsp, clo)) {
+          return 0;
+        }
+        break;
+      }
+      case FO_JUMP: {
+        pc = op->aux;
+        break;
+      }
       case FO_CALL: {
         if (csp >= FO_CALL_CAP || !fo_call_enter(run, op, vals, &vsp, terms, &tsp, &term)) {
           if (csp >= FO_CALL_CAP) {
@@ -7091,6 +7286,21 @@ fn FoTerm fo_run(FoRun *run) {
         }
         term = fo_stack_pop(run, vals, &vsp);
         if (run->failed) {
+          return 0;
+        }
+        have_term = 1;
+        break;
+      }
+      case FO_APPLY: {
+        FoTerm fun = fo_stack_pop(run, vals, &vsp);
+        if (run->failed) {
+          return 0;
+        }
+        int tail = op->tag != 0;
+        if (tail) {
+          tsp = 0;
+        }
+        if (!fo_apply_enter(run, fun, op->ari, tail, vals, &vsp, terms, &tsp, ctx, calls, &csp, &pc, &frm, &cur, &fidx, &term)) {
           return 0;
         }
         have_term = 1;
@@ -7228,10 +7438,23 @@ fn FoTerm fo_run(FoRun *run) {
   return 0;
 }
 
+fn Term eval_normalize(Term term);
+
 fn int fo_reify(FoRun *run, FoTerm term, Term *out) {
   if (fo_is_num(term)) {
     *out = term_new_num(fo_num_val(term));
     return 1;
+  }
+  if (fo_is_fun(term)) {
+    u32 fidx = fo_fun_val(term);
+    if (fidx >= run->fn_count) {
+      return 0;
+    }
+    *out = eval_normalize(term_new_ref(run->fn_name[fidx]));
+    return 1;
+  }
+  if (fo_is_clo(term)) {
+    return 0;
   }
   if (term == 0) {
     return 0;
@@ -7259,6 +7482,11 @@ fn void fo_free(FoRun *run) {
   free(run->node_next);
   free(run->node_arg0);
   free(run->node_arg1);
+  free(run->clo_start);
+  free(run->clo_cap);
+  free(run->clo_base);
+  free(run->clo_refs);
+  free(run->clo_ctx);
   free(run->vals);
   free(run->terms);
   free(run->ctx);
@@ -7278,14 +7506,21 @@ fn int fo_eval_main(u32 main_id, Term *out, u64 *itrs) {
   run.node_next = (u32*)calloc(FO_NODE_CAP, sizeof(u32));
   run.node_arg0 = (FoTerm*)calloc(FO_NODE_CAP, sizeof(FoTerm));
   run.node_arg1 = (FoTerm*)calloc(FO_NODE_CAP, sizeof(FoTerm));
+  run.clo_start = (u32*)calloc(FO_CLO_CAP, sizeof(u32));
+  run.clo_cap = (u32*)calloc(FO_CLO_CAP, sizeof(u32));
+  run.clo_base = (u32*)calloc(FO_CLO_CAP, sizeof(u32));
+  run.clo_refs = (u32*)calloc(FO_CLO_CAP, sizeof(u32));
+  run.clo_ctx = (FoTerm*)calloc(FO_CLO_CTX_CAP, sizeof(FoTerm));
   run.vals = (FoTerm*)malloc(sizeof(FoTerm) * FO_STACK_CAP);
   run.terms = (FoTerm*)malloc(sizeof(FoTerm) * FO_STACK_CAP);
   run.ctx = (FoTerm*)calloc(FO_CTX_CAP, sizeof(FoTerm));
   run.calls = (FoFrame*)malloc(sizeof(FoFrame) * FO_CALL_CAP);
   if (run.code == NULL || run.node_tag == NULL || run.node_ari == NULL ||
       run.node_ext == NULL || run.node_refs == NULL || run.node_next == NULL ||
-      run.node_arg0 == NULL || run.node_arg1 == NULL || run.vals == NULL ||
-      run.terms == NULL || run.ctx == NULL || run.calls == NULL) {
+      run.node_arg0 == NULL || run.node_arg1 == NULL || run.clo_start == NULL ||
+      run.clo_cap == NULL || run.clo_base == NULL || run.clo_refs == NULL ||
+      run.clo_ctx == NULL || run.vals == NULL || run.terms == NULL ||
+      run.ctx == NULL || run.calls == NULL) {
     fo_free(&run);
     return 0;
   }
