@@ -6499,15 +6499,6 @@ typedef struct {
 } FoOp;
 
 typedef struct {
-  u8     tag;
-  u8     ari;
-  u32    ext;
-  u32    refs;
-  u32    next;
-  FoTerm arg[16];
-} FoNode;
-
-typedef struct {
   u32 pc;
   u32 frm;
   u32 cur;
@@ -6530,7 +6521,13 @@ typedef struct {
 typedef struct {
   FoOp    *code;
   u32      code_len;
-  FoNode  *node;
+  u8      *node_tag;
+  u8      *node_ari;
+  u32     *node_ext;
+  u32     *node_refs;
+  u32     *node_next;
+  FoTerm  *node_arg0;
+  FoTerm  *node_arg1;
   u32      node_len;
   u32      node_free;
   FoTerm  *vals;
@@ -6591,7 +6588,7 @@ fn int fo_is_func_term(Term term) {
 
 fn void fo_retain(FoRun *run, FoTerm term) {
   if (!fo_is_num(term) && term != 0) {
-    run->node[term].refs++;
+    run->node_refs[term]++;
   }
 }
 
@@ -6599,22 +6596,24 @@ fn void fo_release(FoRun *run, FoTerm term) {
   if (fo_is_num(term) || term == 0) {
     return;
   }
-  FoNode *node = &run->node[term];
-  if (node->refs > 0) {
-    node->refs--;
+  if (run->node_refs[term] > 0) {
+    run->node_refs[term]--;
     return;
   }
-  for (u32 i = 0; i < node->ari; i++) {
-    fo_release(run, node->arg[i]);
+  if (run->node_ari[term] > 0) {
+    fo_release(run, run->node_arg0[term]);
+    if (run->node_ari[term] > 1) {
+      fo_release(run, run->node_arg1[term]);
+    }
   }
-  node->next = run->node_free;
+  run->node_next[term] = run->node_free;
   run->node_free = (u32)term;
 }
 
 fn u32 fo_node_alloc(FoRun *run) {
   if (run->node_free != 0) {
     u32 loc = run->node_free;
-    run->node_free = run->node[loc].next;
+    run->node_free = run->node_next[loc];
     return loc;
   }
   if (run->node_len + 1 >= FO_NODE_CAP) {
@@ -6625,22 +6624,24 @@ fn u32 fo_node_alloc(FoRun *run) {
 }
 
 fn FoTerm fo_ctr(FoRun *run, u8 tag, u32 ext, u32 ari, FoTerm *args) {
-  if (ari > 16) {
-    fo_fail(run);
+  if (ari > 2) {
+    fo_fail_because(run, "wide-constructor", tag);
     return 0;
   }
   u32 loc = fo_node_alloc(run);
   if (run->failed) {
     return 0;
   }
-  FoNode *node = &run->node[loc];
-  node->tag = tag;
-  node->ari = ari;
-  node->ext = ext;
-  node->refs = 0;
-  node->next = 0;
-  for (u32 i = 0; i < ari; i++) {
-    node->arg[i] = args[i];
+  run->node_tag[loc] = tag;
+  run->node_ari[loc] = ari;
+  run->node_ext[loc] = ext;
+  run->node_refs[loc] = 0;
+  run->node_next[loc] = 0;
+  if (ari > 0) {
+    run->node_arg0[loc] = args[0];
+    if (ari > 1) {
+      run->node_arg1[loc] = args[1];
+    }
   }
   return loc;
 }
@@ -6739,6 +6740,10 @@ fn int fo_compile_expr(FoRun *run, u64 loc, FoScope scope, int tail) {
     }
     case C00 ... C16: {
       u32 ari = term_tag(term) - C00;
+      if (ari > 2) {
+        fo_fail_because(run, "wide-constructor", term_tag(term));
+        return 0;
+      }
       u64 ctr_loc = term_val(term);
       for (u32 i = 0; i < ari; i++) {
         if (!fo_compile_expr(run, ctr_loc + i, scope, 0)) {
@@ -7093,34 +7098,35 @@ fn FoTerm fo_run(FoRun *run) {
         if (fo_is_num(term)) {
           break;
         }
-        FoNode *node = &run->node[term];
-        if (node->ext != op->ext) {
+        if (run->node_ext[term] != op->ext) {
           break;
         }
         run->itrs++;
-        FoTerm fields[16];
-        for (u32 i = 0; i < node->ari; i++) {
-          fields[i] = node->arg[i];
-          if (node->refs > 0) {
-            fo_retain(run, fields[i]);
+        u32 ari = run->node_ari[term];
+        FoTerm field0 = run->node_arg0[term];
+        FoTerm field1 = run->node_arg1[term];
+        if (run->node_refs[term] > 0) {
+          if (ari > 0) {
+            fo_retain(run, field0);
+            if (ari > 1) {
+              fo_retain(run, field1);
+            }
           }
-        }
-        if (node->refs > 0) {
-          node->refs--;
+          run->node_refs[term]--;
         } else {
-          node->next = run->node_free;
+          run->node_next[term] = run->node_free;
           run->node_free = (u32)term;
         }
-        if (node->ari == 0) {
+        if (ari == 0) {
           term = 0;
           have_term = 0;
         } else {
-          for (u32 i = node->ari; i > 1; i--) {
-            if (!fo_stack_push(run, terms, &tsp, fields[i - 1])) {
+          if (ari > 1) {
+            if (!fo_stack_push(run, terms, &tsp, field1)) {
               return 0;
             }
           }
-          term = fields[0];
+          term = field0;
           have_term = 1;
         }
         pc = op->aux;
@@ -7178,20 +7184,29 @@ fn int fo_reify(FoRun *run, FoTerm term, Term *out) {
   if (term == 0) {
     return 0;
   }
-  FoNode *node = &run->node[term];
   Term args[16];
-  for (u32 i = 0; i < node->ari; i++) {
-    if (!fo_reify(run, node->arg[i], &args[i])) {
+  u32 ari = run->node_ari[term];
+  if (ari > 0 && !fo_reify(run, run->node_arg0[term], &args[0])) {
+    return 0;
+  }
+  if (ari > 1) {
+    if (!fo_reify(run, run->node_arg1[term], &args[1])) {
       return 0;
     }
   }
-  *out = term_new_ctr(node->ext, node->ari, args);
+  *out = term_new_ctr(run->node_ext[term], ari, args);
   return 1;
 }
 
 fn void fo_free(FoRun *run) {
   free(run->code);
-  free(run->node);
+  free(run->node_tag);
+  free(run->node_ari);
+  free(run->node_ext);
+  free(run->node_refs);
+  free(run->node_next);
+  free(run->node_arg0);
+  free(run->node_arg1);
   free(run->vals);
   free(run->terms);
   free(run->ctx);
@@ -7204,12 +7219,20 @@ fn void fo_free(FoRun *run) {
 fn int fo_eval_main(u32 main_id, Term *out, u64 *itrs) {
   FoRun run = {0};
   run.code = (FoOp*)malloc(sizeof(FoOp) * FO_CODE_CAP);
-  run.node = (FoNode*)calloc(FO_NODE_CAP, sizeof(FoNode));
+  run.node_tag = (u8*)calloc(FO_NODE_CAP, sizeof(u8));
+  run.node_ari = (u8*)calloc(FO_NODE_CAP, sizeof(u8));
+  run.node_ext = (u32*)calloc(FO_NODE_CAP, sizeof(u32));
+  run.node_refs = (u32*)calloc(FO_NODE_CAP, sizeof(u32));
+  run.node_next = (u32*)calloc(FO_NODE_CAP, sizeof(u32));
+  run.node_arg0 = (FoTerm*)calloc(FO_NODE_CAP, sizeof(FoTerm));
+  run.node_arg1 = (FoTerm*)calloc(FO_NODE_CAP, sizeof(FoTerm));
   run.vals = (FoTerm*)malloc(sizeof(FoTerm) * FO_STACK_CAP);
   run.terms = (FoTerm*)malloc(sizeof(FoTerm) * FO_STACK_CAP);
   run.ctx = (FoTerm*)calloc(FO_CTX_CAP, sizeof(FoTerm));
   run.calls = (FoFrame*)malloc(sizeof(FoFrame) * FO_CALL_CAP);
-  if (run.code == NULL || run.node == NULL || run.vals == NULL ||
+  if (run.code == NULL || run.node_tag == NULL || run.node_ari == NULL ||
+      run.node_ext == NULL || run.node_refs == NULL || run.node_next == NULL ||
+      run.node_arg0 == NULL || run.node_arg1 == NULL || run.vals == NULL ||
       run.terms == NULL || run.ctx == NULL || run.calls == NULL) {
     fo_free(&run);
     return 0;
