@@ -1589,7 +1589,7 @@ do_ref:
   if (pc->sub == NULL) die("unknown reference");
   if (argc == 0 && REF_CACHE[pc->ext] != NULL) {
     val = REF_CACHE[pc->ext];
-    goto apply_value;
+    goto apply_ready;
   }
   pc = pc->sub;
   env = NULL;
@@ -1618,17 +1618,17 @@ do_dp1: {
 
 do_num:
   val = mk_num(pc->ext);
-  goto apply_value;
+  goto apply_ready;
 
 do_ctr:
   val = make_ctr(pc, env, gap);
-  goto apply_value;
+  goto apply_ready;
 
 do_lam:
   if (argc == 0) {
     val = mk_lam(pc->sub, env, gap);
     val->arity = pc->aux;
-    goto apply_value;
+    goto apply_ready;
   }
   ITRS++;
   {
@@ -1646,7 +1646,7 @@ do_lam:
 do_mat:
   if (argc == 0) {
     val = mk_mat(pc, env, gap);
-    goto apply_value;
+    goto apply_ready;
   }
   Arg *raw = &args[argc - 1];
   Env *arg_env;
@@ -1698,14 +1698,15 @@ do_dup:
 
 do_sup:
   val = mk_sup(pc->ext, mk_thunk(pc->term->kid[0]->code, env, gap), mk_thunk(pc->term->kid[1]->code, env, gap));
-  goto apply_value;
+  goto apply_ready;
 
 do_era:
   val = val_new(V_ERA);
-  goto apply_value;
+  goto apply_ready;
 
 apply_value:
   val = force(val);
+apply_ready:
   if (argc == 0) return val;
   switch (val->tag) {
     case V_LAM: {
