@@ -202,6 +202,7 @@ static u32   BIND_LEN = 0;
 static u64   ITRS = 0;
 static u64   ALLOCS = 0;
 static u32   FRESH_LAB = 0;
+static int   READBACK = 0;
 static EnvBlock *ENV_BLOCK = NULL;
 static ValBlock *VAL_BLOCK = NULL;
 static ItemBlock *ITEM_BLOCK = NULL;
@@ -995,12 +996,13 @@ ALWAYS_INLINE Val *force_fun_arg(Val *v) {
     case BC_VAR:
     case BC_DP0:
     case BC_DP1:
-    case BC_REF:
     case BC_LAM:
     case BC_MAT:
+      return force(v);
+    case BC_REF:
     case BC_ARG:
     case BC_DUP:
-      return force(v);
+      return READBACK ? force(v) : v;
     default:
       return v;
   }
@@ -1565,6 +1567,14 @@ static Val *force(Val *v) {
   return v;
 }
 
+static Val *force_read(Val *v) {
+  while (v->tag == V_THUNK || v->tag == V_LTHUNK) {
+    Arg args[MAX_ARGS];
+    v = eval_code(v->code, v->env, v->ext, args, 0);
+  }
+  return v;
+}
+
 static void print_var_name(u32 idx) {
   if (idx < 26) {
     putchar((char)('a' + idx));
@@ -1612,20 +1622,20 @@ static void print_val_at(Val *v, u32 depth) {
     }
     return;
   }
-  v = force(v);
+  v = force_read(v);
   switch (v->tag) {
     case V_NUM:
       printf("%u", v->ext);
       return;
     case V_CTR:
       if (v->arity == 2) {
-        v->fst = force(v->fst);
-        v->snd = force(v->snd);
+        v->fst = force_read(v->fst);
+        v->snd = force_read(v->snd);
       } else if (v->arity == 1) {
-        v->fst = force(v->fst);
+        v->fst = force_read(v->fst);
       } else {
         for (u32 i = 0; i < v->arity; i++) {
-          v->item[i] = force(v->item[i]);
+          v->item[i] = force_read(v->item[i]);
         }
       }
       printf("#%s{", NAMES[v->ext]);
@@ -1690,7 +1700,9 @@ static void print_val_at(Val *v, u32 depth) {
 }
 
 static void print_val(Val *v) {
+  READBACK = 1;
   print_val_at(v, 0);
+  READBACK = 0;
 }
 
 int main(int argc, char **argv) {
@@ -1715,6 +1727,7 @@ int main(int argc, char **argv) {
   if (DEFS[main_id] == NULL) die("missing @main");
 
   struct timespec t0, t1;
+  READBACK = !silent;
   clock_gettime(CLOCK_MONOTONIC, &t0);
   Val *res = force(eval_term(DEFS[main_id], NULL));
   clock_gettime(CLOCK_MONOTONIC, &t1);
