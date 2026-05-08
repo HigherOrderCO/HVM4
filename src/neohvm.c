@@ -774,7 +774,7 @@ static Code *compile_term(Term *term);
 static Code *compile_app(Term *term);
 static u8 compile_ctr_field_kind(Code *code);
 static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc);
-static Val *force(Val *v);
+ALWAYS_INLINE Val *force(Val *v);
 static inline Val *mk_lam(Code *code, Env *env, u32 gap);
 static inline Val *mk_mat(Code *code, Env *env, u32 gap);
 static void link_refs_code(Code *code, u32 depth);
@@ -1793,7 +1793,7 @@ static Val *eval_term(Term *term, Env *env) {
   return eval_code(term->code, env, 0, args, 0);
 }
 
-static Val *force(Val *v) {
+ALWAYS_INLINE Val *force(Val *v) {
   while (v->tag == V_THUNK || v->tag == V_LTHUNK) {
     u8 tag = v->tag;
     Arg args[MAX_ARGS];
