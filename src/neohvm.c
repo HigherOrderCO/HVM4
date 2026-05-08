@@ -1182,7 +1182,7 @@ static inline Val *make_ctr(Code *pc, Env *env, u32 gap);
 ALWAYS_INLINE Val *force_arg(Arg *arg) {
   if (arg->val != NULL) return force(arg->val);
   Arg none[MAX_ARGS];
-  return force(eval_code(arg->code, arg->env, arg->gap, none, 0));
+  return eval_code(arg->code, arg->env, arg->gap, none, 0);
 }
 
 ALWAYS_INLINE Val *bind_arg(Arg *arg) {
