@@ -299,12 +299,27 @@ ALWAYS_INLINE void val_free(Val *v) {
   ALLOCS--;
 }
 
+ALWAYS_INLINE Val *share_value(Val *v);
+
 ALWAYS_INLINE void val_free_ctr(Val *v) {
-  if (v->tag == V_CTR && v->pad == 0) val_free(v);
+  if (v->tag != V_CTR) return;
+  if (__builtin_expect(v->pad == 0, 1)) {
+    val_free(v);
+    return;
+  }
+  if (v->arity == 2) {
+    share_value(v->fst);
+    share_value(v->snd);
+  } else if (v->arity == 1) {
+    share_value(v->fst);
+  } else if (v->arity > 2) {
+    for (u32 i = 0; i < v->arity; i++) share_value(v->item[i]);
+  }
+  v->pad = 0;
 }
 
 ALWAYS_INLINE Val *share_value(Val *v) {
-  if (v->tag == V_CTR) v->pad = 1;
+  if (v->tag == V_CTR || v->tag == V_LTHUNK || v->tag == V_THUNK) v->pad = 1;
   return v;
 }
 
@@ -1236,8 +1251,10 @@ ALWAYS_INLINE Val *bind_arg(Arg *arg) {
   switch (arg->code->op) {
     case BC_NUM:
       return mk_num(arg->code->ext);
+    case BC_VAR:
+      return env_at(arg->env, arg->code->ext, arg->gap)->val;
     case BC_CTR:
-      return make_ctr(arg->code, arg->env, arg->gap);
+      return mk_lthunk(arg->code, arg->env, arg->gap);
     case BC_REF:
       if (arg->code->ext < MAX_NAMES && REF_CACHE[arg->code->ext] != NULL) return REF_CACHE[arg->code->ext];
       return force_arg(arg);
@@ -1417,6 +1434,16 @@ ALWAYS_INLINE Code *matchable_arg_code(Arg *arg, Env **env, u32 *gap, Val **seen
   return NULL;
 }
 
+ALWAYS_INLINE void consume_matchable_seen(Val *seen) {
+  if (seen->tag == V_THUNK || seen->tag == V_LTHUNK) {
+    if (seen->pad != 0) {
+      seen->pad = 0;
+    } else {
+      val_free(seen);
+    }
+  }
+}
+
 static Val *apply_default(Code *dft, Env *env, u32 gap, Val *arg) {
   if (dft == NULL) return mk_num(0);
   Arg none[MAX_ARGS];
@@ -1518,6 +1545,7 @@ static Val *apply_fun(Val *fun, Arg *arg) {
         Code *body = mat_pick_code(fun->code, arg_code);
         if (body) {
           ITRS++;
+          if (seen) consume_matchable_seen(seen);
           Arg args[MAX_ARGS];
           u32 argc = 0;
           if (arg_code->op == BC_CTR) {
@@ -1607,7 +1635,7 @@ ALWAYS_INLINE Val *make_ctr(Code *pc, Env *env, u32 gap) {
 ALWAYS_INLINE Val *make_field(Code *kid, Env *env, u32 gap) {
   if (kid->op == BC_NUM) return mk_num(kid->ext);
   if (kid->op == BC_VAR) return env_at(env, kid->ext, gap)->val;
-  if (env != NULL && kid->op == BC_CTR) return make_ctr(kid, env, gap);
+  if (kid->op == BC_CTR) return make_ctr(kid, env, gap);
   return mk_lthunk(kid, env, gap);
 }
 
@@ -1656,6 +1684,11 @@ do_var:
     if (!env) die("unbound variable");
     if (!env->val) die("erased variable reached");
     val = env->val;
+  } else if (pc->ext == 2 && gap == 0 && env != NULL && env_span(env) == 1) {
+    Env *next = env_next(env);
+    if (!next) die("unbound variable");
+    if (!next->val) die("erased variable reached");
+    val = next->val;
   } else {
     val = env_at(env, pc->ext, gap)->val;
   }
@@ -1726,6 +1759,26 @@ do_mat:
     goto apply_ready;
   }
   Arg *raw = &args[argc - 1];
+  if (raw->val == NULL) {
+    Code *arg_code = raw->code;
+    Code *body = NULL;
+    if (arg_code->op == BC_CTR) {
+      Cases *cases = pc->cases;
+      if (cases->ctr && arg_code->ext == cases->ctr_ext) body = cases->ctr;
+    } else if (arg_code->op == BC_NUM) {
+      if (arg_code->ext == 0) body = pc->cases->num0;
+      else if (arg_code->ext == 1) body = pc->cases->num1;
+    }
+    if (body != NULL) {
+      ITRS++;
+      argc--;
+      if (arg_code->op == BC_CTR) {
+        push_ctr_code_args(arg_code, raw->env, raw->gap, args, &argc);
+      }
+      pc = body;
+      goto *pc->jump;
+    }
+  }
   Env *arg_env;
   u32 arg_gap;
   Val *seen;
@@ -1734,6 +1787,7 @@ do_mat:
     Code *body = mat_pick_code(pc, arg_code);
     if (body) {
       ITRS++;
+      if (seen) consume_matchable_seen(seen);
       argc--;
       if (arg_code->op == BC_CTR) {
         push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
@@ -1817,6 +1871,28 @@ apply_ready:
     }
     case V_MAT: {
       Arg *raw = &args[argc - 1];
+      if (raw->val == NULL) {
+        Code *arg_code = raw->code;
+        Code *body = NULL;
+        if (arg_code->op == BC_CTR) {
+          Cases *cases = val->code->cases;
+          if (cases->ctr && arg_code->ext == cases->ctr_ext) body = cases->ctr;
+        } else if (arg_code->op == BC_NUM) {
+          if (arg_code->ext == 0) body = val->code->cases->num0;
+          else if (arg_code->ext == 1) body = val->code->cases->num1;
+        }
+        if (body != NULL) {
+          ITRS++;
+          argc--;
+          if (arg_code->op == BC_CTR) {
+            push_ctr_code_args(arg_code, raw->env, raw->gap, args, &argc);
+          }
+          env = val->env;
+          gap = val->ext;
+          pc = body;
+          goto *pc->jump;
+        }
+      }
       Env *arg_env;
       u32 arg_gap;
       Val *seen;
@@ -1825,6 +1901,7 @@ apply_ready:
         Code *body = mat_pick_code(val->code, arg_code);
         if (body) {
           ITRS++;
+          if (seen) consume_matchable_seen(seen);
           argc--;
           if (arg_code->op == BC_CTR) {
             push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
@@ -1890,12 +1967,13 @@ static Val *eval_term(Term *term, Env *env) {
 ALWAYS_INLINE Val *force(Val *v) {
   while (v->tag == V_THUNK || v->tag == V_LTHUNK) {
     u8 tag = v->tag;
+    u16 refs = v->pad;
     Arg args[MAX_ARGS];
     Val *res = eval_code(v->code, v->env, v->ext, args, 0);
     if (tag == V_LTHUNK && res != v) {
       *v = *res;
       if (v->tag == V_CTR) {
-        v->pad = 1;
+        v->pad = refs;
         val_free_ctr(res);
       }
     } else {
@@ -1905,12 +1983,8 @@ ALWAYS_INLINE Val *force(Val *v) {
   return v;
 }
 
-static Val *force_read(Val *v) {
-  while (v->tag == V_THUNK || v->tag == V_LTHUNK) {
-    Arg args[MAX_ARGS];
-    v = eval_code(v->code, v->env, v->ext, args, 0);
-  }
-  return v;
+ALWAYS_INLINE Val *force_read(Val *v) {
+  return force(v);
 }
 
 static void print_var_name(u32 idx) {
@@ -1922,6 +1996,8 @@ static void print_var_name(u32 idx) {
 }
 
 static void print_val_at(Val *v, u32 depth);
+static void normalize_val_at(Val *v, u32 depth);
+static void normalize_forced_val_at(Val *v, u32 depth);
 
 static void print_mat_val(Val *v, u32 depth) {
   printf("λ{");
@@ -2045,6 +2121,91 @@ static void print_val(Val *v) {
   READBACK = 0;
 }
 
+static void normalize_mat_val(Val *v, u32 depth) {
+  Term *m = v->code->cases->chain;
+  for (; m && m->tag == T_MAT; m = m->kid[1]) {
+    Arg none[MAX_ARGS];
+    Val *body = eval_code(m->kid[0]->code, v->env, v->ext, none, 0);
+    normalize_val_at(body, depth);
+  }
+  if (m != NULL) {
+    Arg none[MAX_ARGS];
+    Val *body = eval_code(m->code, v->env, v->ext, none, 0);
+    normalize_val_at(body, depth);
+  }
+}
+
+static void normalize_val_at(Val *v, u32 depth) {
+  if (v->tag == V_BOX) {
+    if (v->fst) normalize_val_at(v->fst, depth);
+    return;
+  }
+  normalize_forced_val_at(force_read(v), depth);
+}
+
+static void normalize_forced_val_at(Val *v, u32 depth) {
+  switch (v->tag) {
+    case V_BOX:
+      if (v->fst) normalize_val_at(v->fst, depth);
+      return;
+    case V_CTR:
+      if (v->arity == 2) {
+        v->fst = force_read(v->fst);
+        v->snd = force_read(v->snd);
+        normalize_forced_val_at(v->fst, depth);
+        normalize_forced_val_at(v->snd, depth);
+      } else if (v->arity == 1) {
+        v->fst = force_read(v->fst);
+        normalize_forced_val_at(v->fst, depth);
+      } else {
+        for (u32 i = 0; i < v->arity; i++) {
+          v->item[i] = force_read(v->item[i]);
+          normalize_forced_val_at(v->item[i], depth);
+        }
+      }
+      return;
+    case V_LAM:
+    case V_ELAM:
+    case V_SLAM: {
+      Env *env = v->env;
+      u32 gap = v->ext;
+      if (v->tag == V_ELAM) {
+        gap++;
+      } else {
+        env = env_push(mk_var(depth), env, gap + 1);
+        gap = 0;
+      }
+      Arg none[MAX_ARGS];
+      Val *body = eval_code(v->code, env, gap, none, 0);
+      normalize_val_at(body, depth + 1);
+      return;
+    }
+    case V_MAT:
+      normalize_mat_val(v, depth);
+      return;
+    case V_SUP:
+      normalize_val_at(v->fst, depth);
+      normalize_val_at(v->snd, depth);
+      return;
+    case V_APP:
+      normalize_val_at(v->fst, depth);
+      normalize_val_at(v->snd, depth);
+      return;
+    case V_PRJ:
+    case V_PLAM:
+      normalize_val_at(v->fst, depth);
+      return;
+    default:
+      return;
+  }
+}
+
+static void normalize_val(Val *v) {
+  READBACK = 1;
+  normalize_val_at(v, 0);
+  READBACK = 0;
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
     fprintf(stderr, "Usage: %s file.hvm [-s] [-S]\n", argv[0]);
@@ -2067,9 +2228,10 @@ int main(int argc, char **argv) {
   if (DEFS[main_id] == NULL) die("missing @main");
 
   struct timespec t0, t1;
-  READBACK = !silent;
+  READBACK = 1;
   clock_gettime(CLOCK_MONOTONIC, &t0);
   Val *res = force(eval_term(DEFS[main_id], NULL));
+  normalize_val(res);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   double elapsed = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
 
