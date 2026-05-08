@@ -6475,6 +6475,7 @@ fn void fast_run_free(FastRun *run) {
 #define FO_NODE_CAP (1U << 24)
 #define FO_CLO_CAP (1U << 20)
 #define FO_CLO_CTX_CAP (1U << 22)
+#define FO_CAPTURE_CAP (1U << 20)
 #define FO_CALL_CAP 65536
 #define FO_BIND_CAP 256
 
@@ -6496,6 +6497,7 @@ fn void fast_run_free(FastRun *run) {
 #define FO_CLO 15
 #define FO_APPLY 16
 #define FO_JUMP 17
+#define FO_MAT_BIND 18
 
 typedef u64 FoTerm;
 
@@ -6543,8 +6545,10 @@ typedef struct {
   u32     *clo_base;
   u32     *clo_refs;
   FoTerm  *clo_ctx;
+  u32     *cap_src;
   u32      clo_len;
   u32      clo_ctx_len;
+  u32      cap_src_len;
   u32      node_len;
   u32      node_free;
   FoTerm  *vals;
@@ -6705,7 +6709,7 @@ fn FoTerm fo_ctr(FoRun *run, u8 tag, u32 ext, u32 ari, FoTerm *args) {
   return loc;
 }
 
-fn FoTerm fo_closure(FoRun *run, u32 start, u32 cap, FoTerm *ctx, u32 frm) {
+fn FoTerm fo_closure(FoRun *run, u32 start, u32 cap, u32 src, FoTerm *ctx, u32 frm) {
   if (run->clo_len + 1 >= FO_CLO_CAP || run->clo_ctx_len + cap >= FO_CLO_CTX_CAP) {
     fo_fail_because(run, "closure-cap", cap);
     return 0;
@@ -6718,7 +6722,7 @@ fn FoTerm fo_closure(FoRun *run, u32 start, u32 cap, FoTerm *ctx, u32 frm) {
   run->clo_base[loc] = base;
   run->clo_refs[loc] = 0;
   for (u32 i = 0; i < cap; i++) {
-    FoTerm val = ctx[frm + i];
+    FoTerm val = ctx[frm + run->cap_src[src + i]];
     run->clo_ctx[base + i] = val;
     fo_retain(run, val);
   }
@@ -6770,8 +6774,75 @@ fn int fo_scope_add(FoRun *run, FoScope *scope, u8 tag, u32 ext, u32 lvl) {
   return 1;
 }
 
+fn int fo_scope_lookup(FoScope *scope, u8 tag, u32 ext, u32 lvl, u32 *idx) {
+  for (int i = (int)scope->len - 1; i >= 0; i--) {
+    FoBind *bind = &scope->data[i];
+    if (bind->tag == tag && bind->lvl == lvl && (tag == BJV || bind->ext == ext)) {
+      *idx = bind->idx;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+fn int fo_scope_has(FoScope *scope, u8 tag, u32 ext, u32 lvl) {
+  u32 idx = 0;
+  return fo_scope_lookup(scope, tag, ext, lvl, &idx);
+}
+
 fn int fo_compile_expr(FoRun *run, u64 loc, FoScope scope, int tail);
 fn int fo_compile_func(FoRun *run, u64 loc, FoScope scope);
+
+fn void fo_capture_go(FoRun *run, Term term, FoScope *parent, FoScope *capture, u32 *srcs) {
+  if (run->failed) {
+    return;
+  }
+  u8 tag = term_tag(term);
+  if (tag == BJV || tag == BJ0 || tag == BJ1) {
+    u32 idx = 0;
+    if (fo_scope_lookup(parent, tag, term_ext(term), term_val(term), &idx) &&
+        !fo_scope_has(capture, tag, term_ext(term), term_val(term))) {
+      srcs[capture->slots] = idx;
+      fo_scope_add(run, capture, tag, term_ext(term), term_val(term));
+    }
+    return;
+  }
+  u32 ari = term_arity(term);
+  u64 loc = term_val(term);
+  for (u32 i = 0; i < ari; i++) {
+    fo_capture_go(run, heap_read(loc + i), parent, capture, srcs);
+  }
+}
+
+fn int fo_capture_emit(FoRun *run, u64 loc, FoScope parent, FoScope *capture, u32 *src_start) {
+  u32 srcs[FO_BIND_CAP];
+  *capture = (FoScope){.level = parent.level};
+  fo_capture_go(run, heap_read(loc), &parent, capture, srcs);
+  if (run->failed) {
+    return 0;
+  }
+  if (run->cap_src_len + capture->slots >= FO_CAPTURE_CAP) {
+    fo_fail_because(run, "capture-map", capture->slots);
+    return 0;
+  }
+  *src_start = run->cap_src_len;
+  for (u32 i = 0; i < capture->slots; i++) {
+    run->cap_src[run->cap_src_len++] = srcs[i];
+  }
+  return 1;
+}
+
+fn int fo_ctor_arity(u32 ext, u32 *ari) {
+  for (u64 loc = 1; loc < HEAP_NEXT; loc++) {
+    Term term = heap_read(loc);
+    u8 tag = term_tag(term);
+    if (tag >= C00 && tag <= C16 && term_ext(term) == ext) {
+      *ari = tag - C00;
+      return 1;
+    }
+  }
+  return 0;
+}
 
 fn void fo_find_dup_levels_go(Term term, u32 lab, u32 *lvl0, u32 *lvl1) {
   u8 tag = term_tag(term);
@@ -6884,12 +6955,17 @@ fn int fo_compile_expr(FoRun *run, u64 loc, FoScope scope, int tail) {
       if (tail) {
         return fo_compile_func(run, loc, scope);
       }
+      FoScope capture = {0};
+      u32 src_start = 0;
+      if (!fo_capture_emit(run, loc, scope, &capture, &src_start)) {
+        return 0;
+      }
       u32 clo_pos = 0;
       u32 jump_pos = 0;
-      fo_emit(run, FO_CLO, 0, 0, scope.slots, 0, &clo_pos);
+      fo_emit(run, FO_CLO, 0, capture.slots, src_start, 0, &clo_pos);
       fo_emit(run, FO_JUMP, 0, 0, 0, 0, &jump_pos);
       run->code[clo_pos].aux = run->code_len;
-      if (!fo_compile_func(run, loc, scope)) {
+      if (!fo_compile_func(run, loc, capture)) {
         return 0;
       }
       run->code[jump_pos].aux = run->code_len;
@@ -7001,6 +7077,36 @@ fn int fo_compile_func(FoRun *run, u64 loc, FoScope scope) {
     case MAT:
     case SWI: {
       u64 mat_loc = term_val(term);
+      if (term_tag(term) == MAT) {
+        u32 ctor_ari = 0;
+        FoScope bind_scope = scope;
+        u64 body_loc = mat_loc + 0;
+        u32 bind_ari = 0;
+        u32 era_mask = 0;
+        if (!fo_ctor_arity(term_ext(term), &ctor_ari) || ctor_ari > 2) {
+          ctor_ari = 0;
+        }
+        while (bind_ari < ctor_ari && term_tag(heap_read(body_loc)) == LAM) {
+          Term lam = heap_read(body_loc);
+          bind_scope.level++;
+          if (term_ext(lam) & LAM_ERA_MASK) {
+            era_mask |= 1u << bind_ari;
+          } else if (!fo_scope_add(run, &bind_scope, BJV, 0, bind_scope.level)) {
+            return 0;
+          }
+          body_loc = term_val(lam);
+          bind_ari++;
+        }
+        if (bind_ari > 0 && bind_ari == ctor_ari) {
+          u32 pos = 0;
+          fo_emit(run, FO_MAT_BIND, (u8)era_mask, bind_ari, term_ext(term), 0, &pos);
+          if (!fo_compile_func(run, mat_loc + 1, scope)) {
+            return 0;
+          }
+          run->code[pos].aux = run->code_len;
+          return fo_compile_func(run, body_loc, bind_scope);
+        }
+      }
       u32 pos = 0;
       fo_emit(run, term_tag(term) == MAT ? FO_MAT_CTR : FO_MAT_NUM, 0, 0, term_ext(term), 0, &pos);
       if (!fo_compile_func(run, mat_loc + 1, scope)) {
@@ -7148,12 +7254,18 @@ fn int fo_apply_enter(
       return 0;
     }
     u32 dst = *cur;
-    for (u32 i = 0; i < cap; i++) {
-      FoTerm val = run->clo_ctx[base + i];
-      fo_retain(run, val);
-      ctx[dst + i] = val;
+    if (run->clo_refs[loc] == 0) {
+      for (u32 i = 0; i < cap; i++) {
+        ctx[dst + i] = run->clo_ctx[base + i];
+      }
+    } else {
+      for (u32 i = 0; i < cap; i++) {
+        FoTerm val = run->clo_ctx[base + i];
+        fo_retain(run, val);
+        ctx[dst + i] = val;
+      }
+      run->clo_refs[loc]--;
     }
-    fo_release(run, fun);
     *pc = run->clo_start[loc];
     *frm = dst;
     *cur = dst + cap;
@@ -7195,12 +7307,22 @@ fn FoTerm fo_run(FoRun *run) {
           fo_fail(run);
           return 0;
         }
-        FoTerm args[16];
-        for (u32 i = op->ari; i > 0; i--) {
-          args[i - 1] = fo_stack_pop(run, vals, &vsp);
+        u32 loc = fo_node_alloc(run);
+        if (run->failed) {
+          return 0;
         }
-        FoTerm ctr = fo_ctr(run, op->tag, op->ext, op->ari, args);
-        if (run->failed || !fo_stack_push(run, vals, &vsp, ctr)) {
+        run->node_tag[loc] = op->tag;
+        run->node_ari[loc] = op->ari;
+        run->node_ext[loc] = op->ext;
+        run->node_refs[loc] = 0;
+        run->node_next[loc] = 0;
+        if (op->ari == 2) {
+          run->node_arg1[loc] = vals[--vsp];
+          run->node_arg0[loc] = vals[--vsp];
+        } else if (op->ari == 1) {
+          run->node_arg0[loc] = vals[--vsp];
+        }
+        if (!fo_stack_push(run, vals, &vsp, loc)) {
           return 0;
         }
         break;
@@ -7238,7 +7360,7 @@ fn FoTerm fo_run(FoRun *run) {
         break;
       }
       case FO_CLO: {
-        FoTerm clo = fo_closure(run, op->aux, op->ext, ctx, frm);
+        FoTerm clo = fo_closure(run, op->aux, op->ari, op->ext, ctx, frm);
         if (run->failed || !fo_stack_push(run, vals, &vsp, clo)) {
           return 0;
         }
@@ -7300,7 +7422,64 @@ fn FoTerm fo_run(FoRun *run) {
         if (tail) {
           tsp = 0;
         }
-        if (!fo_apply_enter(run, fun, op->ari, tail, vals, &vsp, terms, &tsp, ctx, calls, &csp, &pc, &frm, &cur, &fidx, &term)) {
+        if (op->ari == 0 || vsp < op->ari) {
+          fo_fail_because(run, "apply-args", op->ari);
+          return 0;
+        }
+        if (!tail) {
+          if (csp >= FO_CALL_CAP) {
+            fo_fail_because(run, "call-stack", 0);
+            return 0;
+          }
+          calls[csp++] = (FoFrame){pc, frm, cur, fidx};
+        }
+        if (op->ari == 1) {
+          term = vals[--vsp];
+        } else {
+          for (u32 i = op->ari; i > 1; i--) {
+            FoTerm arg = vals[--vsp];
+            if (!fo_stack_push(run, terms, &tsp, arg)) {
+              return 0;
+            }
+          }
+          term = vals[--vsp];
+        }
+        if (fo_is_fun(fun)) {
+          u32 fun_idx = fo_fun_val(fun);
+          if (fun_idx >= run->fn_count) {
+            fo_fail_because(run, "apply-fun", fun_idx);
+            return 0;
+          }
+          fidx = fun_idx;
+          pc = run->fn_start[fun_idx];
+          frm = cur;
+        } else if (fo_is_clo(fun)) {
+          u32 loc = fo_clo_val(fun);
+          u32 cap = run->clo_cap[loc];
+          u32 base = run->clo_base[loc];
+          if (cur + cap >= FO_CTX_CAP) {
+            fo_fail_because(run, "apply-ctx", cap);
+            return 0;
+          }
+          u32 dst = cur;
+          if (run->clo_refs[loc] == 0) {
+            for (u32 i = 0; i < cap; i++) {
+              ctx[dst + i] = run->clo_ctx[base + i];
+            }
+          } else {
+            for (u32 i = 0; i < cap; i++) {
+              FoTerm val = run->clo_ctx[base + i];
+              fo_retain(run, val);
+              ctx[dst + i] = val;
+            }
+            run->clo_refs[loc]--;
+          }
+          pc = run->clo_start[loc];
+          frm = dst;
+          cur = dst + cap;
+          fidx = UINT32_MAX;
+        } else {
+          fo_fail_because(run, "apply-value", 0);
           return 0;
         }
         have_term = 1;
@@ -7391,6 +7570,59 @@ fn FoTerm fo_run(FoRun *run) {
           term = field0;
           have_term = 1;
         }
+        pc = op->aux;
+        break;
+      }
+      case FO_MAT_BIND: {
+        if (!have_term) {
+          term = fo_stack_pop(run, terms, &tsp);
+          if (run->failed) {
+            return 0;
+          }
+          have_term = 1;
+        }
+        if (fo_is_num(term)) {
+          break;
+        }
+        if (run->node_ext[term] != op->ext) {
+          break;
+        }
+        u32 ari = run->node_ari[term];
+        if (ari != op->ari || cur + ari >= FO_CTX_CAP) {
+          fo_fail_because(run, "mat-bind", ari);
+          return 0;
+        }
+        run->itrs++;
+        FoTerm field0 = run->node_arg0[term];
+        FoTerm field1 = run->node_arg1[term];
+        if (run->node_refs[term] > 0) {
+          if (ari > 0) {
+            fo_retain(run, field0);
+            if (ari > 1) {
+              fo_retain(run, field1);
+            }
+          }
+          run->node_refs[term]--;
+        } else {
+          run->node_next[term] = run->node_free;
+          run->node_free = (u32)term;
+        }
+        if (ari > 0) {
+          if (op->tag & 1) {
+            fo_release(run, field0);
+          } else {
+            ctx[cur++] = field0;
+          }
+          if (ari > 1) {
+            if (op->tag & 2) {
+              fo_release(run, field1);
+            } else {
+              ctx[cur++] = field1;
+            }
+          }
+        }
+        term = 0;
+        have_term = 0;
         pc = op->aux;
         break;
       }
@@ -7487,6 +7719,7 @@ fn void fo_free(FoRun *run) {
   free(run->clo_base);
   free(run->clo_refs);
   free(run->clo_ctx);
+  free(run->cap_src);
   free(run->vals);
   free(run->terms);
   free(run->ctx);
@@ -7511,6 +7744,7 @@ fn int fo_eval_main(u32 main_id, Term *out, u64 *itrs) {
   run.clo_base = (u32*)calloc(FO_CLO_CAP, sizeof(u32));
   run.clo_refs = (u32*)calloc(FO_CLO_CAP, sizeof(u32));
   run.clo_ctx = (FoTerm*)calloc(FO_CLO_CTX_CAP, sizeof(FoTerm));
+  run.cap_src = (u32*)calloc(FO_CAPTURE_CAP, sizeof(u32));
   run.vals = (FoTerm*)malloc(sizeof(FoTerm) * FO_STACK_CAP);
   run.terms = (FoTerm*)malloc(sizeof(FoTerm) * FO_STACK_CAP);
   run.ctx = (FoTerm*)calloc(FO_CTX_CAP, sizeof(FoTerm));
@@ -7519,7 +7753,7 @@ fn int fo_eval_main(u32 main_id, Term *out, u64 *itrs) {
       run.node_ext == NULL || run.node_refs == NULL || run.node_next == NULL ||
       run.node_arg0 == NULL || run.node_arg1 == NULL || run.clo_start == NULL ||
       run.clo_cap == NULL || run.clo_base == NULL || run.clo_refs == NULL ||
-      run.clo_ctx == NULL || run.vals == NULL || run.terms == NULL ||
+      run.clo_ctx == NULL || run.cap_src == NULL || run.vals == NULL || run.terms == NULL ||
       run.ctx == NULL || run.calls == NULL) {
     fo_free(&run);
     return 0;
