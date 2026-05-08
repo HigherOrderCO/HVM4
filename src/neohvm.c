@@ -747,6 +747,7 @@ static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc);
 static Val *force(Val *v);
 static inline Val *mk_lam(Code *code, Env *env, u32 gap);
 static inline Val *mk_mat(Code *code, Env *env, u32 gap);
+static int mark_ref_code(Code *code, u32 depth);
 
 static Code *compile_term(Term *term) {
   if (term->code) return term->code;
@@ -841,6 +842,9 @@ static void compile_program_terms(void) {
     if (DEFS[i]) compile_term(DEFS[i]);
   }
   for (u32 i = 0; i < NAME_LEN; i++) {
+    if (DEFS[i]) mark_ref_code(DEFS[i]->code, 0);
+  }
+  for (u32 i = 0; i < NAME_LEN; i++) {
     if (DEFS[i] && (DEFS[i]->code->op == BC_LAM || DEFS[i]->code->op == BC_MAT)) {
       REF_CACHE[i] = DEFS[i]->code->op == BC_LAM
         ? mk_lam(DEFS[i]->code->sub, NULL, 0)
@@ -850,6 +854,49 @@ static void compile_program_terms(void) {
       }
     }
   }
+}
+
+static int mark_ref_code(Code *code, u32 depth) {
+  if (code == NULL || depth > 64) return 0;
+  if (code->pad != 0) return code->pad == 2;
+  int has = 0;
+  switch (code->op) {
+    case BC_ARG:
+    case BC_DUP:
+      has = mark_ref_code(code->sub, depth + 1)
+         || mark_ref_code(code->next, depth + 1);
+      break;
+    case BC_CTR:
+      for (u32 i = 0; i < code->arity; i++) {
+        if (mark_ref_code(code->term->kid[i]->code, depth + 1)) {
+          has = 1;
+          break;
+        }
+      }
+      break;
+    case BC_LAM:
+      has = mark_ref_code(code->sub, depth + 1);
+      break;
+    case BC_MAT:
+      if (code->cases != NULL) {
+        has = mark_ref_code(code->cases->ctr, depth + 1)
+           || mark_ref_code(code->cases->num0, depth + 1)
+           || mark_ref_code(code->cases->num1, depth + 1)
+           || mark_ref_code(code->cases->dft, depth + 1);
+      }
+      break;
+    case BC_REF:
+      has = 1;
+      break;
+    case BC_SUP:
+      has = mark_ref_code(code->term->kid[0]->code, depth + 1)
+         || mark_ref_code(code->term->kid[1]->code, depth + 1);
+      break;
+    default:
+      break;
+  }
+  code->pad = has ? 2 : 1;
+  return has;
 }
 
 static int code_has_sup_label(Code *code, u32 lab, u32 depth) {
@@ -1036,7 +1083,9 @@ ALWAYS_INLINE Val *bind_arg(Arg *arg) {
     case BC_NUM:
       return mk_num(arg->code->ext);
     case BC_CTR:
-      return make_ctr(arg->code, arg->env, arg->gap);
+      return arg->code->pad == 2
+        ? mk_lthunk(arg->code, arg->env, arg->gap)
+        : make_ctr(arg->code, arg->env, arg->gap);
     case BC_REF:
       if (arg->code->ext < MAX_NAMES && REF_CACHE[arg->code->ext] != NULL) return REF_CACHE[arg->code->ext];
       return force_arg(arg);
@@ -1186,6 +1235,35 @@ ALWAYS_INLINE void push_ctr_val_args(Val *ctr, Arg *args, u32 *argc) {
 static Val *apply_fun(Val *fun, Arg *arg);
 static Val *apply_sup(Val *sup, Arg *arg);
 
+ALWAYS_INLINE Code *matchable_val_code(Val *v, Env **env, u32 *gap) {
+  if ((v->tag == V_THUNK || v->tag == V_LTHUNK)
+  &&  (v->code->op == BC_CTR || v->code->op == BC_NUM)) {
+    *env = v->env;
+    *gap = v->ext;
+    return v->code;
+  }
+  return NULL;
+}
+
+ALWAYS_INLINE Code *matchable_arg_code(Arg *arg, Env **env, u32 *gap, Val **seen) {
+  *seen = NULL;
+  if (arg->val != NULL) {
+    *seen = arg->val;
+    return matchable_val_code(arg->val, env, gap);
+  }
+  if (arg->code->op == BC_CTR || arg->code->op == BC_NUM) {
+    *env = arg->env;
+    *gap = arg->gap;
+    return arg->code;
+  }
+  if (arg->code->op == BC_VAR) {
+    Val *val = env_at(arg->env, arg->code->ext, arg->gap)->val;
+    *seen = val;
+    return matchable_val_code(val, env, gap);
+  }
+  return NULL;
+}
+
 static Val *apply_default(Code *dft, Env *env, u32 gap, Val *arg) {
   if (dft == NULL) return mk_num(0);
   Arg none[MAX_ARGS];
@@ -1272,20 +1350,24 @@ static Val *apply_fun(Val *fun, Arg *arg) {
     case V_LAM:
       return apply_lam(fun, arg);
     case V_MAT: {
-      if (arg->val == NULL && (arg->code->op == BC_CTR || arg->code->op == BC_NUM)) {
-        Code *body = mat_pick_code(fun->code, arg->code);
+      Env *arg_env;
+      u32 arg_gap;
+      Val *seen;
+      Code *arg_code = matchable_arg_code(arg, &arg_env, &arg_gap, &seen);
+      if (arg_code != NULL) {
+        Code *body = mat_pick_code(fun->code, arg_code);
         if (body) {
           ITRS++;
           Arg args[MAX_ARGS];
           u32 argc = 0;
-          if (arg->code->op == BC_CTR) {
-            push_ctr_code_args(arg->code, arg->env, arg->gap, args, &argc);
+          if (arg_code->op == BC_CTR) {
+            push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
           }
           return eval_code(body, fun->env, fun->ext, args, argc);
         }
       }
       ITRS++;
-      Val *val = force_arg(arg);
+      Val *val = seen ? force(seen) : force_arg(arg);
       return apply_mat(fun->code, fun->env, fun->ext, val);
     }
     case V_SUP: {
@@ -1439,24 +1521,27 @@ do_mat:
     val = mk_mat(pc, env, gap);
     goto apply_value;
   }
-  {
-    Arg *raw = &args[argc - 1];
-    if (raw->val == NULL && (raw->code->op == BC_CTR || raw->code->op == BC_NUM)) {
-      Code *body = mat_pick_code(pc, raw->code);
-      if (body) {
-        ITRS++;
-        argc--;
-        if (raw->code->op == BC_CTR) {
-          push_ctr_code_args(raw->code, raw->env, raw->gap, args, &argc);
-        }
-        pc = body;
-        goto *dispatch[pc->op];
+  Arg *raw = &args[argc - 1];
+  Env *arg_env;
+  u32 arg_gap;
+  Val *seen;
+  Code *arg_code = matchable_arg_code(raw, &arg_env, &arg_gap, &seen);
+  if (arg_code != NULL) {
+    Code *body = mat_pick_code(pc, arg_code);
+    if (body) {
+      ITRS++;
+      argc--;
+      if (arg_code->op == BC_CTR) {
+        push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
       }
+      pc = body;
+      goto *dispatch[pc->op];
     }
   }
   ITRS++;
   {
-    Val *arg = force_arg(&args[--argc]);
+    argc--;
+    Val *arg = seen ? force(seen) : force_arg(raw);
     if (arg->tag == V_SUP) {
       val = apply_mat(pc, env, gap, arg);
       goto apply_value;
@@ -1512,13 +1597,17 @@ apply_value:
     }
     case V_MAT: {
       Arg *raw = &args[argc - 1];
-      if (raw->val == NULL && (raw->code->op == BC_CTR || raw->code->op == BC_NUM)) {
-        Code *body = mat_pick_code(val->code, raw->code);
+      Env *arg_env;
+      u32 arg_gap;
+      Val *seen;
+      Code *arg_code = matchable_arg_code(raw, &arg_env, &arg_gap, &seen);
+      if (arg_code != NULL) {
+        Code *body = mat_pick_code(val->code, arg_code);
         if (body) {
           ITRS++;
           argc--;
-          if (raw->code->op == BC_CTR) {
-            push_ctr_code_args(raw->code, raw->env, raw->gap, args, &argc);
+          if (arg_code->op == BC_CTR) {
+            push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
           }
           env = val->env;
           gap = val->ext;
@@ -1527,7 +1616,8 @@ apply_value:
         }
       }
       ITRS++;
-      Val *arg = force_arg(&args[--argc]);
+      argc--;
+      Val *arg = seen ? force(seen) : force_arg(raw);
       if (arg->tag == V_SUP) {
         val = apply_mat(val->code, val->env, val->ext, arg);
         goto apply_value;
