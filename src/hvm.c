@@ -6102,6 +6102,1158 @@ fn int runtime_prepare(u32 *main_id, const char *src_path, char *src) {
   return 1;
 }
 
+// Fast Eval
+// =========
+// Pure closed-term evaluator for the first-order pattern-recursive subset.
+// It mirrors NanoHVM's main architectural win: run static terms through a
+// compact value/context machine and reify only the final normal form.
+
+#define FAST_KIND_BAD 0
+#define FAST_KIND_CLO 1
+#define FAST_KIND_NUM 2
+#define FAST_KIND_CTR 3
+#define FAST_ARG_CAP 4096
+#define FAST_NODE_CAP (1ULL << 20)
+
+typedef struct {
+  u8  kind;
+  u8  tag;
+  u32 ext;
+  u32 len;
+  u64 loc;
+  u64 env;
+} FastVal;
+
+typedef struct {
+  FastVal val;
+  u64     next;
+} FastEnv;
+
+typedef struct {
+  u32     ari;
+  FastVal arg[16];
+} FastData;
+
+typedef struct {
+  FastEnv  *envs;
+  u64       env_len;
+  u64       env_cap;
+  FastData *data;
+  u64       data_len;
+  u64       data_cap;
+  u64       itrs;
+  int       failed;
+} FastRun;
+
+fn FastVal fast_bad(void) {
+  return (FastVal){.kind = FAST_KIND_BAD};
+}
+
+fn FastVal fast_clo(u64 loc, u64 env, u32 len) {
+  return (FastVal){.kind = FAST_KIND_CLO, .loc = loc, .env = env, .len = len};
+}
+
+fn FastVal fast_num(u32 val) {
+  return (FastVal){.kind = FAST_KIND_NUM, .loc = val};
+}
+
+fn FastVal fast_ctr(u8 tag, u32 ext, u32 ari, u64 loc) {
+  return (FastVal){.kind = FAST_KIND_CTR, .tag = tag, .ext = ext, .len = ari, .loc = loc};
+}
+
+fn void fast_fail(FastRun *run) {
+  run->failed = 1;
+}
+
+fn int fast_reserve_env(FastRun *run) {
+  if (run->env_len + 1 < run->env_cap) {
+    return 1;
+  }
+  u64 cap = run->env_cap == 0 ? 4096 : run->env_cap * 2;
+  if (cap > FAST_NODE_CAP) {
+    fast_fail(run);
+    return 0;
+  }
+  FastEnv *envs = (FastEnv*)realloc(run->envs, sizeof(FastEnv) * cap);
+  if (envs == NULL) {
+    fast_fail(run);
+    return 0;
+  }
+  run->envs = envs;
+  run->env_cap = cap;
+  return 1;
+}
+
+fn int fast_reserve_data(FastRun *run) {
+  if (run->data_len + 1 < run->data_cap) {
+    return 1;
+  }
+  u64 cap = run->data_cap == 0 ? 4096 : run->data_cap * 2;
+  if (cap > FAST_NODE_CAP) {
+    fast_fail(run);
+    return 0;
+  }
+  FastData *data = (FastData*)realloc(run->data, sizeof(FastData) * cap);
+  if (data == NULL) {
+    fast_fail(run);
+    return 0;
+  }
+  run->data = data;
+  run->data_cap = cap;
+  return 1;
+}
+
+fn u64 fast_env_push(FastRun *run, FastVal val, u64 next) {
+  if (!fast_reserve_env(run)) {
+    return 0;
+  }
+  u64 loc = ++run->env_len;
+  run->envs[loc].val = val;
+  run->envs[loc].next = next;
+  return loc;
+}
+
+fn FastVal fast_env_get(FastRun *run, u64 env, u32 len, u32 lvl) {
+  if (lvl == 0 || lvl > len) {
+    fast_fail(run);
+    return fast_bad();
+  }
+  u32 idx = len - lvl;
+  u64 it = env;
+  for (u32 i = 0; i < idx && it != 0; i++) {
+    it = run->envs[it].next;
+  }
+  if (it == 0) {
+    fast_fail(run);
+    return fast_bad();
+  }
+  return run->envs[it].val;
+}
+
+fn u64 fast_data_new(FastRun *run, u32 ari) {
+  if (ari > 16 || !fast_reserve_data(run)) {
+    fast_fail(run);
+    return 0;
+  }
+  u64 loc = ++run->data_len;
+  run->data[loc].ari = ari;
+  return loc;
+}
+
+fn int fast_arg_push(FastRun *run, FastVal *args, u32 *argc, FastVal val) {
+  if (*argc >= FAST_ARG_CAP) {
+    fast_fail(run);
+    return 0;
+  }
+  args[(*argc)++] = val;
+  return 1;
+}
+
+fn FastVal fast_eval(FastRun *run, FastVal start);
+fn FastVal fast_force(FastRun *run, FastVal val);
+
+fn int fast_apply_value(FastRun *run, FastVal val, FastVal *args, u32 *argc, u64 *loc, u64 *env, u32 *len) {
+  (void)args;
+  if (val.kind == FAST_KIND_CLO) {
+    *loc = val.loc;
+    *env = val.env;
+    *len = val.len;
+    return 1;
+  }
+  if (*argc == 0 && (val.kind == FAST_KIND_NUM || val.kind == FAST_KIND_CTR)) {
+    return 0;
+  }
+  fast_fail(run);
+  return 0;
+}
+
+fn FastVal fast_force(FastRun *run, FastVal val) {
+  if (run->failed) {
+    return fast_bad();
+  }
+  if (val.kind == FAST_KIND_CLO) {
+    return fast_eval(run, val);
+  }
+  return val;
+}
+
+fn FastVal fast_eval(FastRun *run, FastVal start) {
+  FastVal args[FAST_ARG_CAP];
+  u32 argc = 0;
+  u64 loc = start.loc;
+  u64 env = start.env;
+  u32 len = start.len;
+
+  while (!run->failed) {
+    Term term = heap_read(loc);
+    switch (term_tag(term)) {
+      case REF: {
+        u32 nam = term_ext(term);
+        if (BOOK[nam] == 0) {
+          fast_fail(run);
+          return fast_bad();
+        }
+        loc = BOOK[nam];
+        env = 0;
+        len = 0;
+        continue;
+      }
+      case APP: {
+        u64 app_loc = term_val(term);
+        if (!fast_arg_push(run, args, &argc, fast_clo(app_loc + 1, env, len))) {
+          return fast_bad();
+        }
+        loc = app_loc + 0;
+        continue;
+      }
+      case LAM: {
+        if (argc == 0) {
+          return fast_clo(loc, env, len);
+        }
+        run->itrs++;
+        FastVal arg = args[--argc];
+        u32 lam_ext = term_ext(term);
+        u64 body_loc = term_val(term);
+        u64 next_env = env;
+        if ((lam_ext & LAM_ERA_MASK) == 0) {
+          next_env = fast_env_push(run, arg, env);
+          if (run->failed) {
+            return fast_bad();
+          }
+        } else {
+          next_env = fast_env_push(run, fast_num(0), env);
+          if (run->failed) {
+            return fast_bad();
+          }
+        }
+        loc = body_loc;
+        env = next_env;
+        len++;
+        continue;
+      }
+      case BJV: {
+        FastVal val = fast_env_get(run, env, len, term_val(term));
+        if (run->failed) {
+          return fast_bad();
+        }
+        if (fast_apply_value(run, val, args, &argc, &loc, &env, &len)) {
+          continue;
+        }
+        return val;
+      }
+      case MAT:
+      case SWI: {
+        if (argc == 0) {
+          return fast_clo(loc, env, len);
+        }
+        FastVal arg = args[--argc];
+        FastVal got = fast_force(run, arg);
+        if (run->failed) {
+          return fast_bad();
+        }
+        u64 mat_loc = term_val(term);
+        u32 ext = term_ext(term);
+        int match = 0;
+        if (term_tag(term) == MAT && got.kind == FAST_KIND_CTR && got.ext == ext) {
+          match = 1;
+        }
+        if (term_tag(term) == SWI && got.kind == FAST_KIND_NUM && (u32)got.loc == ext) {
+          match = 1;
+        }
+        run->itrs++;
+        if (match) {
+          if (got.kind == FAST_KIND_CTR) {
+            FastData *data = &run->data[got.loc];
+            for (u32 i = data->ari; i > 0; i--) {
+              if (!fast_arg_push(run, args, &argc, data->arg[i - 1])) {
+                return fast_bad();
+              }
+            }
+          }
+          loc = mat_loc + 0;
+          continue;
+        }
+        if (!fast_arg_push(run, args, &argc, got)) {
+          return fast_bad();
+        }
+        loc = mat_loc + 1;
+        continue;
+      }
+      case NUM: {
+        FastVal val = fast_num(term_val(term));
+        if (fast_apply_value(run, val, args, &argc, &loc, &env, &len)) {
+          continue;
+        }
+        return val;
+      }
+      case C00 ... C16: {
+        u32 ari = term_tag(term) - C00;
+        u64 data_loc = fast_data_new(run, ari);
+        if (run->failed) {
+          return fast_bad();
+        }
+        u64 ctr_loc = term_val(term);
+        FastData *data = &run->data[data_loc];
+        for (u32 i = 0; i < ari; i++) {
+          data->arg[i] = fast_clo(ctr_loc + i, env, len);
+        }
+        FastVal val = fast_ctr(term_tag(term), term_ext(term), ari, data_loc);
+        if (fast_apply_value(run, val, args, &argc, &loc, &env, &len)) {
+          continue;
+        }
+        return val;
+      }
+      case OP2: {
+        if (argc != 0) {
+          fast_fail(run);
+          return fast_bad();
+        }
+        u64 op_loc = term_val(term);
+        FastVal a = fast_force(run, fast_clo(op_loc + 0, env, len));
+        FastVal b = fast_force(run, fast_clo(op_loc + 1, env, len));
+        if (run->failed || a.kind != FAST_KIND_NUM || b.kind != FAST_KIND_NUM) {
+          fast_fail(run);
+          return fast_bad();
+        }
+        run->itrs++;
+        return fast_num(term_op2_u32(term_ext(term), (u32)a.loc, (u32)b.loc));
+      }
+      default: {
+        fast_fail(run);
+        return fast_bad();
+      }
+    }
+  }
+  return fast_bad();
+}
+
+fn int fast_reify(FastRun *run, FastVal val, Term *out) {
+  val = fast_force(run, val);
+  if (run->failed) {
+    return 0;
+  }
+  switch (val.kind) {
+    case FAST_KIND_NUM: {
+      *out = term_new_num((u32)val.loc);
+      return 1;
+    }
+    case FAST_KIND_CTR: {
+      Term args[16];
+      FastData *data = &run->data[val.loc];
+      for (u32 i = 0; i < data->ari; i++) {
+        if (!fast_reify(run, data->arg[i], &args[i])) {
+          return 0;
+        }
+      }
+      *out = term_new_ctr(val.ext, data->ari, args);
+      return 1;
+    }
+    default: {
+      fast_fail(run);
+      return 0;
+    }
+  }
+}
+
+fn void fast_run_free(FastRun *run) {
+  free(run->envs);
+  free(run->data);
+  run->envs = NULL;
+  run->data = NULL;
+}
+
+// First-Order Bytecode Fast Path
+// ------------------------------
+
+#define FO_NUM_BIT (1ULL << 63)
+#define FO_LOC_MASK (~FO_NUM_BIT)
+#define FO_CODE_CAP (1U << 20)
+#define FO_STACK_CAP (1U << 20)
+#define FO_CTX_CAP (1U << 20)
+#define FO_NODE_CAP (1U << 22)
+#define FO_CALL_CAP 65536
+#define FO_BIND_CAP 256
+
+#define FO_DONE 0
+#define FO_LAM 1
+#define FO_DEL 2
+#define FO_MAT_CTR 3
+#define FO_MAT_NUM 4
+#define FO_VAR 5
+#define FO_NUM 6
+#define FO_CTR 7
+#define FO_CALL 8
+#define FO_TAIL 9
+#define FO_END 10
+#define FO_DUP 11
+#define FO_OP2 12
+
+typedef u64 FoTerm;
+
+typedef struct {
+  u8  op;
+  u8  tag;
+  u16 ari;
+  u32 ext;
+  u32 aux;
+} FoOp;
+
+typedef struct {
+  u8     tag;
+  u8     ari;
+  u32    ext;
+  u32    refs;
+  u32    next;
+  FoTerm arg[16];
+} FoNode;
+
+typedef struct {
+  u32 pc;
+  u32 frm;
+  u32 cur;
+  u32 fidx;
+} FoFrame;
+
+typedef struct {
+  u8  tag;
+  u32 ext;
+  u32 lvl;
+  u32 idx;
+} FoBind;
+
+typedef struct {
+  FoBind data[FO_BIND_CAP];
+  u32    len;
+  u32    slots;
+} FoScope;
+
+typedef struct {
+  FoOp    *code;
+  u32      code_len;
+  FoNode  *node;
+  u32      node_len;
+  u32      node_free;
+  FoTerm  *vals;
+  FoTerm  *terms;
+  FoTerm  *ctx;
+  FoFrame *calls;
+  u32     *fn_start;
+  u32     *fn_name;
+  int     *fn_of_name;
+  u32      fn_count;
+  u32      table_len;
+  u32      main_start;
+  u64      itrs;
+  const char *fail_reason;
+  u32      fail_tag;
+  int      failed;
+} FoRun;
+
+fn FoTerm fo_num(u32 val) {
+  return FO_NUM_BIT | val;
+}
+
+fn int fo_is_num(FoTerm term) {
+  return (term & FO_NUM_BIT) != 0;
+}
+
+fn u32 fo_num_val(FoTerm term) {
+  return (u32)(term & UINT32_MAX);
+}
+
+fn void fo_fail(FoRun *run) {
+  run->failed = 1;
+}
+
+fn void fo_fail_because(FoRun *run, const char *reason, u32 tag) {
+  if (run->fail_reason == NULL) {
+    run->fail_reason = reason;
+    run->fail_tag = tag;
+  }
+  fo_fail(run);
+}
+
+fn int fo_is_func_term(Term term) {
+  switch (term_tag(term)) {
+    case LAM:
+    case MAT:
+    case SWI:
+    case DUP: {
+      return 1;
+    }
+    default: {
+      return 0;
+    }
+  }
+}
+
+fn void fo_retain(FoRun *run, FoTerm term) {
+  if (!fo_is_num(term) && term != 0) {
+    run->node[term].refs++;
+  }
+}
+
+fn void fo_release(FoRun *run, FoTerm term) {
+  if (fo_is_num(term) || term == 0) {
+    return;
+  }
+  FoNode *node = &run->node[term];
+  if (node->refs > 0) {
+    node->refs--;
+    return;
+  }
+  for (u32 i = 0; i < node->ari; i++) {
+    fo_release(run, node->arg[i]);
+  }
+  node->next = run->node_free;
+  run->node_free = (u32)term;
+}
+
+fn u32 fo_node_alloc(FoRun *run) {
+  if (run->node_free != 0) {
+    u32 loc = run->node_free;
+    run->node_free = run->node[loc].next;
+    return loc;
+  }
+  if (run->node_len + 1 >= FO_NODE_CAP) {
+    fo_fail(run);
+    return 0;
+  }
+  return ++run->node_len;
+}
+
+fn FoTerm fo_ctr(FoRun *run, u8 tag, u32 ext, u32 ari, FoTerm *args) {
+  if (ari > 16) {
+    fo_fail(run);
+    return 0;
+  }
+  u32 loc = fo_node_alloc(run);
+  if (run->failed) {
+    return 0;
+  }
+  FoNode *node = &run->node[loc];
+  node->tag = tag;
+  node->ari = ari;
+  node->ext = ext;
+  node->refs = 0;
+  node->next = 0;
+  for (u32 i = 0; i < ari; i++) {
+    node->arg[i] = args[i];
+  }
+  return loc;
+}
+
+fn int fo_emit(FoRun *run, u8 op, u8 tag, u32 ari, u32 ext, u32 aux, u32 *pos) {
+  if (run->code_len >= FO_CODE_CAP) {
+    fo_fail(run);
+    return 0;
+  }
+  if (pos != NULL) {
+    *pos = run->code_len;
+  }
+  run->code[run->code_len++] = (FoOp){op, tag, (u16)ari, ext, aux};
+  return 1;
+}
+
+fn int fo_scope_find(FoRun *run, FoScope *scope, u8 tag, u32 ext, u32 lvl, u32 *idx) {
+  for (int i = (int)scope->len - 1; i >= 0; i--) {
+    FoBind *bind = &scope->data[i];
+    if (bind->tag == tag && bind->lvl == lvl && (tag == BJV || bind->ext == ext)) {
+      *idx = bind->idx;
+      return 1;
+    }
+  }
+  fo_fail_because(run, "scope", tag);
+  return 0;
+}
+
+fn int fo_scope_add(FoRun *run, FoScope *scope, u8 tag, u32 ext, u32 lvl) {
+  if (scope->len >= FO_BIND_CAP) {
+    fo_fail(run);
+    return 0;
+  }
+  scope->data[scope->len++] = (FoBind){tag, ext, lvl, scope->slots++};
+  return 1;
+}
+
+fn int fo_compile_expr(FoRun *run, u64 loc, FoScope scope, int tail);
+fn int fo_compile_func(FoRun *run, u64 loc, FoScope scope);
+
+fn void fo_find_dup_levels_go(Term term, u32 lab, u32 *lvl0, u32 *lvl1) {
+  u8 tag = term_tag(term);
+  if (tag == BJ0 && term_ext(term) == lab && *lvl0 == 0) {
+    *lvl0 = term_val(term);
+    return;
+  }
+  if (tag == BJ1 && term_ext(term) == lab && *lvl1 == 0) {
+    *lvl1 = term_val(term);
+    return;
+  }
+  u32 ari = term_arity(term);
+  u64 loc = term_val(term);
+  for (u32 i = 0; i < ari; i++) {
+    fo_find_dup_levels_go(heap_read(loc + i), lab, lvl0, lvl1);
+  }
+}
+
+fn void fo_find_dup_levels(Term body, u32 lab, u32 fallback, u32 *lvl0, u32 *lvl1) {
+  *lvl0 = 0;
+  *lvl1 = 0;
+  fo_find_dup_levels_go(body, lab, lvl0, lvl1);
+  if (*lvl0 == 0) {
+    *lvl0 = fallback;
+  }
+  if (*lvl1 == 0) {
+    *lvl1 = fallback;
+  }
+}
+
+fn int fo_collect_app(Term term, u64 *args, u32 *argc, Term *fun) {
+  *argc = 0;
+  while (term_tag(term) == APP) {
+    if (*argc >= 16) {
+      return 0;
+    }
+    u64 loc = term_val(term);
+    args[(*argc)++] = loc + 1;
+    term = heap_read(loc + 0);
+  }
+  *fun = term;
+  return 1;
+}
+
+fn int fo_compile_expr(FoRun *run, u64 loc, FoScope scope, int tail) {
+  if (run->failed) {
+    return 0;
+  }
+  Term term = heap_read(loc);
+  switch (term_tag(term)) {
+    case NUM: {
+      fo_emit(run, FO_NUM, 0, 0, term_val(term), 0, NULL);
+      if (tail) {
+        fo_emit(run, FO_END, 0, 0, 0, 0, NULL);
+      }
+      return !run->failed;
+    }
+    case C00 ... C16: {
+      u32 ari = term_tag(term) - C00;
+      u64 ctr_loc = term_val(term);
+      for (u32 i = 0; i < ari; i++) {
+        if (!fo_compile_expr(run, ctr_loc + i, scope, 0)) {
+          return 0;
+        }
+      }
+      fo_emit(run, FO_CTR, term_tag(term), ari, term_ext(term), 0, NULL);
+      if (tail) {
+        fo_emit(run, FO_END, 0, 0, 0, 0, NULL);
+      }
+      return !run->failed;
+    }
+    case BJV:
+    case BJ0:
+    case BJ1: {
+      u32 idx = 0;
+      if (!fo_scope_find(run, &scope, term_tag(term), term_ext(term), term_val(term), &idx)) {
+        return 0;
+      }
+      fo_emit(run, FO_VAR, 0, 0, idx, 0, NULL);
+      if (tail) {
+        fo_emit(run, FO_END, 0, 0, 0, 0, NULL);
+      }
+      return !run->failed;
+    }
+    case REF: {
+      u32 nam = term_ext(term);
+      if (nam >= run->table_len || BOOK[nam] == 0) {
+        fo_fail_because(run, "ref", term_tag(term));
+        return 0;
+      }
+      if (run->fn_of_name[nam] >= 0) {
+        fo_fail_because(run, "function-ref-expression", term_tag(term));
+        return 0;
+      }
+      return fo_compile_expr(run, BOOK[nam], scope, tail);
+    }
+    case APP: {
+      u64 args[16];
+      u32 argc = 0;
+      Term fun = 0;
+      if (!fo_collect_app(term, args, &argc, &fun) || term_tag(fun) != REF || argc == 0) {
+        fo_fail_because(run, "app", term_tag(fun));
+        return 0;
+      }
+      u32 nam = term_ext(fun);
+      if (nam >= run->table_len || run->fn_of_name[nam] < 0) {
+        fo_fail_because(run, "call-target", term_tag(fun));
+        return 0;
+      }
+      for (u32 i = argc; i > 0; i--) {
+        if (!fo_compile_expr(run, args[i - 1], scope, 0)) {
+          return 0;
+        }
+      }
+      fo_emit(run, tail ? FO_TAIL : FO_CALL, 0, argc, (u32)run->fn_of_name[nam], 0, NULL);
+      if (!tail) {
+        return !run->failed;
+      }
+      return !run->failed;
+    }
+    case OP2: {
+      u64 op_loc = term_val(term);
+      if (!fo_compile_expr(run, op_loc + 0, scope, 0)) {
+        return 0;
+      }
+      if (!fo_compile_expr(run, op_loc + 1, scope, 0)) {
+        return 0;
+      }
+      fo_emit(run, FO_OP2, 0, 0, term_ext(term), 0, NULL);
+      if (tail) {
+        fo_emit(run, FO_END, 0, 0, 0, 0, NULL);
+      }
+      return !run->failed;
+    }
+    default: {
+      fo_fail_because(run, "expr-tag", term_tag(term));
+      return 0;
+    }
+  }
+}
+
+fn int fo_compile_func(FoRun *run, u64 loc, FoScope scope) {
+  if (run->failed) {
+    return 0;
+  }
+  Term term = heap_read(loc);
+  switch (term_tag(term)) {
+    case LAM: {
+      u32 lam_ext = term_ext(term);
+      if (lam_ext & LAM_ERA_MASK) {
+        fo_emit(run, FO_DEL, 0, 0, 0, 0, NULL);
+      } else {
+        fo_emit(run, FO_LAM, 0, 0, 0, 0, NULL);
+        if (!fo_scope_add(run, &scope, BJV, 0, lam_ext)) {
+          return 0;
+        }
+      }
+      return fo_compile_func(run, term_val(term), scope);
+    }
+    case DUP: {
+      u64 dup_loc = term_val(term);
+      Term val = heap_read(dup_loc + 0);
+      u32 lab = term_ext(term);
+      u32 lvl0 = 0;
+      u32 lvl1 = 0;
+      fo_find_dup_levels(heap_read(dup_loc + 1), lab, term_val(val), &lvl0, &lvl1);
+      if (!fo_compile_expr(run, dup_loc + 0, scope, 0)) {
+        return 0;
+      }
+      fo_emit(run, FO_DUP, 0, 0, 0, 0, NULL);
+      if (!fo_scope_add(run, &scope, BJ0, lab, lvl0)) {
+        return 0;
+      }
+      if (!fo_scope_add(run, &scope, BJ1, lab, lvl1)) {
+        return 0;
+      }
+      return fo_compile_func(run, dup_loc + 1, scope);
+    }
+    case MAT:
+    case SWI: {
+      u64 mat_loc = term_val(term);
+      u32 pos = 0;
+      fo_emit(run, term_tag(term) == MAT ? FO_MAT_CTR : FO_MAT_NUM, 0, 0, term_ext(term), 0, &pos);
+      if (!fo_compile_func(run, mat_loc + 1, scope)) {
+        return 0;
+      }
+      run->code[pos].aux = run->code_len;
+      return fo_compile_func(run, mat_loc + 0, scope);
+    }
+    default: {
+      return fo_compile_expr(run, loc, scope, 1);
+    }
+  }
+}
+
+fn int fo_compile_program(FoRun *run, u32 main_id) {
+  run->table_len = TABLE.len;
+  run->fn_of_name = (int*)malloc(sizeof(int) * run->table_len);
+  if (run->fn_of_name == NULL) {
+    fo_fail(run);
+    return 0;
+  }
+  for (u32 i = 0; i < run->table_len; i++) {
+    run->fn_of_name[i] = -1;
+  }
+  for (u32 i = 0; i < run->table_len; i++) {
+    if (BOOK[i] != 0 && fo_is_func_term(heap_read(BOOK[i]))) {
+      run->fn_of_name[i] = (int)run->fn_count++;
+    }
+  }
+  run->fn_start = (u32*)calloc(run->fn_count == 0 ? 1 : run->fn_count, sizeof(u32));
+  run->fn_name = (u32*)calloc(run->fn_count == 0 ? 1 : run->fn_count, sizeof(u32));
+  if (run->fn_start == NULL || run->fn_name == NULL) {
+    fo_fail(run);
+    return 0;
+  }
+  for (u32 i = 0; i < run->table_len; i++) {
+    int fidx = run->fn_of_name[i];
+    if (fidx >= 0) {
+      run->fn_name[fidx] = i;
+    }
+  }
+  for (u32 fidx = 0; fidx < run->fn_count; fidx++) {
+    u32 nam = run->fn_name[fidx];
+    run->fn_start[fidx] = run->code_len;
+    FoScope scope = {0};
+    if (!fo_compile_func(run, BOOK[nam], scope)) {
+      return 0;
+    }
+  }
+  run->main_start = run->code_len;
+  FoScope scope = {0};
+  return fo_compile_expr(run, BOOK[main_id], scope, 1);
+}
+
+fn int fo_stack_push(FoRun *run, FoTerm *stack, u32 *sp, FoTerm term) {
+  if (*sp >= FO_STACK_CAP) {
+    fo_fail_because(run, "stack-push", 0);
+    return 0;
+  }
+  stack[(*sp)++] = term;
+  return 1;
+}
+
+fn FoTerm fo_stack_pop(FoRun *run, FoTerm *stack, u32 *sp) {
+  if (*sp == 0) {
+    fo_fail_because(run, "stack-pop", 0);
+    return 0;
+  }
+  return stack[--(*sp)];
+}
+
+fn int fo_call_enter(FoRun *run, FoOp op, FoTerm *vals, u32 *vsp, FoTerm *terms, u32 *tsp, FoTerm *term) {
+  if (op.ari == 0 || *vsp < op.ari || op.ext >= run->fn_count) {
+    fo_fail_because(run, "call-enter", op.op);
+    return 0;
+  }
+  for (u32 i = op.ari; i > 1; i--) {
+    FoTerm arg = fo_stack_pop(run, vals, vsp);
+    if (run->failed || !fo_stack_push(run, terms, tsp, arg)) {
+      return 0;
+    }
+  }
+  *term = fo_stack_pop(run, vals, vsp);
+  return !run->failed;
+}
+
+fn FoTerm fo_run(FoRun *run) {
+  FoTerm *vals = run->vals;
+  FoTerm *terms = run->terms;
+  FoTerm *ctx = run->ctx;
+  FoFrame *calls = run->calls;
+  u32 vsp = 0;
+  u32 tsp = 0;
+  u32 csp = 0;
+  u32 cur = 0;
+  u32 frm = 0;
+  u32 fidx = UINT32_MAX;
+  u32 pc = run->main_start;
+  FoTerm term = 0;
+  int have_term = 0;
+
+  while (!run->failed) {
+    FoOp op = run->code[pc++];
+    switch (op.op) {
+      case FO_NUM: {
+        if (!fo_stack_push(run, vals, &vsp, fo_num(op.ext))) {
+          return 0;
+        }
+        break;
+      }
+      case FO_CTR: {
+        if (vsp < op.ari) {
+          fo_fail(run);
+          return 0;
+        }
+        FoTerm args[16];
+        for (u32 i = op.ari; i > 0; i--) {
+          args[i - 1] = fo_stack_pop(run, vals, &vsp);
+        }
+        FoTerm ctr = fo_ctr(run, op.tag, op.ext, op.ari, args);
+        if (run->failed || !fo_stack_push(run, vals, &vsp, ctr)) {
+          return 0;
+        }
+        break;
+      }
+      case FO_VAR: {
+        FoTerm val = ctx[frm + op.ext];
+        if (val == 0) {
+          fo_fail_because(run, "var-empty", op.ext);
+          return 0;
+        }
+        ctx[frm + op.ext] = 0;
+        if (!fo_stack_push(run, vals, &vsp, val)) {
+          return 0;
+        }
+        break;
+      }
+      case FO_OP2: {
+        FoTerm b = fo_stack_pop(run, vals, &vsp);
+        FoTerm a = fo_stack_pop(run, vals, &vsp);
+        if (run->failed || !fo_is_num(a) || !fo_is_num(b)) {
+          fo_fail_because(run, "op2-non-num", 0);
+          return 0;
+        }
+        run->itrs++;
+        FoTerm val = fo_num(term_op2_u32(op.ext, fo_num_val(a), fo_num_val(b)));
+        if (!fo_stack_push(run, vals, &vsp, val)) {
+          return 0;
+        }
+        break;
+      }
+      case FO_CALL: {
+        if (csp >= FO_CALL_CAP || !fo_call_enter(run, op, vals, &vsp, terms, &tsp, &term)) {
+          if (csp >= FO_CALL_CAP) {
+            fo_fail_because(run, "call-stack", 0);
+          }
+          return 0;
+        }
+        have_term = 1;
+        calls[csp++] = (FoFrame){pc, frm, cur, fidx};
+        fidx = op.ext;
+        pc = run->fn_start[fidx];
+        frm = cur;
+        break;
+      }
+      case FO_TAIL: {
+        if (!fo_call_enter(run, op, vals, &vsp, terms, &tsp, &term)) {
+          return 0;
+        }
+        have_term = 1;
+        fidx = op.ext;
+        pc = run->fn_start[fidx];
+        cur = frm;
+        tsp = 0;
+        break;
+      }
+      case FO_LAM: {
+        if (!have_term) {
+          term = fo_stack_pop(run, terms, &tsp);
+          if (run->failed) {
+            return 0;
+          }
+          have_term = 1;
+        }
+        if (cur >= FO_CTX_CAP) {
+          fo_fail_because(run, "ctx", 0);
+          return 0;
+        }
+        run->itrs++;
+        ctx[cur++] = term;
+        term = 0;
+        have_term = 0;
+        break;
+      }
+      case FO_DEL: {
+        if (!have_term) {
+          term = fo_stack_pop(run, terms, &tsp);
+          if (run->failed) {
+            return 0;
+          }
+          have_term = 1;
+        }
+        run->itrs++;
+        fo_release(run, term);
+        term = 0;
+        have_term = 0;
+        break;
+      }
+      case FO_DUP: {
+        FoTerm val = fo_stack_pop(run, vals, &vsp);
+        if (run->failed || cur + 2 >= FO_CTX_CAP) {
+          fo_fail_because(run, "dup", 0);
+          return 0;
+        }
+        fo_retain(run, val);
+        ctx[cur++] = val;
+        ctx[cur++] = val;
+        break;
+      }
+      case FO_MAT_CTR: {
+        if (!have_term) {
+          term = fo_stack_pop(run, terms, &tsp);
+          if (run->failed) {
+            return 0;
+          }
+          have_term = 1;
+        }
+        if (fo_is_num(term)) {
+          break;
+        }
+        FoNode *node = &run->node[term];
+        if (node->ext != op.ext) {
+          break;
+        }
+        run->itrs++;
+        FoTerm fields[16];
+        for (u32 i = 0; i < node->ari; i++) {
+          fields[i] = node->arg[i];
+          if (node->refs > 0) {
+            fo_retain(run, fields[i]);
+          }
+        }
+        if (node->refs > 0) {
+          node->refs--;
+        } else {
+          node->next = run->node_free;
+          run->node_free = (u32)term;
+        }
+        if (node->ari == 0) {
+          term = 0;
+          have_term = 0;
+        } else {
+          for (u32 i = node->ari; i > 1; i--) {
+            if (!fo_stack_push(run, terms, &tsp, fields[i - 1])) {
+              return 0;
+            }
+          }
+          term = fields[0];
+          have_term = 1;
+        }
+        pc = op.aux;
+        break;
+      }
+      case FO_MAT_NUM: {
+        if (!have_term) {
+          term = fo_stack_pop(run, terms, &tsp);
+          if (run->failed) {
+            return 0;
+          }
+          have_term = 1;
+        }
+        if (!fo_is_num(term) || fo_num_val(term) != op.ext) {
+          break;
+        }
+        run->itrs++;
+        term = 0;
+        have_term = 0;
+        pc = op.aux;
+        break;
+      }
+      case FO_END: {
+        FoTerm val = fo_stack_pop(run, vals, &vsp);
+        if (run->failed) {
+          return 0;
+        }
+        if (csp == 0) {
+          return val;
+        }
+        FoFrame frame = calls[--csp];
+        pc = frame.pc;
+        frm = frame.frm;
+        cur = frame.cur;
+        fidx = frame.fidx;
+        if (!fo_stack_push(run, vals, &vsp, val)) {
+          return 0;
+        }
+        break;
+      }
+      default: {
+        fo_fail(run);
+        return 0;
+      }
+    }
+  }
+  return 0;
+}
+
+fn int fo_reify(FoRun *run, FoTerm term, Term *out) {
+  if (fo_is_num(term)) {
+    *out = term_new_num(fo_num_val(term));
+    return 1;
+  }
+  if (term == 0) {
+    return 0;
+  }
+  FoNode *node = &run->node[term];
+  Term args[16];
+  for (u32 i = 0; i < node->ari; i++) {
+    if (!fo_reify(run, node->arg[i], &args[i])) {
+      return 0;
+    }
+  }
+  *out = term_new_ctr(node->ext, node->ari, args);
+  return 1;
+}
+
+fn void fo_free(FoRun *run) {
+  free(run->code);
+  free(run->node);
+  free(run->vals);
+  free(run->terms);
+  free(run->ctx);
+  free(run->calls);
+  free(run->fn_start);
+  free(run->fn_name);
+  free(run->fn_of_name);
+}
+
+fn int fo_eval_main(u32 main_id, Term *out, u64 *itrs) {
+  FoRun run = {0};
+  run.code = (FoOp*)malloc(sizeof(FoOp) * FO_CODE_CAP);
+  run.node = (FoNode*)calloc(FO_NODE_CAP, sizeof(FoNode));
+  run.vals = (FoTerm*)malloc(sizeof(FoTerm) * FO_STACK_CAP);
+  run.terms = (FoTerm*)malloc(sizeof(FoTerm) * FO_STACK_CAP);
+  run.ctx = (FoTerm*)calloc(FO_CTX_CAP, sizeof(FoTerm));
+  run.calls = (FoFrame*)malloc(sizeof(FoFrame) * FO_CALL_CAP);
+  if (run.code == NULL || run.node == NULL || run.vals == NULL ||
+      run.terms == NULL || run.ctx == NULL || run.calls == NULL) {
+    fo_free(&run);
+    return 0;
+  }
+  if (!fo_compile_program(&run, main_id)) {
+    if (getenv("HVM_FO_TRACE") != NULL && run.fail_reason != NULL) {
+      fprintf(stderr, "[fo] compile fallback: %s tag=%u\n", run.fail_reason, run.fail_tag);
+    }
+    fo_free(&run);
+    return 0;
+  }
+  FoTerm val = fo_run(&run);
+  if (!run.failed && fo_reify(&run, val, out)) {
+    *itrs = run.itrs;
+    fo_free(&run);
+    return 1;
+  }
+  if (getenv("HVM_FO_TRACE") != NULL) {
+    fprintf(stderr, "[fo] run fallback: reason=%s tag=%u code=%u itrs=%llu\n",
+      run.fail_reason != NULL ? run.fail_reason : "?",
+      run.fail_tag,
+      run.code_len,
+      (unsigned long long)run.itrs);
+  }
+  fo_free(&run);
+  return 0;
+}
+
+fn int fast_eval_main(u32 main_id, Term *out, u64 *itrs) {
+  if (DEBUG || out == NULL || itrs == NULL || BOOK[main_id] == 0) {
+    return 0;
+  }
+  if (fo_eval_main(main_id, out, itrs)) {
+    return 1;
+  }
+#ifdef HVM_EXPERIMENTAL_CLOSURE_FAST
+  FastRun run = {0};
+  FastVal val = fast_eval(&run, fast_clo(BOOK[main_id], 0, 0));
+  if (!run.failed && fast_reify(&run, val, out)) {
+    *itrs = run.itrs;
+    fast_run_free(&run);
+    return 1;
+  }
+  fast_run_free(&run);
+#endif
+  return 0;
+}
+
 // Runtime Main Evaluator
 // ======================
 // Runs one top-level entrypoint using shared CLI evaluation behavior.
@@ -6141,7 +7293,13 @@ fn void runtime_eval_main(u32 main_id, const RuntimeEvalCfg *cfg) {
   if (run.do_collapse) {
     eval_collapse(main_ref, run.collapse_limit, run.stats, run.silent);
   } else {
-    Term result = eval_normalize(main_ref);
+    Term result;
+    u64 fast_itrs = 0;
+    if (!run.step_by_step && fast_eval_main(main_id, &result, &fast_itrs)) {
+      ITRS += fast_itrs;
+    } else {
+      result = eval_normalize(main_ref);
+    }
     if (!run.silent && !run.step_by_step) {
       print_term(result);
       printf("\n");
