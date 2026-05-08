@@ -95,6 +95,7 @@ typedef struct {
 #define F_OP2_NUM     0x43  // (x op □): ext=opr, val=x_num_val
 #define F_EQL_L       0x44  // (□ === b): val=eql_loc, b at HEAP[eql_loc+1]
 #define F_EQL_R       0x45  // (a === □): val=eql_loc, a stored at HEAP[eql_loc]
+#define F_ALO_MAT     0x46  // (@{s} λ{...} □): ext=len, val=reusable APP loc
 
 // Operation codes (stored in EXT field of OP2)
 #define OP_ADD 0
@@ -176,11 +177,11 @@ static u64 ITRS = 0;
 static int ITRS_ENABLED = 1;
 #define ITRS_INC(name) \
   do { \
-    if (ITRS_ENABLED != 0) { \
+    if (__builtin_expect(ITRS_ENABLED != 0, 1)) { \
+      ITRS++; \
       if (__builtin_expect(STEPS_ITRS_LIM != 0, 0)) { \
         STEPS_LAST_ITR = (name); \
       } \
-      ITRS++; \
     } \
   } while (0)
 static u32 FRESH = 1;
@@ -191,6 +192,23 @@ static int STEPS_ENABLE   = 0;
 static u64 STEPS_ITRS_LIM = 0;
 static u64 STEPS_ROOT_LOC = 0;
 static str STEPS_LAST_ITR = NULL;
+
+#ifdef HVM_PROFILE
+static u64 PROF_ENTER[TAG_MASK + 1];
+static u64 PROF_FRAME[TAG_MASK + 1];
+static u64 PROF_ALO_BOOK[TAG_MASK + 1];
+static u64 PROF_ALO_BOOK_CLOSED[TAG_MASK + 1];
+static u64 PROF_ALO_BOOK_OPEN[TAG_MASK + 1];
+static u64 PROF_APP_WHNF[TAG_MASK + 1];
+static u64 PROF_MAT_WHNF[TAG_MASK + 1];
+static u64 PROF_ALLOC[HEAP_FREE_MAX + 1];
+static u64 PROF_FREE[HEAP_FREE_MAX + 1];
+#define PROF_INC(arr, idx) do { (arr)[(idx) & TAG_MASK]++; } while (0)
+#define PROF_SIZE(arr, size) do { if ((size) <= HEAP_FREE_MAX) { (arr)[size]++; } } while (0)
+#else
+#define PROF_INC(arr, idx) do { } while (0)
+#define PROF_SIZE(arr, size) do { } while (0)
+#endif
 
 // Nick Alphabet
 // =============
@@ -317,6 +335,7 @@ fn u32 term_arity(Term t) {
 // ====
 
 fn u64 heap_alloc(u64 size) {
+  PROF_SIZE(PROF_ALLOC, size);
   if (__builtin_expect(size > 0 && size <= HEAP_FREE_MAX, 1)) {
     u64 at = HEAP_FREE[size];
     if (__builtin_expect(at != 0, 0)) {
@@ -338,6 +357,7 @@ fn void heap_free(u64 loc, u64 size) {
   if (__builtin_expect(loc == 0 || size == 0 || size > HEAP_FREE_MAX, 0)) {
     return;
   }
+  PROF_SIZE(PROF_FREE, size);
   HEAP[loc] = (Term)HEAP_FREE[size];
   HEAP_FREE[size] = loc;
 }
@@ -4077,6 +4097,24 @@ fn Term wnf_alo_lam(u64 alo_loc, u64 ls_loc, u32 len, Term book) {
   return term_new(0, LAM, lam_ext, bind_loc + 0);
 }
 
+fn Term wnf_alo_lam_app(u64 alo_loc, u64 ls_loc, u32 len, Term book, Term arg) {
+  ITRS_INC("APP-LAM");
+  u32 lam_ext  = term_ext(book);
+  u64 lam_body = term_val(book);
+  u64 bind_loc = heap_alloc(2);
+  u64 loc      = (len > 0) ? alo_loc : heap_alloc(1);
+  Term body    = term_new_alo_at(loc, bind_loc, len + 1, lam_body);
+  heap_set(bind_loc + 0, body);
+  heap_set(bind_loc + 1, term_new(0, NUM, 0, ls_loc));
+  if (lam_ext & LAM_ERA_MASK) {
+    heap_free_term(arg);
+    heap_free(bind_loc, 1);
+    return body;
+  }
+  heap_subst_var(bind_loc, arg);
+  return body;
+}
+
 // @{s} ! x &L = v; t
 // ------------------ ALO-DUP
 // x' ← fresh
@@ -4111,6 +4149,97 @@ fn Term wnf_alo_nod(u64 alo_loc, u64 ls_loc, u32 len, Term book) {
     args[i] = term_new_alo(ls_loc, len, loc + i);
   }
   return term_new_(tag, ext, ari, args);
+}
+
+fn Term wnf_alo_arg(u64 ls_loc, u32 len, u64 tm_loc) {
+  return term_new_alo(ls_loc, len, tm_loc);
+}
+
+fn Term wnf_alo_at(u64 alo_loc, u64 ls_loc, u32 len, u64 tm_loc) {
+  return len > 0 ? term_new_alo_at(alo_loc, ls_loc, len, tm_loc) : term_new_alo(0, 0, tm_loc);
+}
+
+fn Term wnf_alo_mat_ctr(u64 app_loc, u64 alo_loc, u64 ls_loc, u32 len, Term mat, Term ctr) {
+  u32 mat_ext = term_ext(mat);
+  u32 ctr_ext = term_ext(ctr);
+  u64 mat_loc = term_val(mat);
+  if (mat_ext == ctr_ext) {
+    ITRS_INC("APP-MAT-CTR-MAT");
+    u32 ari = term_tag(ctr) - C00;
+    Term res = wnf_alo_at(alo_loc, ls_loc, len, mat_loc + 0);
+    if (ari == 0) {
+      heap_free(app_loc, 2);
+      return res;
+    }
+    u64 ctr_loc = term_val(ctr);
+    res = term_new_app_at(app_loc, res, heap_read(ctr_loc + 0));
+    if (ari == 1) {
+      heap_free(ctr_loc, 1);
+      return res;
+    }
+    res = term_new_app_at(ctr_loc, res, heap_read(ctr_loc + 1));
+    if (ari == 2) {
+      return res;
+    }
+    u64 apps = heap_alloc(2 * (u64)(ari - 2));
+    for (u32 i = 2; i < ari; i++) {
+      res = term_new_app_at(apps + 2 * (u64)(i - 2), res, heap_read(ctr_loc + i));
+    }
+    heap_free(ctr_loc + 2, ari - 2);
+    return res;
+  }
+  ITRS_INC("APP-MAT-CTR-MIS");
+  Term nxt = wnf_alo_at(alo_loc, ls_loc, len, mat_loc + 1);
+  return term_new_app_at(app_loc, nxt, ctr);
+}
+
+fn Term wnf_alo_mat_num(u64 app_loc, u64 alo_loc, u64 ls_loc, u32 len, Term mat, Term num) {
+  u64 mat_loc = term_val(mat);
+  u32 mat_ext = term_ext(mat);
+  u64 num_val = term_val(num);
+  if (mat_ext == num_val) {
+    ITRS_INC("APP-MAT-NUM-MAT");
+    Term res = wnf_alo_at(alo_loc, ls_loc, len, mat_loc + 0);
+    heap_free(app_loc, 2);
+    return res;
+  }
+  ITRS_INC("APP-MAT-NUM-MIS");
+  Term nxt = wnf_alo_at(alo_loc, ls_loc, len, mat_loc + 1);
+  return term_new_app_at(app_loc, nxt, num);
+}
+
+fn Term wnf_alo_mat_frame_num(Term frame, Term num) {
+  u64 app_loc = term_val(frame);
+  u32 len     = term_ext(frame);
+  u64 alo_loc = 0;
+  u64 ls_loc  = 0;
+  u64 tm_loc  = 0;
+  if (len == 0) {
+    tm_loc = heap_read(app_loc + 0);
+  } else {
+    alo_loc = heap_read(app_loc + 0);
+    u64 pair = heap_read(alo_loc);
+    ls_loc = (pair >> ALO_TM_BITS) & ALO_LS_MASK;
+    tm_loc = pair & ALO_TM_MASK;
+  }
+  return wnf_alo_mat_num(app_loc, alo_loc, ls_loc, len, heap_read(tm_loc), num);
+}
+
+fn Term wnf_alo_mat_frame_ctr(Term frame, Term ctr) {
+  u64 app_loc = term_val(frame);
+  u32 len     = term_ext(frame);
+  u64 alo_loc = 0;
+  u64 ls_loc  = 0;
+  u64 tm_loc  = 0;
+  if (len == 0) {
+    tm_loc = heap_read(app_loc + 0);
+  } else {
+    alo_loc = heap_read(app_loc + 0);
+    u64 pair = heap_read(alo_loc);
+    ls_loc = (pair >> ALO_TM_BITS) & ALO_LS_MASK;
+    tm_loc = pair & ALO_TM_MASK;
+  }
+  return wnf_alo_mat_ctr(app_loc, alo_loc, ls_loc, len, heap_read(tm_loc), ctr);
 }
 
 // @@opr(&{}, y)
@@ -4813,6 +4942,24 @@ __attribute__((cold, noinline)) static Term wnf_rebuild(Term cur, Term *stack, u
         cur = term_new(0, EQL, 0, loc);
         break;
       }
+      case F_ALO_MAT: {
+        u64 loc = term_val(frame);
+        u32 len = term_ext(frame);
+        u64 alo_loc = 0;
+        u64 ls_loc = 0;
+        u64 tm_loc = 0;
+        if (len == 0) {
+          tm_loc = heap_read(loc + 0);
+        } else {
+          alo_loc = heap_read(loc + 0);
+          u64 pair = heap_read(alo_loc);
+          ls_loc = (pair >> ALO_TM_BITS) & ALO_LS_MASK;
+          tm_loc = pair & ALO_TM_MASK;
+        }
+        Term mat = wnf_alo_nod(alo_loc, ls_loc, len, heap_read(tm_loc));
+        cur = term_new_app_at(loc, mat, cur);
+        break;
+      }
       default: {
         break;
       }
@@ -4841,6 +4988,7 @@ __attribute__((hot)) fn Term wnf(Term term) {
       printf("\n");
     }
 
+    PROF_INC(PROF_ENTER, term_tag(next));
     switch (term_tag(next)) {
       case VAR: {
         u64 loc = term_val(next);
@@ -4915,6 +5063,12 @@ __attribute__((hot)) fn Term wnf(Term term) {
           tm_loc = pair & ALO_TM_MASK;
         }
         Term book    = heap_read(tm_loc);
+        PROF_INC(PROF_ALO_BOOK, term_tag(book));
+        if (len == 0) {
+          PROF_INC(PROF_ALO_BOOK_CLOSED, term_tag(book));
+        } else {
+          PROF_INC(PROF_ALO_BOOK_OPEN, term_tag(book));
+        }
 
         switch (term_tag(book)) {
           case VAR:
@@ -4936,6 +5090,14 @@ __attribute__((hot)) fn Term wnf(Term term) {
             goto enter;
           }
           case LAM: {
+            if (s_pos > base && term_tag(stack[s_pos - 1]) == APP) {
+              Term frame   = stack[--s_pos];
+              u64  app_loc = term_val(frame);
+              Term arg     = heap_read(app_loc + 1);
+              heap_free(app_loc, 2);
+              next = wnf_alo_lam_app(alo_loc, ls_loc, len, book, arg);
+              goto enter;
+            }
             next = wnf_alo_lam(alo_loc, ls_loc, len, book);
             goto enter;
           }
@@ -4943,15 +5105,51 @@ __attribute__((hot)) fn Term wnf(Term term) {
             next = wnf_alo_dup(alo_loc, ls_loc, len, book);
             goto enter;
           }
-          case APP:
+          case APP: {
+            u64 book_loc = term_val(book);
+            u64 app_loc  = heap_alloc(2);
+            Term fun     = wnf_alo_at(alo_loc, ls_loc, len, book_loc + 0);
+            Term arg     = wnf_alo_arg(ls_loc, len, book_loc + 1);
+            heap_set(app_loc + 1, arg);
+            stack[s_pos++] = term_new(0, APP, 0, app_loc);
+            next = fun;
+            goto enter;
+          }
           case DRY:
-          case SUP:
+          case SUP: {
+            next = wnf_alo_nod(alo_loc, ls_loc, len, book);
+            goto enter;
+          }
           case MAT:
-          case SWI:
-          case USE:
+          case SWI: {
+            if (s_pos > base && term_tag(stack[s_pos - 1]) == APP) {
+              Term frame   = stack[--s_pos];
+              u64  app_loc = term_val(frame);
+              Term arg     = heap_read(app_loc + 1);
+              heap_set(app_loc + 0, len > 0 ? (Term)alo_loc : (Term)tm_loc);
+              stack[s_pos++] = term_new(0, F_ALO_MAT, len, app_loc);
+              next = arg;
+              goto enter;
+            }
+            next = wnf_alo_nod(alo_loc, ls_loc, len, book);
+            goto enter;
+          }
+          case USE: {
+            if (s_pos > base && term_tag(stack[s_pos - 1]) == APP) {
+              Term frame   = stack[--s_pos];
+              u64  app_loc = term_val(frame);
+              Term arg     = heap_read(app_loc + 1);
+              Term fun     = wnf_alo_nod(alo_loc, ls_loc, len, book);
+              heap_free(app_loc, 2);
+              stack[s_pos++] = fun;
+              next = arg;
+              goto enter;
+            }
+            next = wnf_alo_nod(alo_loc, ls_loc, len, book);
+            goto enter;
+          }
           case UNS:
           case INC:
-          case C00 ... C16:
           case OP2:
           case EQL:
           case AND:
@@ -4961,16 +5159,51 @@ __attribute__((hot)) fn Term wnf(Term term) {
             next = wnf_alo_nod(alo_loc, ls_loc, len, book);
             goto enter;
           }
+          case C00 ... C16: {
+            Term val = wnf_alo_nod(alo_loc, ls_loc, len, book);
+            if (s_pos > base && term_tag(stack[s_pos - 1]) == F_ALO_MAT) {
+              Term frame = stack[--s_pos];
+              next = wnf_alo_mat_frame_ctr(frame, val);
+              goto enter;
+            }
+            next = val;
+            goto enter;
+          }
           case NAM:
-          case NUM:
-          case REF:
           case ERA:
           case ANY: {
             if (len > 0) {
               heap_free(alo_loc, 1);
             }
-            next = book;
-            goto enter;
+            whnf = book;
+            goto apply;
+          }
+          case NUM: {
+            if (s_pos > base && term_tag(stack[s_pos - 1]) == F_ALO_MAT) {
+              Term frame = stack[--s_pos];
+              if (len > 0) {
+                heap_free(alo_loc, 1);
+              }
+              next = wnf_alo_mat_frame_num(frame, book);
+              goto enter;
+            }
+            if (len > 0) {
+              heap_free(alo_loc, 1);
+            }
+            whnf = book;
+            goto apply;
+          }
+          case REF: {
+            if (len > 0) {
+              heap_free(alo_loc, 1);
+            }
+            u32 nam = term_ext(book);
+            if (BOOK[nam] != 0) {
+              next = term_new_alo(0, 0, BOOK[nam]);
+              goto enter;
+            }
+            whnf = book;
+            goto apply;
           }
         }
       }
@@ -5060,6 +5293,7 @@ __attribute__((hot)) fn Term wnf(Term term) {
         return wnf_rebuild(whnf, stack, s_pos, base);
       }
       Term frame = stack[--s_pos];
+      PROF_INC(PROF_FRAME, term_tag(frame));
 
       switch (term_tag(frame)) {
         // -----------------------------------------------------------------------
@@ -5068,6 +5302,7 @@ __attribute__((hot)) fn Term wnf(Term term) {
         case APP: {
           u64  app_loc = term_val(frame);
           Term arg     = heap_read(app_loc + 1);
+          PROF_INC(PROF_APP_WHNF, term_tag(whnf));
 
           switch (term_tag(whnf)) {
             case ERA: {
@@ -5129,12 +5364,73 @@ __attribute__((hot)) fn Term wnf(Term term) {
           }
         }
 
+        case F_ALO_MAT: {
+          u64 app_loc = term_val(frame);
+          u32 len     = term_ext(frame);
+          u64 alo_loc = 0;
+          u64 ls_loc  = 0;
+          u64 tm_loc  = 0;
+          if (len == 0) {
+            tm_loc = heap_read(app_loc + 0);
+          } else {
+            alo_loc = heap_read(app_loc + 0);
+            u64 pair = heap_read(alo_loc);
+            ls_loc = (pair >> ALO_TM_BITS) & ALO_LS_MASK;
+            tm_loc = pair & ALO_TM_MASK;
+          }
+          Term mat = heap_read(tm_loc);
+
+          switch (term_tag(whnf)) {
+            case C00 ... C16: {
+              next = wnf_alo_mat_ctr(app_loc, alo_loc, ls_loc, len, mat, whnf);
+              goto enter;
+            }
+            case NUM: {
+              next = wnf_alo_mat_num(app_loc, alo_loc, ls_loc, len, mat, whnf);
+              goto enter;
+            }
+            default: {
+              Term dyn = wnf_alo_nod(alo_loc, ls_loc, len, mat);
+              heap_free(app_loc, 2);
+              switch (term_tag(whnf)) {
+                case ERA: {
+                  heap_free_term(dyn);
+                  whnf = wnf_app_era();
+                  continue;
+                }
+                case SUP: {
+                  whnf = wnf_app_mat_sup(dyn, whnf);
+                  continue;
+                }
+                case INC: {
+                  whnf = wnf_mat_inc(dyn, whnf);
+                  continue;
+                }
+                case NAM:
+                case BJV:
+                case BJ0:
+                case BJ1:
+                case DRY: {
+                  whnf = term_new_dry(dyn, whnf);
+                  continue;
+                }
+                default: {
+                  whnf = term_new_app(dyn, whnf);
+                  continue;
+                }
+              }
+              continue;
+            }
+          }
+        }
+
         // -----------------------------------------------------------------------
         // MAT/SWI frame: (mat □) - we reduced arg, dispatch mat interaction
         // -----------------------------------------------------------------------
         case MAT:
         case SWI: {
           Term mat = frame;
+          PROF_INC(PROF_MAT_WHNF, term_tag(whnf));
           switch (term_tag(whnf)) {
             case ERA: {
               heap_free_term(mat);
@@ -5869,6 +6165,60 @@ fn void runtime_eval_main(u32 main_id, const RuntimeEvalCfg *cfg) {
   }
 }
 
+#ifdef HVM_PROFILE
+static const char *PROFILE_TAG_NAMES[TAG_MASK + 1] = {
+  [APP] = "APP", [VAR] = "VAR", [LAM] = "LAM", [DP0] = "DP0", [DP1] = "DP1",
+  [SUP] = "SUP", [DUP] = "DUP", [ALO] = "ALO", [REF] = "REF", [NAM] = "NAM",
+  [DRY] = "DRY", [ERA] = "ERA", [MAT] = "MAT", [C00] = "C00", [C01] = "C01",
+  [C02] = "C02", [C03] = "C03", [C04] = "C04", [C05] = "C05", [C06] = "C06",
+  [C07] = "C07", [C08] = "C08", [C09] = "C09", [C10] = "C10", [C11] = "C11",
+  [C12] = "C12", [C13] = "C13", [C14] = "C14", [C15] = "C15", [C16] = "C16",
+  [NUM] = "NUM", [SWI] = "SWI", [USE] = "USE", [OP2] = "OP2", [DSU] = "DSU",
+  [DDU] = "DDU", [EQL] = "EQL", [AND] = "AND", [OR] = "OR", [UNS] = "UNS",
+  [ANY] = "ANY", [INC] = "INC", [BJV] = "BJV", [BJ0] = "BJ0", [BJ1] = "BJ1",
+  [F_OP2_NUM] = "F_OP2_NUM", [F_EQL_L] = "F_EQL_L", [F_EQL_R] = "F_EQL_R",
+  [F_ALO_MAT] = "F_ALO_MAT",
+};
+
+fn const char *profile_tag_name(u32 tag) {
+  const char *name = tag <= TAG_MASK ? PROFILE_TAG_NAMES[tag] : NULL;
+  return name != NULL ? name : "?";
+}
+
+fn void profile_print_counts(const char *name, u64 *counts) {
+  fprintf(stderr, "[profile] %s", name);
+  for (u32 i = 0; i <= TAG_MASK; i++) {
+    if (counts[i] != 0) {
+      fprintf(stderr, " %s=%llu", profile_tag_name(i), (unsigned long long)counts[i]);
+    }
+  }
+  fprintf(stderr, "\n");
+}
+
+fn void profile_print(void) {
+  profile_print_counts("enter", PROF_ENTER);
+  profile_print_counts("frame", PROF_FRAME);
+  profile_print_counts("alo_book", PROF_ALO_BOOK);
+  profile_print_counts("alo_closed", PROF_ALO_BOOK_CLOSED);
+  profile_print_counts("alo_open", PROF_ALO_BOOK_OPEN);
+  profile_print_counts("app_whnf", PROF_APP_WHNF);
+  profile_print_counts("mat_whnf", PROF_MAT_WHNF);
+  fprintf(stderr, "[profile] alloc");
+  for (u32 i = 0; i <= HEAP_FREE_MAX; i++) {
+    if (PROF_ALLOC[i] != 0) {
+      fprintf(stderr, " %u=%llu", i, (unsigned long long)PROF_ALLOC[i]);
+    }
+  }
+  fprintf(stderr, "\n[profile] free");
+  for (u32 i = 0; i <= HEAP_FREE_MAX; i++) {
+    if (PROF_FREE[i] != 0) {
+      fprintf(stderr, " %u=%llu", i, (unsigned long long)PROF_FREE[i]);
+    }
+  }
+  fprintf(stderr, "\n");
+}
+#endif
+
 // Data
 // ====
 
@@ -6568,6 +6918,9 @@ int main(int argc, char **argv) {
     .step_by_step  = opts.step_by_step,
   };
   runtime_eval_main(main_id, &eval_cfg);
+#ifdef HVM_PROFILE
+  profile_print();
+#endif
 
   free(abs_path);
   runtime_free();
