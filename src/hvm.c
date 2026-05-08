@@ -6932,12 +6932,12 @@ fn FoTerm fo_stack_pop(FoRun *run, FoTerm *stack, u32 *sp) {
   return stack[--(*sp)];
 }
 
-fn int fo_call_enter(FoRun *run, FoOp op, FoTerm *vals, u32 *vsp, FoTerm *terms, u32 *tsp, FoTerm *term) {
-  if (op.ari == 0 || *vsp < op.ari || op.ext >= run->fn_count) {
-    fo_fail_because(run, "call-enter", op.op);
+fn int fo_call_enter(FoRun *run, FoOp *op, FoTerm *vals, u32 *vsp, FoTerm *terms, u32 *tsp, FoTerm *term) {
+  if (op->ari == 0 || *vsp < op->ari || op->ext >= run->fn_count) {
+    fo_fail_because(run, "call-enter", op->op);
     return 0;
   }
-  for (u32 i = op.ari; i > 1; i--) {
+  for (u32 i = op->ari; i > 1; i--) {
     FoTerm arg = fo_stack_pop(run, vals, vsp);
     if (run->failed || !fo_stack_push(run, terms, tsp, arg)) {
       return 0;
@@ -6964,37 +6964,37 @@ fn FoTerm fo_run(FoRun *run) {
 
   while (!run->failed) {
     run->trace_pc = pc;
-    FoOp op = run->code[pc++];
-    run->trace_op = op.op;
-    switch (op.op) {
+    FoOp *op = &run->code[pc++];
+    run->trace_op = op->op;
+    switch (op->op) {
       case FO_NUM: {
-        if (!fo_stack_push(run, vals, &vsp, fo_num(op.ext))) {
+        if (!fo_stack_push(run, vals, &vsp, fo_num(op->ext))) {
           return 0;
         }
         break;
       }
       case FO_CTR: {
-        if (vsp < op.ari) {
+        if (vsp < op->ari) {
           fo_fail(run);
           return 0;
         }
         FoTerm args[16];
-        for (u32 i = op.ari; i > 0; i--) {
+        for (u32 i = op->ari; i > 0; i--) {
           args[i - 1] = fo_stack_pop(run, vals, &vsp);
         }
-        FoTerm ctr = fo_ctr(run, op.tag, op.ext, op.ari, args);
+        FoTerm ctr = fo_ctr(run, op->tag, op->ext, op->ari, args);
         if (run->failed || !fo_stack_push(run, vals, &vsp, ctr)) {
           return 0;
         }
         break;
       }
       case FO_VAR: {
-        FoTerm val = ctx[frm + op.ext];
+        FoTerm val = ctx[frm + op->ext];
         if (val == 0) {
-          fo_fail_because(run, "var-empty", op.ext);
+          fo_fail_because(run, "var-empty", op->ext);
           return 0;
         }
-        ctx[frm + op.ext] = 0;
+        ctx[frm + op->ext] = 0;
         if (!fo_stack_push(run, vals, &vsp, val)) {
           return 0;
         }
@@ -7008,7 +7008,7 @@ fn FoTerm fo_run(FoRun *run) {
           return 0;
         }
         run->itrs++;
-        FoTerm val = fo_num(term_op2_u32(op.ext, fo_num_val(a), fo_num_val(b)));
+        FoTerm val = fo_num(term_op2_u32(op->ext, fo_num_val(a), fo_num_val(b)));
         if (!fo_stack_push(run, vals, &vsp, val)) {
           return 0;
         }
@@ -7023,7 +7023,7 @@ fn FoTerm fo_run(FoRun *run) {
         }
         have_term = 1;
         calls[csp++] = (FoFrame){pc, frm, cur, fidx};
-        fidx = op.ext;
+        fidx = op->ext;
         pc = run->fn_start[fidx];
         frm = cur;
         break;
@@ -7034,7 +7034,7 @@ fn FoTerm fo_run(FoRun *run) {
           return 0;
         }
         have_term = 1;
-        fidx = op.ext;
+        fidx = op->ext;
         pc = run->fn_start[fidx];
         cur = frm;
         break;
@@ -7094,7 +7094,7 @@ fn FoTerm fo_run(FoRun *run) {
           break;
         }
         FoNode *node = &run->node[term];
-        if (node->ext != op.ext) {
+        if (node->ext != op->ext) {
           break;
         }
         run->itrs++;
@@ -7123,7 +7123,7 @@ fn FoTerm fo_run(FoRun *run) {
           term = fields[0];
           have_term = 1;
         }
-        pc = op.aux;
+        pc = op->aux;
         break;
       }
       case FO_MAT_NUM: {
@@ -7134,13 +7134,13 @@ fn FoTerm fo_run(FoRun *run) {
           }
           have_term = 1;
         }
-        if (!fo_is_num(term) || fo_num_val(term) != op.ext) {
+        if (!fo_is_num(term) || fo_num_val(term) != op->ext) {
           break;
         }
         run->itrs++;
         term = 0;
         have_term = 0;
-        pc = op.aux;
+        pc = op->aux;
         break;
       }
       case FO_END: {
