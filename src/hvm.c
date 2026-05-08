@@ -6540,6 +6540,7 @@ typedef struct {
   u32      fn_count;
   u32      table_len;
   u32      main_start;
+  u32      compile_name;
   u64      itrs;
   const char *fail_reason;
   u32      fail_tag;
@@ -6666,7 +6667,7 @@ fn int fo_scope_find(FoRun *run, FoScope *scope, u8 tag, u32 ext, u32 lvl, u32 *
       return 1;
     }
   }
-  fo_fail_because(run, "scope", tag);
+  fo_fail_because(run, tag == BJV ? "scope-bjv" : "scope-bj", lvl);
   return 0;
 }
 
@@ -6909,6 +6910,7 @@ fn int fo_compile_program(FoRun *run, u32 main_id) {
   }
   for (u32 fidx = 0; fidx < run->fn_count; fidx++) {
     u32 nam = run->fn_name[fidx];
+    run->compile_name = nam;
     run->fn_start[fidx] = run->code_len;
     FoScope scope = {0};
     if (!fo_compile_func(run, BOOK[nam], scope)) {
@@ -6916,6 +6918,7 @@ fn int fo_compile_program(FoRun *run, u32 main_id) {
     }
   }
   run->main_start = run->code_len;
+  run->compile_name = main_id;
   FoScope scope = {0};
   return fo_compile_expr(run, BOOK[main_id], scope, 1);
 }
@@ -7239,7 +7242,11 @@ fn int fo_eval_main(u32 main_id, Term *out, u64 *itrs) {
   }
   if (!fo_compile_program(&run, main_id)) {
     if (getenv("HVM_FO_TRACE") != NULL && run.fail_reason != NULL) {
-      fprintf(stderr, "[fo] compile fallback: %s tag=%u\n", run.fail_reason, run.fail_tag);
+      char *name = table_get(run.compile_name);
+      fprintf(stderr, "[fo] compile fallback: def=%s reason=%s tag=%u\n",
+        name != NULL ? name : "?",
+        run.fail_reason,
+        run.fail_tag);
     }
     fo_free(&run);
     return 0;
