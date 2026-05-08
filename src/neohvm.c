@@ -1715,6 +1715,27 @@ do_ref:
 do_call_ref:
   if (pc->next == NULL) die("unknown reference");
   if (argc >= MAX_ARGS) die("argument stack overflow");
+  if (pc->next->op == BC_MAT && (pc->sub->op == BC_CTR || pc->sub->op == BC_NUM)) {
+    Code *arg_code = pc->sub;
+    Code *body = NULL;
+    if (arg_code->op == BC_CTR) {
+      Cases *cases = pc->next->cases;
+      if (cases->ctr && arg_code->ext == cases->ctr_ext) body = cases->ctr;
+    } else {
+      if (arg_code->ext == 0) body = pc->next->cases->num0;
+      else if (arg_code->ext == 1) body = pc->next->cases->num1;
+    }
+    if (body != NULL) {
+      ITRS++;
+      if (arg_code->op == BC_CTR) {
+        push_ctr_code_args(arg_code, env, gap, args, &argc);
+      }
+      pc = body;
+      env = NULL;
+      gap = 0;
+      goto *pc->jump;
+    }
+  }
   args[argc++] = arg_code(pc->sub, env, gap);
   pc = pc->next;
   env = NULL;
