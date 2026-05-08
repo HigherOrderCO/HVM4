@@ -756,7 +756,6 @@ static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc);
 static Val *force(Val *v);
 static inline Val *mk_lam(Code *code, Env *env, u32 gap);
 static inline Val *mk_mat(Code *code, Env *env, u32 gap);
-static int mark_ref_code(Code *code, u32 depth);
 
 static Code *compile_term(Term *term) {
   if (term->code) return term->code;
@@ -883,9 +882,6 @@ static void compile_program_terms(void) {
     if (DEFS[i]) compile_term(DEFS[i]);
   }
   for (u32 i = 0; i < NAME_LEN; i++) {
-    if (DEFS[i]) mark_ref_code(DEFS[i]->code, 0);
-  }
-  for (u32 i = 0; i < NAME_LEN; i++) {
     if (DEFS[i] && (DEFS[i]->code->op == BC_LAM || DEFS[i]->code->op == BC_MAT)) {
       REF_CACHE[i] = DEFS[i]->code->op == BC_LAM
         ? mk_lam(DEFS[i]->code->sub, NULL, 0)
@@ -895,55 +891,6 @@ static void compile_program_terms(void) {
       }
     }
   }
-}
-
-static int mark_ref_code(Code *code, u32 depth) {
-  if (code == NULL || depth > 64) return 0;
-  if (code->pad != 0) return code->pad == 2;
-  int has = 0;
-  switch (code->op) {
-    case BC_ARGS:
-      has = mark_ref_code(code->next, depth + 1);
-      for (u32 i = 0; !has && i < code->arity; i++) {
-        has = mark_ref_code(code->term->kid[i]->code, depth + 1);
-      }
-      break;
-    case BC_ARG:
-    case BC_DUP:
-      has = mark_ref_code(code->sub, depth + 1)
-         || mark_ref_code(code->next, depth + 1);
-      break;
-    case BC_CTR:
-      for (u32 i = 0; i < code->arity; i++) {
-        if (mark_ref_code(code->term->kid[i]->code, depth + 1)) {
-          has = 1;
-          break;
-        }
-      }
-      break;
-    case BC_LAM:
-      has = mark_ref_code(code->sub, depth + 1);
-      break;
-    case BC_MAT:
-      if (code->cases != NULL) {
-        has = mark_ref_code(code->cases->ctr, depth + 1)
-           || mark_ref_code(code->cases->num0, depth + 1)
-           || mark_ref_code(code->cases->num1, depth + 1)
-           || mark_ref_code(code->cases->dft, depth + 1);
-      }
-      break;
-    case BC_REF:
-      has = 1;
-      break;
-    case BC_SUP:
-      has = mark_ref_code(code->term->kid[0]->code, depth + 1)
-         || mark_ref_code(code->term->kid[1]->code, depth + 1);
-      break;
-    default:
-      break;
-  }
-  code->pad = has ? 2 : 1;
-  return has;
 }
 
 static int code_has_sup_label(Code *code, u32 lab, u32 depth) {
@@ -1137,9 +1084,7 @@ ALWAYS_INLINE Val *bind_arg(Arg *arg) {
     case BC_NUM:
       return mk_num(arg->code->ext);
     case BC_CTR:
-      return arg->code->pad == 2
-        ? mk_lthunk(arg->code, arg->env, arg->gap)
-        : make_ctr(arg->code, arg->env, arg->gap);
+      return make_ctr(arg->code, arg->env, arg->gap);
     case BC_REF:
       if (arg->code->ext < MAX_NAMES && REF_CACHE[arg->code->ext] != NULL) return REF_CACHE[arg->code->ext];
       return force_arg(arg);
