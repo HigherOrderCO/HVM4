@@ -276,10 +276,10 @@ static Term *term_new(u8 tag) {
 
 ALWAYS_INLINE Val *val_new(u8 tag) {
   Val *v;
-  if (VAL_FREE != NULL) {
+  if (__builtin_expect(VAL_FREE != NULL, 1)) {
     v = VAL_FREE;
     VAL_FREE = VAL_FREE->fst;
-  } else if (VAL_BLOCK == NULL || VAL_BLOCK->used >= 65536) {
+  } else if (__builtin_expect(VAL_BLOCK == NULL || VAL_BLOCK->used >= 65536, 0)) {
     ValBlock *block = (ValBlock*)malloc(sizeof(ValBlock));
     if (!block) die("out of memory");
     block->next = VAL_BLOCK;
@@ -396,7 +396,7 @@ static LamDup *lamdup_new(void) {
 }
 
 ALWAYS_INLINE Env *env_cell(Val *val, Env *next, u32 span) {
-  if (ENV_BLOCK == NULL || ENV_BLOCK->used >= 65536) {
+  if (__builtin_expect(ENV_BLOCK == NULL || ENV_BLOCK->used >= 65536, 0)) {
     EnvBlock *block = (EnvBlock*)malloc(sizeof(EnvBlock));
     if (!block) die("out of memory");
     block->next = ENV_BLOCK;
@@ -1811,7 +1811,7 @@ do_var:
   } else {
     val = env_get(env, pc->ext, gap);
   }
-  if (val->tag == V_THUNK || val->tag == V_LTHUNK) goto apply_value;
+  if (__builtin_expect(val->tag == V_THUNK || val->tag == V_LTHUNK, 0)) goto apply_value;
   goto apply_ready;
 
 do_dp0:
@@ -1881,7 +1881,7 @@ do_slam:
   }
 
 do_mat:
-  if (argc == 0) {
+  if (__builtin_expect(argc == 0, 0)) {
     val = mk_mat(pc, env, gap);
     goto apply_ready;
   }
@@ -1945,7 +1945,7 @@ do_mat:
   }
 
 do_mat_ctr:
-  if (argc == 0) {
+  if (__builtin_expect(argc == 0, 0)) {
     val = mk_mat(pc, env, gap);
     goto apply_ready;
   }
