@@ -2536,13 +2536,12 @@ int main(int argc, char **argv) {
   clock_gettime(CLOCK_MONOTONIC, &t0);
   Val *res = force(eval_term(DEFS[main_id], NULL));
   normalize_val(res);
-  clock_gettime(CLOCK_MONOTONIC, &t1);
-  double elapsed = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
-
   if (!silent) {
     print_val(res);
     putchar('\n');
   }
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  double elapsed = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
   if (stats) {
     fprintf(stderr, "- Itrs: %llu interactions\n", (unsigned long long)ITRS);
     fprintf(stderr, "- Heap: %llu nodes\n", (unsigned long long)val_live_count());
