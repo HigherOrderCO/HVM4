@@ -6319,6 +6319,7 @@ static Val          NEO_NUM_CACHE[2] = {
   {.tag = V_NUM, .ext = 0, .arity = 0, .env = NULL, .code = NULL},
   {.tag = V_NUM, .ext = 1, .arity = 0, .env = NULL, .code = NULL},
 };
+static Val          NEO_PSEL_1 = {.tag = V_PSEL, .ext = 1, .arity = 0, .fst = NULL, .snd = NULL};
 
 static void neo_disable(void) {
   NEO_FAILED = 1;
@@ -6337,7 +6338,7 @@ NEO_INLINE void neo_itr(u64 n) {
   NEO_ITRS += n;
 }
 
-NEO_INLINE Val *val_new(u8 tag) {
+static __attribute__((noinline)) Val *val_new(u8 tag) {
   Val *v;
   if (__builtin_expect(NEO_VAL_FREE != NULL, 1)) {
     v = NEO_VAL_FREE;
@@ -7282,15 +7283,26 @@ static inline Val *mk_sel(u8 pick) {
   v->ext = pick;
   v->arity = 0;
   v->pad = 0;
+  v->fst = NULL;
+  v->snd = NULL;
   return v;
 }
 
 static inline Val *mk_psel(u8 pick, Val *arg) {
+  if (pick == 1) {
+    return &NEO_PSEL_1;
+  }
+  if (arg != NULL && arg->tag == V_SEL && arg->fst != NULL) {
+    return arg->fst;
+  }
   Val *v = val_new(V_PSEL);
   v->ext = pick;
   v->arity = 0;
   v->pad = 0;
   v->fst = arg;
+  if (arg != NULL && arg->tag == V_SEL) {
+    arg->fst = v;
+  }
   return v;
 }
 
@@ -7430,8 +7442,9 @@ NEO_INLINE Val *bind_arg(Arg *arg) {
   }
 }
 
-NEO_INLINE Val *project(Val *v, u32 lab, u8 side) {
-  v = force(v);
+NEO_INLINE Val *project(Val *v, u32 lab, u8 side);
+
+NEO_INLINE Val *project_forced(Val *v, u32 lab, u8 side) {
   if (v->tag == V_SEL || v->tag == V_PSEL || v->tag == V_CALL2) {
     return v;
   }
@@ -7451,7 +7464,11 @@ NEO_INLINE Val *project(Val *v, u32 lab, u8 side) {
   }
   if (v->tag == V_SUP) {
     neo_itr(1);
-    if (v->ext == lab) return side == 0 ? v->fst : v->snd;
+    if (v->ext == lab) {
+      Val *out = side == 0 ? v->fst : v->snd;
+      val_free(v);
+      return out;
+    }
     return mk_sup(v->ext, project(v->fst, lab, side), project(v->snd, lab, side));
   }
   if (v->tag == V_CTR) {
@@ -7490,6 +7507,10 @@ NEO_INLINE Val *project(Val *v, u32 lab, u8 side) {
     return v;
   }
   return v;
+}
+
+NEO_INLINE Val *project(Val *v, u32 lab, u8 side) {
+  return project_forced(force(v), lab, side);
 }
 
 NEO_INLINE int mat_hits(Case *m, Val *arg) {
@@ -7701,7 +7722,7 @@ static inline Val *apply_lam(Val *lam, Arg *arg) {
   neo_itr(1);
   Env *env = lam->env;
   u32 gap = lam->ext;
-  if (lam->tag == V_ELAM) {
+  if (__builtin_expect(lam->tag == V_ELAM, 0)) {
     gap++;
   } else {
     env = env_push_lam(bind_arg(arg), env, gap);
@@ -7716,8 +7737,10 @@ static inline Val *apply_sel(Val *sel, Arg *arg) {
   if (sel->tag == V_SEL) {
     return mk_psel((u8)sel->ext, sel->ext == 0 ? bind_arg(arg) : NULL);
   }
-  Val *got = bind_arg(arg);
-  return sel->ext == 0 ? sel->fst : got;
+  if (sel->ext == 0) {
+    return sel->fst;
+  }
+  return bind_arg(arg);
 }
 
 static inline Val *apply_call2(Val *call, Arg *arg) {
@@ -7750,7 +7773,7 @@ static Val *apply_plam(Val *plam, Arg *arg) {
   if (!is_lam(lam)) neo_die("projected non-lambda");
   Env *env = lam->env;
   u32 gap = lam->ext;
-  if (lam->tag == V_ELAM) {
+  if (__builtin_expect(lam->tag == V_ELAM, 0)) {
     gap++;
   } else {
     Val *got = bind_arg(arg);
@@ -7762,10 +7785,10 @@ static Val *apply_plam(Val *plam, Arg *arg) {
   }
   Arg none[NEO_MAX_ARGS];
   Val *body = eval_code(lam->code, env, gap, none, 0);
-  return project(body, plam->ext, plam->arity);
+  return project_forced(body, plam->ext, plam->arity);
 }
 
-static inline Val *apply_mat(Code *mat, Env *env, u32 gap, Val *arg) {
+static __attribute__((noinline)) Val *apply_mat(Code *mat, Env *env, u32 gap, Val *arg) {
   if (arg->tag == V_SUP) {
     Arg one[1];
     one[0] = arg_val(arg->fst);
@@ -7986,7 +8009,7 @@ NEO_INLINE Val *make_field(Code *kid, Env *env, u32 gap) {
   return mk_lthunk(kid, env, gap);
 }
 
-static Val *eval_code_into(Code *pc, Env *env, u32 gap, Arg *args, u32 argc, Val *dst) {
+static __attribute__((flatten)) Val *eval_code_into(Code *pc, Env *env, u32 gap, Arg *args, u32 argc, Val *dst) {
   static void *dispatch[] = {
     &&do_arg, &&do_args, &&do_var, &&do_dp0, &&do_dp1, &&do_ref, &&do_call_ref, &&do_num,
     &&do_ctr, &&do_lam, &&do_elam, &&do_mat, &&do_mat_ctr, &&do_dup, &&do_sup, &&do_era,
@@ -8049,7 +8072,7 @@ do_call_ref:
   if (pc->next->op == BC_LAM || pc->next->op == BC_ELAM) {
     neo_itr(1);
     Arg arg = arg_code(pc->sub, env, gap);
-    if (pc->next->op == BC_ELAM) {
+    if (__builtin_expect(pc->next->op == BC_ELAM, 0)) {
       env = NULL;
       gap = 1;
     } else {
@@ -8100,7 +8123,16 @@ do_var:
 
 do_dp0:
 do_dp1:
-  val = env_get(env, pc->ext, gap);
+  if (pc->ext == 1 && gap == 0) {
+    if (!env || !env->val) neo_die("unbound variable");
+    val = env->val;
+  } else if (pc->ext == 2 && gap == 0 && env != NULL && env_span(env) == 1) {
+    Env *next = env_next(env);
+    if (!next || !next->val) neo_die("unbound variable");
+    val = next->val;
+  } else {
+    val = env_get(env, pc->ext, gap);
+  }
   if (pc->arity >= NEO_AUTO_LAB_BASE) {
     share_value(val);
   } else if (!is_lam(val) || val->code->sup_lab != pc->arity || val->code->sup_has) {
@@ -8360,6 +8392,9 @@ apply_ready:
 }
 
 NEO_INLINE Val *force(Val *v) {
+  if (__builtin_expect(v->tag != V_THUNK && v->tag != V_LTHUNK, 1)) {
+    return v;
+  }
   while (v->tag == V_THUNK || v->tag == V_LTHUNK) {
     if (v->tag == V_LTHUNK && v->code->op == BC_CTR) {
       u16 refs = v->pad;
@@ -9083,7 +9118,7 @@ fn void nv_retain(NvRun *run, NvTerm term) {
   }
 }
 
-fn NvTerm nv_run(NvRun *run) {
+static __attribute__((hot)) NvTerm nv_run(NvRun *run) {
   static void *dispatch[] = {
     &&do_num, &&do_tup, &&do_var, &&do_get, &&do_lam, &&do_del, &&do_mat,
     &&do_dup, &&do_get_mat, &&do_tup_l_num, &&do_tup_r_num, &&do_tup_l_var, &&do_tup_r_var,
