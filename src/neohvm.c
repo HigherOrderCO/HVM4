@@ -1886,6 +1886,15 @@ do_mat:
     goto apply_ready;
   }
   Arg *raw = &args[argc - 1];
+  if (raw->val != NULL && raw->val->tag == V_NUM) {
+    Code *body = mat_pick(pc, raw->val);
+    if (body != NULL) {
+      ITRS++;
+      argc--;
+      pc = body;
+      goto *pc->jump;
+    }
+  }
   if (raw->val == NULL) {
     Code *arg_code = raw->code;
     Code *body = NULL;
