@@ -84,6 +84,7 @@ typedef struct {
 #define BJV 42  // Bjv(n): quoted lambda-bound variable (de Bruijn level)
 #define BJ0 43  // Bj0(n): quoted dup-bound variable (side 0, de Bruijn level)
 #define BJ1 44  // Bj1(n): quoted dup-bound variable (side 1, de Bruijn level)
+#define CLO 45  // Compiled closure waiting to be materialized into the graph
 
 // LAM Ext Flags
 // =============
@@ -324,6 +325,7 @@ static const u8 TERM_ARITY[TAG_MASK + 1] = {
   [BJV] = 0,
   [BJ0] = 0,
   [BJ1] = 0,
+  [CLO] = 0,
 };
 
 fn u32 term_arity(Term t) {
@@ -3700,6 +3702,9 @@ fn void parse_program(const char *source_path, char *src) {
 // WNF
 // ===
 
+fn Term graph_ref(u32 nam);
+fn Term graph_expand(Term clo);
+
 // WNF Interaction Counter Toggle
 // ==============================
 // Controls whether WNF interaction counters are active.
@@ -5039,12 +5044,22 @@ __attribute__((hot)) fn Term wnf(Term term) {
 
       case REF: {
         u32 nam = term_ext(next);
+        Term clo = graph_ref(nam);
+        if (clo != 0) {
+          next = clo;
+          goto enter;
+        }
         if (BOOK[nam] != 0) {
           next = term_new_alo(0, 0, BOOK[nam]);
           goto enter;
         }
         whnf = next;
         goto apply;
+      }
+
+      case CLO: {
+        next = graph_expand(next);
+        goto enter;
       }
 
       case ALO: {
@@ -6082,6 +6097,9 @@ fn int runtime_entry(const char *name, u32 *out_id) {
 
 fn void parse_program(const char *source_path, char *src);
 fn int  runtime_entry(const char *name, u32 *out_id);
+static void compile_program_terms(void);
+static void neo_disable(void);
+static int  nv_prepare_main(u32 main_id);
 
 // Runtime Prepare
 // ---------------
@@ -6099,666 +6117,2646 @@ fn int runtime_prepare(u32 *main_id, const char *src_path, char *src) {
     return 0;
   }
 
+  if (HEAP_NEXT < 50000) {
+    compile_program_terms();
+  } else {
+    neo_disable();
+  }
+
+  nv_prepare_main(*main_id);
+
   return 1;
 }
 
-// Fast Eval
-// =========
-// Pure closed-term evaluator for the first-order pattern-recursive subset.
-// It mirrors NanoHVM's main architectural win: run static terms through a
-// compact value/context machine and reify only the final normal form.
+// Neo Eval
+// ========
+// General value-code evaluator for pure HVM programs.
 
-#define FAST_KIND_BAD 0
-#define FAST_KIND_CLO 1
-#define FAST_KIND_NUM 2
-#define FAST_KIND_CTR 3
-#define FAST_ARG_CAP 4096
-#define FAST_NODE_CAP (1ULL << 20)
+#define NEO_INLINE static inline __attribute__((always_inline))
+#define NEO_MAX_ARGS 16
+#define NEO_AUTO_LAB_BASE 0x800000u
+#define NEO_VAL_FROZEN UINT16_MAX
+#define NEO_VAL_BORROWED 0x8000u
+#define NEO_VAL_REFS_MASK 0x7FFFu
 
-typedef struct {
-  u8  kind;
+typedef struct Env Env;
+typedef struct Val Val;
+typedef struct Code Code;
+typedef struct Arg Arg;
+typedef struct Cases Cases;
+typedef struct Case Case;
+typedef struct LamDup LamDup;
+
+enum {
+  V_THUNK,
+  V_LTHUNK,
+  V_NUM,
+  V_CTR,
+  V_LAM,
+  V_ELAM,
+  V_SEL,
+  V_PSEL,
+  V_CALL2,
+  V_MAT,
+  V_SUP,
+  V_VAR,
+  V_APP,
+  V_PRJ,
+  V_DLAM,
+  V_PLAM,
+  V_BOX,
+  V_ERA
+};
+
+enum {
+  BC_ARG,
+  BC_ARGS,
+  BC_VAR,
+  BC_DP0,
+  BC_DP1,
+  BC_REF,
+  BC_CALL_REF,
+  BC_NUM,
+  BC_CTR,
+  BC_LAM,
+  BC_ELAM,
+  BC_MAT,
+  BC_MAT_CTR,
+  BC_DUP,
+  BC_SUP,
+  BC_ERA,
+  BC_BAD
+};
+
+enum {
+  CK_NONE,
+  CK_NUM,
+  CK_VAR
+};
+
+struct Env {
+  Val      *val;
+  uintptr_t next_span;
+};
+
+typedef struct EnvBlock EnvBlock;
+typedef struct ValBlock ValBlock;
+typedef struct ItemBlock ItemBlock;
+typedef struct CodeBlock CodeBlock;
+typedef struct LamDupBlock LamDupBlock;
+
+struct Val {
   u8  tag;
+  u8  arity;
+  u16 pad;
   u32 ext;
-  u32 len;
-  u64 loc;
-  u64 env;
-} FastVal;
+  union {
+    Val **item;
+    struct {
+      Val *fst;
+      Val *snd;
+    };
+    struct {
+      Code *code;
+      Env  *env;
+    };
+  };
+};
 
-typedef struct {
-  FastVal val;
-  u64     next;
-} FastEnv;
+struct Code {
+  u8    op;
+  u8    aux;
+  u8    sup_has;
+  u8    pad;
+  u32   ext;
+  u32   arity;
+  u32   sup_lab;
+  u32   gid;
+  Term  term;
+  Cases *cases;
+  Code *sub;
+  Code *next;
+  Code **kid;
+  void *jump;
+};
 
-typedef struct {
-  u32     ari;
-  FastVal arg[16];
-} FastData;
+struct Case {
+  u8    tag;
+  u32   ext;
+  Code *body;
+  Case *next;
+};
 
-typedef struct {
-  FastEnv  *envs;
-  u64       env_len;
-  u64       env_cap;
-  FastData *data;
-  u64       data_len;
-  u64       data_cap;
-  u64       itrs;
-  int       failed;
-} FastRun;
+struct Cases {
+  Case *head;
+  Code *ctr;
+  Code *num0;
+  Code *num1;
+  Code *dft;
+  u32   ctr_ext;
+};
 
-fn FastVal fast_bad(void) {
-  return (FastVal){.kind = FAST_KIND_BAD};
+struct Arg {
+  Val  *val;
+  Code *code;
+  Env  *env;
+  u32   gap;
+};
+
+struct LamDup {
+  Val *lam;
+  Val *box[2];
+  Val *proj[2];
+  u32  lab;
+};
+
+struct EnvBlock {
+  EnvBlock *next;
+  u32       used;
+  Env       item[65536];
+};
+
+struct ValBlock {
+  ValBlock *next;
+  u32       used;
+  Val       item[65536];
+};
+
+struct ItemBlock {
+  ItemBlock *next;
+  u32        used;
+  Val       *item[1 << 20];
+};
+
+struct CodeBlock {
+  CodeBlock *next;
+  u32        used;
+  Code       item[65536];
+};
+
+struct LamDupBlock {
+  LamDupBlock *next;
+  u32          used;
+  LamDup       item[65536];
+};
+
+static EnvBlock    *NEO_ENV_BLOCK = NULL;
+static ValBlock    *NEO_VAL_BLOCK = NULL;
+static ItemBlock   *NEO_ITEM_BLOCK = NULL;
+static CodeBlock   *NEO_CODE_BLOCK = NULL;
+static LamDupBlock *NEO_LAMDUP_BLOCK = NULL;
+static Val         *NEO_VAL_FREE = NULL;
+static Code       **NEO_DEFS = NULL;
+static Val        **NEO_REF_CACHE = NULL;
+static Code       **GRAPH_CODE_INDEX = NULL;
+static u32          NEO_DEF_CAP = 0;
+static u32          GRAPH_CODE_LEN = 0;
+static u32          GRAPH_CODE_CAP = 0;
+static u64          NEO_ITRS = 0;
+static int          NEO_FAILED = 0;
+static int          NEO_THREADED = 0;
+static Val          NEO_NUM_CACHE[2] = {
+  {.tag = V_NUM, .ext = 0, .arity = 0, .env = NULL, .code = NULL},
+  {.tag = V_NUM, .ext = 1, .arity = 0, .env = NULL, .code = NULL},
+};
+
+static void neo_disable(void) {
+  NEO_FAILED = 1;
 }
 
-fn FastVal fast_clo(u64 loc, u64 env, u32 len) {
-  return (FastVal){.kind = FAST_KIND_CLO, .loc = loc, .env = env, .len = len};
+static void neo_fail(void) {
+  NEO_FAILED = 1;
 }
 
-fn FastVal fast_num(u32 val) {
-  return (FastVal){.kind = FAST_KIND_NUM, .loc = val};
+static void neo_die(const char *msg) {
+  fprintf(stderr, "RUNTIME_ERROR: %s\n", msg);
+  exit(1);
 }
 
-fn FastVal fast_ctr(u8 tag, u32 ext, u32 ari, u64 loc) {
-  return (FastVal){.kind = FAST_KIND_CTR, .tag = tag, .ext = ext, .len = ari, .loc = loc};
+NEO_INLINE void neo_itr(u64 n) {
+  NEO_ITRS += n;
 }
 
-fn void fast_fail(FastRun *run) {
-  run->failed = 1;
+NEO_INLINE Val *val_new(u8 tag) {
+  Val *v;
+  if (__builtin_expect(NEO_VAL_FREE != NULL, 1)) {
+    v = NEO_VAL_FREE;
+    NEO_VAL_FREE = NEO_VAL_FREE->fst;
+  } else if (__builtin_expect(NEO_VAL_BLOCK == NULL || NEO_VAL_BLOCK->used >= 65536, 0)) {
+    ValBlock *block = (ValBlock*)malloc(sizeof(ValBlock));
+    if (block == NULL) neo_die("out of memory");
+    block->next = NEO_VAL_BLOCK;
+    block->used = 0;
+    NEO_VAL_BLOCK = block;
+    v = &NEO_VAL_BLOCK->item[NEO_VAL_BLOCK->used++];
+  } else {
+    v = &NEO_VAL_BLOCK->item[NEO_VAL_BLOCK->used++];
+  }
+  v->tag = tag;
+  return v;
 }
 
-fn int fast_reserve_env(FastRun *run) {
-  if (run->env_len + 1 < run->env_cap) {
+NEO_INLINE void val_free(Val *v) {
+  v->fst = NEO_VAL_FREE;
+  NEO_VAL_FREE = v;
+}
+
+NEO_INLINE Val *share_value(Val *v);
+
+NEO_INLINE void val_free_ctr(Val *v) {
+  if (v->tag != V_CTR) return;
+  if (v->pad == NEO_VAL_FROZEN) return;
+  u16 refs = v->pad & NEO_VAL_REFS_MASK;
+  if (__builtin_expect(refs == 0, 1)) {
+    val_free(v);
+    return;
+  }
+  v->pad = (v->pad & NEO_VAL_BORROWED) | (refs - 1);
+  if (v->arity == 2) {
+    share_value(v->fst);
+    share_value(v->snd);
+  } else if (v->arity == 1) {
+    share_value(v->fst);
+  } else if (v->arity > 2) {
+    for (u32 i = 0; i < v->arity; i++) {
+      share_value(v->item[i]);
+    }
+  }
+  v->pad = 0;
+}
+
+NEO_INLINE Val *share_value(Val *v) {
+  if (v->tag == V_CTR || v->tag == V_LTHUNK || v->tag == V_THUNK) {
+    if (v->pad != NEO_VAL_FROZEN) {
+      u16 refs = v->pad & NEO_VAL_REFS_MASK;
+      if (refs < NEO_VAL_REFS_MASK) {
+        v->pad = (v->pad & NEO_VAL_BORROWED) | (refs + 1);
+      }
+    }
+  }
+  return v;
+}
+
+NEO_INLINE int is_lam(Val *v) {
+  return v->tag == V_LAM || v->tag == V_ELAM || v->tag == V_SEL || v->tag == V_PSEL;
+}
+
+static Code *code_new(u8 op) {
+  if (NEO_CODE_BLOCK == NULL || NEO_CODE_BLOCK->used >= 65536) {
+    CodeBlock *block = (CodeBlock*)malloc(sizeof(CodeBlock));
+    if (block == NULL) neo_die("out of memory");
+    block->next = NEO_CODE_BLOCK;
+    block->used = 0;
+    NEO_CODE_BLOCK = block;
+  }
+  Code *c = &NEO_CODE_BLOCK->item[NEO_CODE_BLOCK->used++];
+  memset(c, 0, sizeof(Code));
+  c->op = op;
+  c->sup_lab = UINT32_MAX;
+  if (__builtin_expect(GRAPH_CODE_LEN == GRAPH_CODE_CAP, 0)) {
+    u32 next_cap = GRAPH_CODE_CAP == 0 ? 65536 : GRAPH_CODE_CAP * 2;
+    Code **next = (Code**)realloc(GRAPH_CODE_INDEX, (size_t)next_cap * sizeof(Code*));
+    if (next == NULL) neo_die("out of memory");
+    GRAPH_CODE_INDEX = next;
+    GRAPH_CODE_CAP = next_cap;
+  }
+  c->gid = GRAPH_CODE_LEN;
+  GRAPH_CODE_INDEX[GRAPH_CODE_LEN++] = c;
+  return c;
+}
+
+static Code **code_kids_new(u32 len) {
+  if (len == 0) return NULL;
+  Code **kids = (Code**)calloc(len, sizeof(Code*));
+  if (kids == NULL) neo_die("out of memory");
+  return kids;
+}
+
+static Cases *cases_new(void) {
+  Cases *cases = (Cases*)calloc(1, sizeof(Cases));
+  if (cases == NULL) neo_die("out of memory");
+  cases->ctr_ext = UINT32_MAX;
+  return cases;
+}
+
+static Case *case_new(u8 tag, u32 ext, Code *body) {
+  Case *c = (Case*)malloc(sizeof(Case));
+  if (c == NULL) neo_die("out of memory");
+  c->tag = tag;
+  c->ext = ext;
+  c->body = body;
+  c->next = NULL;
+  return c;
+}
+
+static Val **items_new(u32 len) {
+  if (len == 0) return NULL;
+  if (len > (1u << 20)) neo_die("constructor too wide");
+  if (NEO_ITEM_BLOCK == NULL || NEO_ITEM_BLOCK->used + len > (1u << 20)) {
+    ItemBlock *block = (ItemBlock*)malloc(sizeof(ItemBlock));
+    if (block == NULL) neo_die("out of memory");
+    block->next = NEO_ITEM_BLOCK;
+    block->used = 0;
+    NEO_ITEM_BLOCK = block;
+  }
+  Val **items = &NEO_ITEM_BLOCK->item[NEO_ITEM_BLOCK->used];
+  NEO_ITEM_BLOCK->used += len;
+  return items;
+}
+
+static LamDup *lamdup_new(void) {
+  if (NEO_LAMDUP_BLOCK == NULL || NEO_LAMDUP_BLOCK->used >= 65536) {
+    LamDupBlock *block = (LamDupBlock*)malloc(sizeof(LamDupBlock));
+    if (block == NULL) neo_die("out of memory");
+    block->next = NEO_LAMDUP_BLOCK;
+    block->used = 0;
+    NEO_LAMDUP_BLOCK = block;
+  }
+  return &NEO_LAMDUP_BLOCK->item[NEO_LAMDUP_BLOCK->used++];
+}
+
+NEO_INLINE Env *env_cell(Val *val, Env *next, u32 span) {
+  if (__builtin_expect(NEO_ENV_BLOCK == NULL || NEO_ENV_BLOCK->used >= 65536, 0)) {
+    EnvBlock *block = (EnvBlock*)malloc(sizeof(EnvBlock));
+    if (block == NULL) neo_die("out of memory");
+    block->next = NEO_ENV_BLOCK;
+    block->used = 0;
+    NEO_ENV_BLOCK = block;
+  }
+  Env *e = &NEO_ENV_BLOCK->item[NEO_ENV_BLOCK->used++];
+  e->val = val;
+  e->next_span = ((uintptr_t)next) | (uintptr_t)(span - 1);
+  return e;
+}
+
+NEO_INLINE Env *env_cell1(Val *val, Env *next) {
+  if (__builtin_expect(NEO_ENV_BLOCK == NULL || NEO_ENV_BLOCK->used >= 65536, 0)) {
+    EnvBlock *block = (EnvBlock*)malloc(sizeof(EnvBlock));
+    if (block == NULL) neo_die("out of memory");
+    block->next = NEO_ENV_BLOCK;
+    block->used = 0;
+    NEO_ENV_BLOCK = block;
+  }
+  Env *e = &NEO_ENV_BLOCK->item[NEO_ENV_BLOCK->used++];
+  e->val = val;
+  e->next_span = (uintptr_t)next;
+  return e;
+}
+
+NEO_INLINE Env *env_push(Val *val, Env *next, u32 span) {
+  if (span == 0) neo_die("bad environment span");
+  if (span <= 16) return env_cell(val, next, span);
+  u32 rest = span - 16;
+  Env *tail = next;
+  while (rest > 0) {
+    u32 chunk = rest > 16 ? 16 : rest;
+    tail = env_cell(NULL, tail, chunk);
+    rest -= chunk;
+  }
+  return env_cell(val, tail, 16);
+}
+
+NEO_INLINE Env *env_push_lam(Val *val, Env *next, u32 gap) {
+  if (__builtin_expect(gap == 0, 1)) {
+    return env_cell1(val, next);
+  }
+  return env_push(val, next, gap + 1);
+}
+
+NEO_INLINE Env *env_next(Env *env) {
+  return (Env*)(env->next_span & ~(uintptr_t)15);
+}
+
+NEO_INLINE u32 env_span(Env *env) {
+  return (u32)(env->next_span & (uintptr_t)15) + 1;
+}
+
+NEO_INLINE Env *env_at(Env *env, u32 lvl, u32 gap) {
+  if (lvl == 0) neo_die("bad variable level");
+  if (lvl <= gap) neo_die("erased variable reached");
+  if (gap == 0 && lvl == 2 && env != NULL && env_span(env) == 1) {
+    env = env_next(env);
+    if (!env || !env->val) neo_die("unbound variable");
+    return env;
+  }
+  lvl -= gap;
+  if (lvl == 1) {
+    if (!env || !env->val) neo_die("unbound variable");
+    return env;
+  }
+  for (;;) {
+    if (!env) neo_die("unbound variable");
+    u32 span = env_span(env);
+    if (lvl <= span) neo_die("erased variable reached");
+    lvl -= span;
+    env = env_next(env);
+    if (lvl == 1) {
+      if (!env || !env->val) neo_die("unbound variable");
+      return env;
+    }
+  }
+}
+
+NEO_INLINE Val *env_get(Env *env, u32 lvl, u32 gap) {
+  if (gap == 0) {
+    if (lvl == 1) {
+      if (!env || !env->val) neo_die("unbound variable");
+      return env->val;
+    }
+    if (lvl == 2 && env != NULL && env_span(env) == 1) {
+      env = env_next(env);
+      if (!env || !env->val) neo_die("unbound variable");
+      return env->val;
+    }
+    if (lvl == 3 && env != NULL && env_span(env) == 1) {
+      env = env_next(env);
+      if (env != NULL && env_span(env) == 1) {
+        env = env_next(env);
+        if (!env || !env->val) neo_die("unbound variable");
+        return env->val;
+      }
+    }
+    if (lvl == 4 && env != NULL && env_span(env) == 1) {
+      env = env_next(env);
+      if (env != NULL && env_span(env) == 1) {
+        env = env_next(env);
+        if (env != NULL && env_span(env) == 1) {
+          env = env_next(env);
+          if (!env || !env->val) neo_die("unbound variable");
+          return env->val;
+        }
+      }
+    }
+  }
+  return env_at(env, lvl, gap)->val;
+}
+
+static Code *compile_term(Term term);
+static Code *compile_term_ctx(Term term, int tail, u32 depth);
+static Code *compile_app(Term term, int tail, u32 depth);
+static Val *eval_code_into(Code *pc, Env *env, u32 gap, Arg *args, u32 argc, Val *dst);
+static void link_refs_code(Code *code, u32 depth);
+static void thread_code(Code *code, void **dispatch, u32 depth);
+static Val *clone_cached_value(Val *v);
+static Val *frozen_field_value(Val *v);
+static void freeze_cached_value(Val *v);
+
+static inline Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc) {
+  return eval_code_into(pc, env, gap, args, argc, NULL);
+}
+
+NEO_INLINE Val *force(Val *v);
+NEO_INLINE Val *mk_lthunk(Code *code, Env *env, u32 gap);
+NEO_INLINE Val *mk_num(u32 n);
+NEO_INLINE Val *mk_lam_tag(u8 tag, Code *code, Env *env, u32 gap);
+static inline Val *mk_lam(Code *code, Env *env, u32 gap);
+static inline Val *mk_sel(u8 pick);
+static inline Val *mk_call2(Val *fst, Val *snd);
+static inline Val *mk_mat(Code *code, Env *env, u32 gap);
+static inline Val *make_ctr(Code *pc, Env *env, u32 gap);
+
+static Code *compile_term(Term term) {
+  return compile_term_ctx(term, 0, 0);
+}
+
+static u8 compile_ctr_field_kind(Code *code) {
+  if (code->op == BC_NUM) return CK_NUM;
+  if (code->op == BC_VAR) return CK_VAR;
+  return CK_NONE;
+}
+
+static u32 compile_level(u32 depth, Term term) {
+  u32 abs = (u32)term_val(term);
+  if (abs == 0 || abs > depth) {
+    neo_fail();
+    return abs;
+  }
+  return depth - abs + 1;
+}
+
+static Code *compile_term_ctx(Term term, int tail, u32 depth) {
+  (void)tail;
+  u8 tag = term_tag(term);
+  Code *c = NULL;
+  switch (tag) {
+    case APP:
+      return compile_app(term, tail, depth);
+    case BJV:
+      c = code_new(BC_VAR);
+      c->ext = compile_level(depth, term);
+      break;
+    case BJ0:
+      c = code_new(BC_DP0);
+      c->ext = compile_level(depth, term);
+      c->arity = term_ext(term);
+      break;
+    case BJ1:
+      c = code_new(BC_DP1);
+      c->ext = compile_level(depth, term);
+      c->arity = term_ext(term);
+      break;
+    case REF:
+      c = code_new(BC_REF);
+      c->ext = term_ext(term);
+      break;
+    case NUM:
+      c = code_new(BC_NUM);
+      c->ext = (u32)term_val(term);
+      break;
+    case C00 ... C16: {
+      c = code_new(BC_CTR);
+      c->ext = term_ext(term);
+      c->arity = tag - C00;
+      c->term = term;
+      c->kid = code_kids_new(c->arity);
+      u64 loc = term_val(term);
+      for (u32 i = 0; i < c->arity; i++) {
+        c->kid[i] = compile_term_ctx(heap_read(loc + i), 0, depth);
+      }
+      c->sub = c->arity > 0 ? c->kid[0] : NULL;
+      c->next = c->arity > 1 ? c->kid[1] : NULL;
+      if (c->arity == 2) {
+        c->aux = compile_ctr_field_kind(c->sub) | (compile_ctr_field_kind(c->next) << 2);
+      }
+      break;
+    }
+    case LAM: {
+      c = code_new((term_ext(term) & LAM_ERA_MASK) ? BC_ELAM : BC_LAM);
+      c->sub = compile_term_ctx(heap_read(term_val(term)), 1, depth + 1);
+      break;
+    }
+    case MAT:
+    case SWI: {
+      c = code_new(BC_MAT);
+      c->term = term;
+      c->cases = cases_new();
+      Case **tail_case = &c->cases->head;
+      Term cur = term;
+      while (term_tag(cur) == MAT || term_tag(cur) == SWI) {
+        u64 loc = term_val(cur);
+        Code *body = compile_term_ctx(heap_read(loc + 0), 1, depth);
+        Case *one = case_new(term_tag(cur), term_ext(cur), body);
+        *tail_case = one;
+        tail_case = &one->next;
+        if (term_tag(cur) == SWI && term_ext(cur) == 0) {
+          c->cases->num0 = body;
+        } else if (term_tag(cur) == SWI && term_ext(cur) == 1) {
+          c->cases->num1 = body;
+        } else if (term_tag(cur) == MAT && c->cases->ctr == NULL) {
+          c->cases->ctr_ext = term_ext(cur);
+          c->cases->ctr = body;
+        }
+        cur = heap_read(loc + 1);
+      }
+      c->cases->dft = compile_term_ctx(cur, 1, depth);
+      Term tail_term = heap_read(term_val(term) + 1);
+      if (tag == MAT && c->cases->head != NULL && c->cases->head->next == NULL &&
+          term_tag(tail_term) == NUM && term_val(tail_term) == 0) {
+        c->op = BC_MAT_CTR;
+        c->ext = term_ext(term);
+        c->sub = c->cases->head->body;
+      }
+      break;
+    }
+    case DUP: {
+      c = code_new(BC_DUP);
+      c->ext = term_ext(term);
+      c->sub = compile_term_ctx(heap_read(term_val(term) + 0), 0, depth);
+      c->next = compile_term_ctx(heap_read(term_val(term) + 1), 1, depth + 1);
+      break;
+    }
+    case SUP: {
+      c = code_new(BC_SUP);
+      c->ext = term_ext(term);
+      c->arity = 2;
+      c->kid = code_kids_new(2);
+      c->kid[0] = compile_term_ctx(heap_read(term_val(term) + 0), 0, depth);
+      c->kid[1] = compile_term_ctx(heap_read(term_val(term) + 1), 0, depth);
+      break;
+    }
+    case ERA:
+      c = code_new(BC_ERA);
+      break;
+    default:
+      neo_fail();
+      c = code_new(BC_BAD);
+      break;
+  }
+  return c;
+}
+
+static Code *compile_app(Term term, int tail, u32 depth) {
+  (void)tail;
+  Term args[NEO_MAX_ARGS];
+  u32 argc = 0;
+  Term fun = term;
+  while (term_tag(fun) == APP && argc < NEO_MAX_ARGS) {
+    u64 loc = term_val(fun);
+    args[argc++] = heap_read(loc + 1);
+    fun = heap_read(loc + 0);
+  }
+  if (term_tag(fun) == APP) {
+    neo_fail();
+    return code_new(BC_BAD);
+  }
+  if (argc == 1) {
+    if (term_tag(fun) == REF) {
+      Code *c = code_new(BC_CALL_REF);
+      c->ext = term_ext(fun);
+      c->arity = 1;
+      c->sub = compile_term_ctx(args[0], 0, depth);
+      return c;
+    }
+    Code *c = code_new(BC_ARG);
+    c->sub = compile_term_ctx(args[0], 0, depth);
+    c->next = compile_term_ctx(fun, 0, depth);
+    return c;
+  }
+  Code *c = code_new(BC_ARGS);
+  c->arity = argc;
+  c->kid = code_kids_new(argc);
+  for (u32 i = 0; i < argc; i++) {
+    c->kid[i] = compile_term_ctx(args[i], 0, depth);
+  }
+  c->next = compile_term_ctx(fun, 0, depth);
+  return c;
+}
+
+static int code_lam2_selector(Code *code, u8 *pick) {
+  if (code == NULL || (code->op != BC_LAM && code->op != BC_ELAM)) return 0;
+  Code *inner = code->sub;
+  if (inner == NULL || (inner->op != BC_LAM && inner->op != BC_ELAM) ||
+      inner->sub == NULL || inner->sub->op != BC_VAR) {
+    return 0;
+  }
+  if (inner->sub->ext == 2) {
+    *pick = 0;
     return 1;
   }
-  u64 cap = run->env_cap == 0 ? 4096 : run->env_cap * 2;
-  if (cap > FAST_NODE_CAP) {
-    fast_fail(run);
-    return 0;
-  }
-  FastEnv *envs = (FastEnv*)realloc(run->envs, sizeof(FastEnv) * cap);
-  if (envs == NULL) {
-    fast_fail(run);
-    return 0;
-  }
-  run->envs = envs;
-  run->env_cap = cap;
-  return 1;
-}
-
-fn int fast_reserve_data(FastRun *run) {
-  if (run->data_len + 1 < run->data_cap) {
+  if (inner->sub->ext == 1) {
+    *pick = 1;
     return 1;
   }
-  u64 cap = run->data_cap == 0 ? 4096 : run->data_cap * 2;
-  if (cap > FAST_NODE_CAP) {
-    fast_fail(run);
-    return 0;
-  }
-  FastData *data = (FastData*)realloc(run->data, sizeof(FastData) * cap);
-  if (data == NULL) {
-    fast_fail(run);
-    return 0;
-  }
-  run->data = data;
-  run->data_cap = cap;
-  return 1;
-}
-
-fn u64 fast_env_push(FastRun *run, FastVal val, u64 next) {
-  if (!fast_reserve_env(run)) {
-    return 0;
-  }
-  u64 loc = ++run->env_len;
-  run->envs[loc].val = val;
-  run->envs[loc].next = next;
-  return loc;
-}
-
-fn FastVal fast_env_get(FastRun *run, u64 env, u32 len, u32 lvl) {
-  if (lvl == 0 || lvl > len) {
-    fast_fail(run);
-    return fast_bad();
-  }
-  u32 idx = len - lvl;
-  u64 it = env;
-  for (u32 i = 0; i < idx && it != 0; i++) {
-    it = run->envs[it].next;
-  }
-  if (it == 0) {
-    fast_fail(run);
-    return fast_bad();
-  }
-  return run->envs[it].val;
-}
-
-fn u64 fast_data_new(FastRun *run, u32 ari) {
-  if (ari > 16 || !fast_reserve_data(run)) {
-    fast_fail(run);
-    return 0;
-  }
-  u64 loc = ++run->data_len;
-  run->data[loc].ari = ari;
-  return loc;
-}
-
-fn int fast_arg_push(FastRun *run, FastVal *args, u32 *argc, FastVal val) {
-  if (*argc >= FAST_ARG_CAP) {
-    fast_fail(run);
-    return 0;
-  }
-  args[(*argc)++] = val;
-  return 1;
-}
-
-fn FastVal fast_eval(FastRun *run, FastVal start);
-fn FastVal fast_force(FastRun *run, FastVal val);
-
-fn int fast_apply_value(FastRun *run, FastVal val, FastVal *args, u32 *argc, u64 *loc, u64 *env, u32 *len) {
-  (void)args;
-  if (val.kind == FAST_KIND_CLO) {
-    *loc = val.loc;
-    *env = val.env;
-    *len = val.len;
-    return 1;
-  }
-  if (*argc == 0 && (val.kind == FAST_KIND_NUM || val.kind == FAST_KIND_CTR)) {
-    return 0;
-  }
-  fast_fail(run);
   return 0;
 }
 
-fn FastVal fast_force(FastRun *run, FastVal val) {
-  if (run->failed) {
-    return fast_bad();
+static Val *closed_code_value(Code *code) {
+  if (code == NULL) return NULL;
+  switch (code->op) {
+    case BC_REF:
+      if (code->ext < NEO_DEF_CAP) return NEO_REF_CACHE[code->ext];
+      return NULL;
+    case BC_NUM:
+      return mk_num(code->ext);
+    case BC_CTR:
+      return make_ctr(code, NULL, 0);
+    case BC_LAM: {
+      u8 pick = 0;
+      if (code_lam2_selector(code, &pick)) return mk_sel(pick);
+      return mk_lam_tag(V_LAM, code->sub, NULL, 0);
+    }
+    case BC_ELAM:
+      return mk_lam_tag(V_ELAM, code->sub, NULL, 0);
+    case BC_MAT:
+    case BC_MAT_CTR:
+      return mk_mat(code, NULL, 0);
+    default:
+      return mk_lthunk(code, NULL, 0);
   }
-  if (val.kind == FAST_KIND_CLO) {
-    return fast_eval(run, val);
+}
+
+static int code_lam_call2(Code *code, Val **fst, Val **snd) {
+  if (code == NULL || code->op != BC_LAM || code->sub == NULL || code->sub->op != BC_ARGS) {
+    return 0;
+  }
+  Code *body = code->sub;
+  if (body->arity != 2 || body->next == NULL || body->next->op != BC_VAR || body->next->ext != 1) {
+    return 0;
+  }
+  Val *a = closed_code_value(body->kid[1]);
+  Val *b = closed_code_value(body->kid[0]);
+  if (a == NULL || b == NULL) return 0;
+  *fst = a;
+  *snd = b;
+  return 1;
+}
+
+static void compile_program_terms(void) {
+  NEO_DEF_CAP = TABLE.len;
+  NEO_DEFS = (Code**)calloc(NEO_DEF_CAP == 0 ? 1 : NEO_DEF_CAP, sizeof(Code*));
+  NEO_REF_CACHE = (Val**)calloc(NEO_DEF_CAP == 0 ? 1 : NEO_DEF_CAP, sizeof(Val*));
+  if (NEO_DEFS == NULL || NEO_REF_CACHE == NULL) neo_die("out of memory");
+  for (u32 i = 0; i < NEO_DEF_CAP; i++) {
+    if (BOOK[i] != 0) {
+      NEO_DEFS[i] = compile_term_ctx(heap_read(BOOK[i]), 1, 0);
+    }
+  }
+  for (u32 i = 0; i < NEO_DEF_CAP; i++) {
+    if (NEO_DEFS[i] != NULL) {
+      link_refs_code(NEO_DEFS[i], 0);
+    }
+  }
+  for (u32 i = 0; i < NEO_DEF_CAP; i++) {
+    if (NEO_DEFS[i] == NULL) continue;
+    u8 op = NEO_DEFS[i]->op;
+    if (op == BC_MAT || op == BC_MAT_CTR) {
+      NEO_REF_CACHE[i] = mk_mat(NEO_DEFS[i], NULL, 0);
+    } else if (op == BC_CTR) {
+      NEO_REF_CACHE[i] = make_ctr(NEO_DEFS[i], NULL, 0);
+    } else if (op == BC_LAM || op == BC_ELAM) {
+      u8 pick = 0;
+      if (code_lam2_selector(NEO_DEFS[i], &pick)) {
+        NEO_REF_CACHE[i] = mk_sel(pick);
+      } else {
+        u8 tag = op == BC_ELAM ? V_ELAM : V_LAM;
+        NEO_REF_CACHE[i] = mk_lam_tag(tag, NEO_DEFS[i]->sub, NULL, 0);
+      }
+    }
+  }
+  for (u32 i = 0; i < NEO_DEF_CAP; i++) {
+    Val *fst = NULL;
+    Val *snd = NULL;
+    if (code_lam_call2(NEO_DEFS[i], &fst, &snd)) {
+      NEO_REF_CACHE[i] = mk_call2(fst, snd);
+    }
+  }
+}
+
+static void link_refs_code(Code *code, u32 depth) {
+  if (code == NULL || depth > 256) return;
+  switch (code->op) {
+    case BC_ARGS:
+      link_refs_code(code->next, depth + 1);
+      for (u32 i = 0; i < code->arity; i++) {
+        link_refs_code(code->kid[i], depth + 1);
+      }
+      return;
+    case BC_ARG:
+    case BC_DUP:
+      link_refs_code(code->sub, depth + 1);
+      link_refs_code(code->next, depth + 1);
+      return;
+    case BC_CALL_REF:
+      link_refs_code(code->sub, depth + 1);
+      code->next = code->ext < NEO_DEF_CAP ? NEO_DEFS[code->ext] : NULL;
+      return;
+    case BC_CTR:
+      for (u32 i = 0; i < code->arity; i++) {
+        link_refs_code(code->kid[i], depth + 1);
+      }
+      return;
+    case BC_LAM:
+    case BC_ELAM:
+      link_refs_code(code->sub, depth + 1);
+      return;
+    case BC_MAT:
+    case BC_MAT_CTR:
+      for (Case *it = code->cases ? code->cases->head : NULL; it != NULL; it = it->next) {
+        link_refs_code(it->body, depth + 1);
+      }
+      if (code->cases != NULL) {
+        link_refs_code(code->cases->dft, depth + 1);
+      }
+      return;
+    case BC_REF:
+      code->sub = code->ext < NEO_DEF_CAP ? NEO_DEFS[code->ext] : NULL;
+      return;
+    case BC_SUP:
+      link_refs_code(code->kid[0], depth + 1);
+      link_refs_code(code->kid[1], depth + 1);
+      return;
+    default:
+      return;
+  }
+}
+
+static void thread_code(Code *code, void **dispatch, u32 depth) {
+  if (code == NULL || depth > 256 || code->jump != NULL) return;
+  code->jump = dispatch[code->op];
+  switch (code->op) {
+    case BC_ARGS:
+      thread_code(code->next, dispatch, depth + 1);
+      for (u32 i = 0; i < code->arity; i++) {
+        thread_code(code->kid[i], dispatch, depth + 1);
+      }
+      return;
+    case BC_ARG:
+    case BC_DUP:
+    case BC_CALL_REF:
+      thread_code(code->sub, dispatch, depth + 1);
+      thread_code(code->next, dispatch, depth + 1);
+      return;
+    case BC_CTR:
+      for (u32 i = 0; i < code->arity; i++) {
+        thread_code(code->kid[i], dispatch, depth + 1);
+      }
+      return;
+    case BC_LAM:
+    case BC_ELAM:
+      thread_code(code->sub, dispatch, depth + 1);
+      return;
+    case BC_MAT:
+    case BC_MAT_CTR:
+      for (Case *it = code->cases ? code->cases->head : NULL; it != NULL; it = it->next) {
+        thread_code(it->body, dispatch, depth + 1);
+      }
+      if (code->cases != NULL) {
+        thread_code(code->cases->dft, dispatch, depth + 1);
+      }
+      return;
+    case BC_SUP:
+      thread_code(code->kid[0], dispatch, depth + 1);
+      thread_code(code->kid[1], dispatch, depth + 1);
+      return;
+    default:
+      return;
+  }
+}
+
+static int code_has_sup_label(Code *code, u32 lab, u32 depth) {
+  if (code == NULL || depth > 256) return 0;
+  if (code->sup_lab == lab) return code->sup_has;
+  int has = 0;
+  switch (code->op) {
+    case BC_ARGS:
+      has = code_has_sup_label(code->next, lab, depth + 1);
+      for (u32 i = 0; !has && i < code->arity; i++) {
+        has = code_has_sup_label(code->kid[i], lab, depth + 1);
+      }
+      break;
+    case BC_ARG:
+    case BC_DUP:
+      has = code_has_sup_label(code->sub, lab, depth + 1)
+         || code_has_sup_label(code->next, lab, depth + 1);
+      break;
+    case BC_CTR:
+      for (u32 i = 0; i < code->arity; i++) {
+        if (code_has_sup_label(code->kid[i], lab, depth + 1)) {
+          has = 1;
+          break;
+        }
+      }
+      break;
+    case BC_LAM:
+    case BC_ELAM:
+      has = code_has_sup_label(code->sub, lab, depth + 1);
+      break;
+    case BC_MAT:
+    case BC_MAT_CTR:
+      for (Case *it = code->cases ? code->cases->head : NULL; !has && it != NULL; it = it->next) {
+        has = code_has_sup_label(it->body, lab, depth + 1);
+      }
+      if (!has && code->cases != NULL) {
+        has = code_has_sup_label(code->cases->dft, lab, depth + 1);
+      }
+      break;
+    case BC_REF:
+      has = code->sub != NULL ? code_has_sup_label(code->sub, lab, depth + 1) : 0;
+      break;
+    case BC_CALL_REF:
+      has = code_has_sup_label(code->sub, lab, depth + 1)
+         || (code->next != NULL ? code_has_sup_label(code->next, lab, depth + 1) : 0);
+      break;
+    case BC_SUP:
+      has = code->ext == lab
+         || code_has_sup_label(code->kid[0], lab, depth + 1)
+         || code_has_sup_label(code->kid[1], lab, depth + 1);
+      break;
+    default:
+      break;
+  }
+  code->sup_lab = lab;
+  code->sup_has = (u8)has;
+  return has;
+}
+
+typedef struct GraphEnv GraphEnv;
+
+struct __attribute__((aligned(16))) GraphEnv {
+  u64       loc;
+  u32       id;
+  uintptr_t next_span;
+};
+
+typedef struct GraphEnvBlock GraphEnvBlock;
+
+struct GraphEnvBlock {
+  GraphEnvBlock *next;
+  u32            used;
+  GraphEnv       item[65536];
+};
+
+static GraphEnvBlock *GRAPH_ENV_BLOCK = NULL;
+static GraphEnv     **GRAPH_ENV_INDEX = NULL;
+static u32            GRAPH_ENV_LEN = 1;
+static u32            GRAPH_ENV_CAP = 0;
+static int            GRAPH_EVAL_ENABLED = 0;
+
+NEO_INLINE GraphEnv *graph_env_cell(u64 loc, GraphEnv *next, u32 span) {
+  if (__builtin_expect(GRAPH_ENV_BLOCK == NULL || GRAPH_ENV_BLOCK->used >= 65536, 0)) {
+    GraphEnvBlock *block = (GraphEnvBlock*)malloc(sizeof(GraphEnvBlock));
+    if (block == NULL) neo_die("out of memory");
+    block->next = GRAPH_ENV_BLOCK;
+    block->used = 0;
+    GRAPH_ENV_BLOCK = block;
+  }
+  GraphEnv *e = &GRAPH_ENV_BLOCK->item[GRAPH_ENV_BLOCK->used++];
+  e->loc = loc;
+  e->next_span = ((uintptr_t)next) | (uintptr_t)(span - 1);
+  if (__builtin_expect(GRAPH_ENV_LEN >= GRAPH_ENV_CAP, 0)) {
+    u32 next_cap = GRAPH_ENV_CAP == 0 ? 65536 : GRAPH_ENV_CAP * 2;
+    GraphEnv **idx = (GraphEnv**)realloc(GRAPH_ENV_INDEX, (size_t)next_cap * sizeof(GraphEnv*));
+    if (idx == NULL) neo_die("out of memory");
+    GRAPH_ENV_INDEX = idx;
+    GRAPH_ENV_CAP = next_cap;
+  }
+  e->id = GRAPH_ENV_LEN;
+  GRAPH_ENV_INDEX[GRAPH_ENV_LEN++] = e;
+  return e;
+}
+
+NEO_INLINE GraphEnv *graph_env_push(u64 loc, GraphEnv *next, u32 span) {
+  if (span == 0) neo_die("bad graph environment span");
+  if (span <= 16) return graph_env_cell(loc, next, span);
+  u32 rest = span - 16;
+  GraphEnv *tail = next;
+  while (rest > 0) {
+    u32 chunk = rest > 16 ? 16 : rest;
+    tail = graph_env_cell(0, tail, chunk);
+    rest -= chunk;
+  }
+  return graph_env_cell(loc, tail, 16);
+}
+
+NEO_INLINE GraphEnv *graph_env_next(GraphEnv *env) {
+  return (GraphEnv*)(env->next_span & ~(uintptr_t)15);
+}
+
+NEO_INLINE u32 graph_env_span(GraphEnv *env) {
+  return (u32)(env->next_span & (uintptr_t)15) + 1;
+}
+
+NEO_INLINE GraphEnv *graph_env_at(GraphEnv *env, u32 lvl, u32 gap) {
+  if (lvl == 0) neo_die("bad graph variable level");
+  if (lvl <= gap) neo_die("erased graph variable reached");
+  lvl -= gap;
+  if (lvl == 1) {
+    if (!env || !env->loc) neo_die("unbound graph variable");
+    return env;
+  }
+  for (;;) {
+    if (!env) neo_die("unbound graph variable");
+    u32 span = graph_env_span(env);
+    if (lvl <= span) neo_die("erased graph variable reached");
+    lvl -= span;
+    env = graph_env_next(env);
+    if (lvl == 1) {
+      if (!env || !env->loc) neo_die("unbound graph variable");
+      return env;
+    }
+  }
+}
+
+NEO_INLINE u64 graph_env_get(GraphEnv *env, u32 lvl, u32 gap) {
+  return graph_env_at(env, lvl, gap)->loc;
+}
+
+static Term graph_build(Code *code, GraphEnv *env, u32 gap);
+
+static Term graph_closure(Code *code, GraphEnv *env, u32 gap) {
+  if (code == NULL) return term_new_era();
+  if (__builtin_expect(code->gid > 0xFFFFu || gap > 0xFFu, 0)) {
+    neo_fail();
+    return term_new_era();
+  }
+  u32 ext = ((gap & 0xFFu) << 16) | (code->gid & 0xFFFFu);
+  u32 val = env == NULL ? 0 : env->id;
+  return term_new(0, CLO, ext, val);
+}
+
+fn Term graph_ref(u32 nam) {
+  if (!GRAPH_EVAL_ENABLED || NEO_FAILED || nam >= NEO_DEF_CAP || NEO_DEFS == NULL || NEO_DEFS[nam] == NULL) {
+    return 0;
+  }
+  return graph_closure(NEO_DEFS[nam], NULL, 0);
+}
+
+static Term graph_build_mat(Code *code, GraphEnv *env, u32 gap) {
+  Term tail = term_new_num(0);
+  if (code->cases != NULL && code->cases->dft != NULL) {
+    tail = graph_closure(code->cases->dft, env, gap);
+  }
+  Case *cases[1024];
+  u32 len = 0;
+  for (Case *it = code->cases ? code->cases->head : NULL; it != NULL && len < 1024; it = it->next) {
+    cases[len++] = it;
+  }
+  while (len > 0) {
+    Case *it = cases[--len];
+    Term body = graph_closure(it->body, env, gap);
+    tail = it->tag == SWI ? term_new_swi(it->ext, body, tail) : term_new_mat(it->ext, body, tail);
+  }
+  return tail;
+}
+
+static Term graph_build_app(Code *fun, Code **kids, u32 argc, GraphEnv *env, u32 gap) {
+  Term term = graph_closure(fun, env, gap);
+  for (u32 i = argc; i > 0; i--) {
+    term = term_new_app(term, graph_closure(kids[i - 1], env, gap));
+  }
+  return term;
+}
+
+static Term graph_build(Code *code, GraphEnv *env, u32 gap) {
+  switch (code->op) {
+    case BC_VAR:
+      return term_new_var(graph_env_get(env, code->ext, gap));
+    case BC_DP0:
+      return term_new(0, DP0, code->arity, graph_env_get(env, code->ext, gap));
+    case BC_DP1:
+      return term_new(0, DP1, code->arity, graph_env_get(env, code->ext, gap));
+    case BC_REF:
+      return graph_ref(code->ext) ?: term_new_ref(code->ext);
+    case BC_CALL_REF: {
+      Term fun = graph_ref(code->ext);
+      if (fun == 0) fun = term_new_ref(code->ext);
+      return term_new_app(fun, graph_closure(code->sub, env, gap));
+    }
+    case BC_NUM:
+      return term_new_num(code->ext);
+    case BC_CTR: {
+      Term args[16];
+      for (u32 i = 0; i < code->arity; i++) {
+        args[i] = graph_closure(code->kid[i], env, gap);
+      }
+      return term_new_ctr(code->ext, code->arity, args);
+    }
+    case BC_LAM: {
+      u64 loc = heap_alloc(1);
+      GraphEnv *body_env = graph_env_push(loc, env, gap + 1);
+      heap_set(loc, graph_closure(code->sub, body_env, 0));
+      return term_new(0, LAM, 0, loc);
+    }
+    case BC_ELAM: {
+      u64 loc = heap_alloc(1);
+      heap_set(loc, graph_closure(code->sub, env, gap + 1));
+      return term_new(0, LAM, LAM_ERA_MASK, loc);
+    }
+    case BC_MAT:
+    case BC_MAT_CTR:
+      return graph_build_mat(code, env, gap);
+    case BC_DUP: {
+      u64 loc = heap_alloc(2);
+      heap_set(loc + 0, graph_closure(code->sub, env, gap));
+      GraphEnv *body_env = graph_env_push(loc, env, gap + 1);
+      heap_set(loc + 1, graph_closure(code->next, body_env, 0));
+      return term_new(0, DUP, code->ext, loc);
+    }
+    case BC_SUP: {
+      return term_new_sup(code->ext, graph_closure(code->kid[0], env, gap), graph_closure(code->kid[1], env, gap));
+    }
+    case BC_ERA:
+      return term_new_era();
+    case BC_ARG:
+      return graph_build_app(code->next, &code->sub, 1, env, gap);
+    case BC_ARGS:
+      return graph_build_app(code->next, code->kid, code->arity, env, gap);
+    default:
+      neo_fail();
+      return term_new_era();
+  }
+}
+
+fn Term graph_expand(Term clo) {
+  u32 ext = term_ext(clo);
+  u32 gid = ext & 0xFFFFu;
+  u32 gap = ext >> 16;
+  u32 eid = term_val(clo);
+  Code *code = gid < GRAPH_CODE_LEN ? GRAPH_CODE_INDEX[gid] : NULL;
+  GraphEnv *env = eid == 0 ? NULL : (eid < GRAPH_ENV_LEN ? GRAPH_ENV_INDEX[eid] : NULL);
+  if (code == NULL) return term_new_era();
+  return graph_build(code, env, gap);
+}
+
+NEO_INLINE Val *mk_thunk(Code *code, Env *env, u32 gap) {
+  Val *v = val_new(V_THUNK);
+  v->code = code;
+  v->env = env;
+  v->ext = gap;
+  v->pad = 0;
+  return v;
+}
+
+NEO_INLINE Val *mk_lthunk(Code *code, Env *env, u32 gap) {
+  Val *v = val_new(V_LTHUNK);
+  v->code = code;
+  v->env = env;
+  v->ext = gap;
+  v->pad = 0;
+  return v;
+}
+
+NEO_INLINE Val *mk_num(u32 n) {
+  if (n < 2) return &NEO_NUM_CACHE[n];
+  Val *v = val_new(V_NUM);
+  v->ext = n;
+  return v;
+}
+
+NEO_INLINE Val *mk_lam_tag(u8 tag, Code *code, Env *env, u32 gap) {
+  Val *v = val_new(tag);
+  v->code = code;
+  v->env = env;
+  v->ext = gap;
+  v->arity = 0;
+  v->pad = 0;
+  return v;
+}
+
+static inline Val *mk_lam(Code *code, Env *env, u32 gap) {
+  return mk_lam_tag(V_LAM, code, env, gap);
+}
+
+static inline Val *mk_sel(u8 pick) {
+  Val *v = val_new(V_SEL);
+  v->ext = pick;
+  v->arity = 0;
+  v->pad = 0;
+  return v;
+}
+
+static inline Val *mk_psel(u8 pick, Val *arg) {
+  Val *v = val_new(V_PSEL);
+  v->ext = pick;
+  v->arity = 0;
+  v->pad = 0;
+  v->fst = arg;
+  return v;
+}
+
+static inline Val *mk_call2(Val *fst, Val *snd) {
+  Val *v = val_new(V_CALL2);
+  v->ext = 0;
+  v->arity = 0;
+  v->pad = 0;
+  v->fst = fst;
+  v->snd = snd;
+  return v;
+}
+
+static inline Val *mk_mat(Code *code, Env *env, u32 gap) {
+  Val *v = val_new(V_MAT);
+  v->code = code;
+  v->env = env;
+  v->ext = gap;
+  return v;
+}
+
+NEO_INLINE Val *mk_sup(u32 lab, Val *a, Val *b) {
+  Val *v = val_new(V_SUP);
+  v->ext = lab;
+  v->fst = a;
+  v->snd = b;
+  return v;
+}
+
+static inline Val *mk_var(u32 idx) {
+  Val *v = val_new(V_VAR);
+  v->ext = idx;
+  return v;
+}
+
+static inline Val *mk_app(Val *fun, Val *arg) {
+  Val *v = val_new(V_APP);
+  v->fst = fun;
+  v->snd = arg;
+  return v;
+}
+
+static inline Val *mk_prj(Val *fun, u32 lab, u8 side) {
+  Val *v = val_new(V_PRJ);
+  v->ext = lab;
+  v->arity = side;
+  v->fst = fun;
+  return v;
+}
+
+static inline Val *mk_box(void) {
+  Val *v = val_new(V_BOX);
+  v->fst = NULL;
+  return v;
+}
+
+static Val *mk_dlam(Val *lam, u32 lab) {
+  LamDup *dup = lamdup_new();
+  dup->lam = lam;
+  dup->lab = lab;
+  dup->box[0] = mk_box();
+  dup->box[1] = mk_box();
+  dup->proj[0] = NULL;
+  dup->proj[1] = NULL;
+  Val *v = val_new(V_DLAM);
+  v->ext = lab;
+  v->fst = lam;
+  v->snd = (Val*)dup;
+  return v;
+}
+
+static inline Val *mk_plam(Val *lam, u32 lab, u8 side) {
+  Val *v = val_new(V_PLAM);
+  v->ext = lab;
+  v->arity = side;
+  v->fst = lam;
+  return v;
+}
+
+NEO_INLINE Val *force_fun_arg(Val *v) {
+  if (v->tag != V_THUNK && v->tag != V_LTHUNK) return v;
+  switch (v->code->op) {
+    case BC_VAR:
+    case BC_DP0:
+    case BC_DP1:
+    case BC_LAM:
+    case BC_ELAM:
+    case BC_MAT:
+    case BC_MAT_CTR:
+    case BC_REF:
+    case BC_CALL_REF:
+    case BC_ARG:
+    case BC_ARGS:
+    case BC_DUP:
+      return force(v);
+    default:
+      return v;
+  }
+}
+
+NEO_INLINE Arg arg_code(Code *code, Env *env, u32 gap) {
+  return (Arg){.val = NULL, .code = code, .env = env, .gap = gap};
+}
+
+NEO_INLINE Arg arg_val(Val *val) {
+  return (Arg){.val = val, .code = NULL, .env = NULL, .gap = 0};
+}
+
+static inline Val *make_ctr(Code *pc, Env *env, u32 gap);
+
+NEO_INLINE Val *force_arg(Arg *arg) {
+  if (arg->val != NULL) return force(arg->val);
+  Arg none[NEO_MAX_ARGS];
+  return eval_code(arg->code, arg->env, arg->gap, none, 0);
+}
+
+NEO_INLINE Val *bind_arg(Arg *arg) {
+  if (arg->val != NULL) return force_fun_arg(arg->val);
+  switch (arg->code->op) {
+    case BC_NUM:
+      return mk_num(arg->code->ext);
+    case BC_VAR:
+      return env_get(arg->env, arg->code->ext, arg->gap);
+    case BC_CTR:
+      return mk_lthunk(arg->code, arg->env, arg->gap);
+    case BC_REF:
+      if (arg->code->ext < NEO_DEF_CAP && NEO_REF_CACHE[arg->code->ext] != NULL) {
+        Val *cached = NEO_REF_CACHE[arg->code->ext];
+        return cached->tag == V_CTR ? clone_cached_value(cached) : cached;
+      }
+      return force_arg(arg);
+    case BC_SUP:
+    case BC_ERA:
+      return mk_lthunk(arg->code, arg->env, arg->gap);
+    default:
+      return force_arg(arg);
+  }
+}
+
+NEO_INLINE Val *project(Val *v, u32 lab, u8 side) {
+  v = force(v);
+  if (v->tag == V_SEL || v->tag == V_PSEL || v->tag == V_CALL2) {
+    return v;
+  }
+  if (v->tag == V_DLAM) {
+    neo_itr(1);
+    LamDup *dup = (LamDup*)v->snd;
+    if (dup->lab == lab) {
+      Val *cached = dup->proj[side];
+      if (cached != NULL) {
+        return cached;
+      }
+      cached = mk_plam(v, lab, side);
+      dup->proj[side] = cached;
+      return cached;
+    }
+    return mk_plam(v, lab, side);
+  }
+  if (v->tag == V_SUP) {
+    neo_itr(1);
+    if (v->ext == lab) return side == 0 ? v->fst : v->snd;
+    return mk_sup(v->ext, project(v->fst, lab, side), project(v->snd, lab, side));
+  }
+  if (v->tag == V_CTR) {
+    neo_itr(1);
+    Val *ctr = val_new(V_CTR);
+    ctr->ext = v->ext;
+    ctr->arity = v->arity;
+    ctr->pad = 0;
+    if (v->arity == 2) {
+      ctr->fst = project(v->fst, lab, side);
+      ctr->snd = project(v->snd, lab, side);
+    } else if (v->arity == 1) {
+      ctr->fst = project(v->fst, lab, side);
+    } else if (v->arity > 2) {
+      ctr->item = items_new(v->arity);
+      for (u32 i = 0; i < v->arity; i++) {
+        ctr->item[i] = project(v->item[i], lab, side);
+      }
+    }
+    return ctr;
+  }
+  if (v->tag == V_MAT) {
+    neo_itr(1);
+    return mk_prj(v, lab, side);
+  }
+  if (is_lam(v)) {
+    if (v->code->sup_lab == lab) {
+      if (!v->code->sup_has) return v;
+      neo_itr(1);
+      return mk_plam(mk_dlam(v, lab), lab, side);
+    }
+    if (code_has_sup_label(v->code, lab, 0)) {
+      neo_itr(1);
+      return mk_plam(mk_dlam(v, lab), lab, side);
+    }
+    return v;
+  }
+  return v;
+}
+
+NEO_INLINE int mat_hits(Case *m, Val *arg) {
+  return (m->tag == SWI && arg->tag == V_NUM && m->ext == arg->ext)
+      || (m->tag == MAT && arg->tag == V_CTR && m->ext == arg->ext);
+}
+
+NEO_INLINE Val *ctr_get(Val *ctr, u32 idx) {
+  if (idx == 0 && ctr->arity <= 2) return ctr->fst;
+  if (idx == 1 && ctr->arity <= 2) return ctr->snd;
+  return ctr->item[idx];
+}
+
+NEO_INLINE Code *mat_pick(Code *mat, Val *arg) {
+  Cases *cases = mat->cases;
+  if (arg->tag == V_NUM) {
+    if (arg->ext == 0 && cases->num0) return cases->num0;
+    if (arg->ext == 1 && cases->num1) return cases->num1;
+  } else if (arg->tag == V_CTR && cases->ctr && arg->ext == cases->ctr_ext) {
+    return cases->ctr;
+  }
+  for (Case *m = cases->head; m != NULL; m = m->next) {
+    if (mat_hits(m, arg)) return m->body;
+  }
+  return NULL;
+}
+
+NEO_INLINE Code *mat_pick_code(Code *mat, Code *arg) {
+  if (arg->op == BC_NUM) {
+    if (arg->ext == 0 && mat->cases->num0) return mat->cases->num0;
+    if (arg->ext == 1 && mat->cases->num1) return mat->cases->num1;
+  } else if (arg->op == BC_CTR) {
+    if (mat->cases->ctr && arg->ext == mat->cases->ctr_ext) return mat->cases->ctr;
+  } else {
+    return NULL;
+  }
+  for (Case *m = mat->cases->head; m != NULL; m = m->next) {
+    if (m->tag == SWI && arg->op == BC_NUM && m->ext == arg->ext) return m->body;
+    if (m->tag == MAT && arg->op == BC_CTR && m->ext == arg->ext) return m->body;
+  }
+  return NULL;
+}
+
+NEO_INLINE void push_ctr_code_args(Code *ctr, Env *env, u32 gap, Arg *args, u32 *argc) {
+  if (ctr->arity == 2) {
+    if (*argc + 2 > NEO_MAX_ARGS) neo_die("argument stack overflow");
+    args[(*argc)++] = arg_code(ctr->kid[1], env, gap);
+    args[(*argc)++] = arg_code(ctr->kid[0], env, gap);
+    return;
+  }
+  if (ctr->arity == 1) {
+    if (*argc >= NEO_MAX_ARGS) neo_die("argument stack overflow");
+    args[(*argc)++] = arg_code(ctr->kid[0], env, gap);
+    return;
+  }
+  for (u32 i = ctr->arity; i > 0; i--) {
+    if (*argc >= NEO_MAX_ARGS) neo_die("argument stack overflow");
+    args[(*argc)++] = arg_code(ctr->kid[i - 1], env, gap);
+  }
+}
+
+NEO_INLINE void push_ctr_val_args(Val *ctr, Arg *args, u32 *argc) {
+  if (ctr->arity == 2) {
+    if (*argc + 2 > NEO_MAX_ARGS) neo_die("argument stack overflow");
+    args[(*argc)++] = arg_val(ctr->snd);
+    args[(*argc)++] = arg_val(ctr->fst);
+    return;
+  }
+  if (ctr->arity == 1) {
+    if (*argc >= NEO_MAX_ARGS) neo_die("argument stack overflow");
+    args[(*argc)++] = arg_val(ctr->fst);
+    return;
+  }
+  for (u32 i = ctr->arity; i > 0; i--) {
+    if (*argc >= NEO_MAX_ARGS) neo_die("argument stack overflow");
+    args[(*argc)++] = arg_val(ctr_get(ctr, i - 1));
+  }
+}
+
+NEO_INLINE int is_lam_code(Code *code) {
+  return code->op == BC_LAM || code->op == BC_ELAM;
+}
+
+NEO_INLINE Code *enter_one_lam(Code *lam, Arg *arg, Env **env, u32 *gap) {
+  if (lam->op == BC_ELAM) {
+    (*gap)++;
+    return lam->sub;
+  }
+  *env = env_push(bind_arg(arg), *env, *gap + 1);
+  *gap = 0;
+  return lam->sub;
+}
+
+NEO_INLINE int enter_ctr2_code_lams(Code **body, Code *ctr, Env *ctr_env, u32 ctr_gap, Env **env, u32 *gap) {
+  if (ctr->arity != 2 || !is_lam_code(*body) || !is_lam_code((*body)->sub)) return 0;
+  neo_itr(2);
+  Arg fst = arg_code(ctr->kid[0], ctr_env, ctr_gap);
+  Code *next = enter_one_lam(*body, &fst, env, gap);
+  Arg snd = arg_code(ctr->kid[1], ctr_env, ctr_gap);
+  *body = enter_one_lam(next, &snd, env, gap);
+  return 1;
+}
+
+NEO_INLINE int enter_ctr2_val_lams(Code **body, Val *ctr, Env **env, u32 *gap) {
+  if (ctr->arity != 2 || !is_lam_code(*body) || !is_lam_code((*body)->sub)) return 0;
+  neo_itr(2);
+  Arg fst = arg_val(ctr->fst);
+  Code *next = enter_one_lam(*body, &fst, env, gap);
+  Arg snd = arg_val(ctr->snd);
+  *body = enter_one_lam(next, &snd, env, gap);
+  return 1;
+}
+
+NEO_INLINE int enter_ctr2_code_num_mat(Code **body, Code *ctr, Env *ctr_env, u32 ctr_gap, Arg *args, u32 *argc) {
+  if (ctr->arity != 2 || (*body)->op != BC_MAT || ctr->kid[0]->op != BC_NUM) return 0;
+  Code *next = mat_pick_code(*body, ctr->kid[0]);
+  if (next == NULL) return 0;
+  neo_itr(1);
+  if (*argc >= NEO_MAX_ARGS) neo_die("argument stack overflow");
+  args[(*argc)++] = arg_code(ctr->kid[1], ctr_env, ctr_gap);
+  *body = next;
+  return 1;
+}
+
+NEO_INLINE int enter_ctr2_val_num_mat(Code **body, Val *ctr, Arg *args, u32 *argc) {
+  if (ctr->arity != 2 || (*body)->op != BC_MAT || ctr->fst->tag != V_NUM) return 0;
+  Code *next = mat_pick(*body, ctr->fst);
+  if (next == NULL) return 0;
+  neo_itr(1);
+  if (*argc >= NEO_MAX_ARGS) neo_die("argument stack overflow");
+  args[(*argc)++] = arg_val(ctr->snd);
+  *body = next;
+  return 1;
+}
+
+static Val *apply_fun(Val *fun, Arg *arg);
+static Val *apply_sup(Val *sup, Arg *arg);
+
+NEO_INLINE Code *matchable_val_code(Val *v, Env **env, u32 *gap) {
+  if ((v->tag == V_THUNK || v->tag == V_LTHUNK)
+  &&  (v->code->op == BC_CTR || v->code->op == BC_NUM)) {
+    *env = v->env;
+    *gap = v->ext;
+    return v->code;
+  }
+  return NULL;
+}
+
+NEO_INLINE Code *matchable_arg_code(Arg *arg, Env **env, u32 *gap, Val **seen) {
+  *seen = NULL;
+  if (arg->val != NULL) {
+    *seen = arg->val;
+    return matchable_val_code(arg->val, env, gap);
+  }
+  if (arg->code->op == BC_CTR || arg->code->op == BC_NUM) {
+    *env = arg->env;
+    *gap = arg->gap;
+    return arg->code;
+  }
+  if (arg->code->op == BC_REF && arg->code->ext < NEO_DEF_CAP) {
+    Code *def = NEO_DEFS[arg->code->ext];
+    if (def != NULL && (def->op == BC_CTR || def->op == BC_NUM)) {
+      *env = NULL;
+      *gap = 0;
+      return def;
+    }
+  }
+  if (arg->code->op == BC_VAR) {
+    Val *val = env_get(arg->env, arg->code->ext, arg->gap);
+    *seen = val;
+    return matchable_val_code(val, env, gap);
+  }
+  return NULL;
+}
+
+NEO_INLINE void consume_matchable_seen(Val *seen) {
+  if (seen->tag == V_THUNK || seen->tag == V_LTHUNK) {
+    if (seen->pad != 0) {
+      seen->pad = 0;
+    } else {
+      val_free(seen);
+    }
+  }
+}
+
+static Val *apply_default(Code *dft, Env *env, u32 gap, Val *arg) {
+  if (dft == NULL) return mk_num(0);
+  Arg none[NEO_MAX_ARGS];
+  Val *fun = eval_code(dft, env, gap, none, 0);
+  switch (fun->tag) {
+    case V_LAM:
+    case V_ELAM:
+    case V_SEL:
+    case V_PSEL:
+    case V_CALL2:
+    case V_MAT:
+    case V_SUP:
+    case V_VAR:
+    case V_APP: {
+      Arg one = arg_val(arg);
+      return apply_fun(fun, &one);
+    }
+    default:
+      return fun;
+  }
+}
+
+static inline Val *apply_lam(Val *lam, Arg *arg) {
+  neo_itr(1);
+  Env *env = lam->env;
+  u32 gap = lam->ext;
+  if (lam->tag == V_ELAM) {
+    gap++;
+  } else {
+    env = env_push_lam(bind_arg(arg), env, gap);
+    gap = 0;
+  }
+  Arg none[NEO_MAX_ARGS];
+  return eval_code(lam->code, env, gap, none, 0);
+}
+
+static inline Val *apply_sel(Val *sel, Arg *arg) {
+  neo_itr(1);
+  if (sel->tag == V_SEL) {
+    return mk_psel((u8)sel->ext, sel->ext == 0 ? bind_arg(arg) : NULL);
+  }
+  Val *got = bind_arg(arg);
+  return sel->ext == 0 ? sel->fst : got;
+}
+
+static inline Val *apply_call2(Val *call, Arg *arg) {
+  Val *fun = bind_arg(arg);
+  if (__builtin_expect(fun->tag == V_SEL, 1)) {
+    neo_itr(3);
+    return fun->ext == 0 ? call->fst : call->snd;
+  }
+  if (__builtin_expect(fun->tag == V_PSEL, 0)) {
+    neo_itr(2);
+    return fun->ext == 0 ? fun->fst : call->snd;
+  }
+  neo_itr(1);
+  Arg fst = arg_val(call->fst);
+  Val *mid = apply_fun(fun, &fst);
+  Arg snd = arg_val(call->snd);
+  return apply_fun(mid, &snd);
+}
+
+static Val *apply_plam(Val *plam, Arg *arg) {
+  neo_itr(1);
+  Val *src = force(plam->fst);
+  LamDup *dup = NULL;
+  Val *lam = src;
+  if (__builtin_expect(src->tag == V_DLAM, 1)) {
+    dup = (LamDup*)src->snd;
+    lam = dup->lam;
+  }
+  lam = force(lam);
+  if (!is_lam(lam)) neo_die("projected non-lambda");
+  Env *env = lam->env;
+  u32 gap = lam->ext;
+  if (lam->tag == V_ELAM) {
+    gap++;
+  } else {
+    Val *got = bind_arg(arg);
+    Val *var = dup ? dup->box[1 - plam->arity] : mk_var(0);
+    if (dup) dup->box[plam->arity]->fst = got;
+    Val *sup = plam->arity == 0 ? mk_sup(plam->ext, got, var) : mk_sup(plam->ext, var, got);
+    env = env_push_lam(sup, env, gap);
+    gap = 0;
+  }
+  Arg none[NEO_MAX_ARGS];
+  Val *body = eval_code(lam->code, env, gap, none, 0);
+  return project(body, plam->ext, plam->arity);
+}
+
+static inline Val *apply_mat(Code *mat, Env *env, u32 gap, Val *arg) {
+  if (arg->tag == V_SUP) {
+    Arg one[1];
+    one[0] = arg_val(arg->fst);
+    Val *fst = eval_code(mat, env, gap, one, 1);
+    one[0] = arg_val(arg->snd);
+    Val *snd = eval_code(mat, env, gap, one, 1);
+    return mk_sup(arg->ext, fst, snd);
+  }
+  Code *body = mat_pick(mat, arg);
+  if (!body) return apply_default(mat->cases->dft, env, gap, arg);
+  Arg args[NEO_MAX_ARGS];
+  u32 argc = 0;
+  if (arg->tag == V_CTR) {
+    if (!enter_ctr2_val_num_mat(&body, arg, args, &argc)
+    &&  !enter_ctr2_val_lams(&body, arg, &env, &gap)) {
+      push_ctr_val_args(arg, args, &argc);
+    }
+    val_free_ctr(arg);
+  }
+  return eval_code(body, env, gap, args, argc);
+}
+
+NEO_INLINE Val *apply_fun(Val *fun, Arg *arg) {
+  fun = force(fun);
+  switch (fun->tag) {
+    case V_LAM:
+    case V_ELAM:
+      return apply_lam(fun, arg);
+    case V_SEL:
+    case V_PSEL:
+      return apply_sel(fun, arg);
+    case V_CALL2:
+      return apply_call2(fun, arg);
+    case V_MAT: {
+      Env *arg_env;
+      u32 arg_gap;
+      Val *seen;
+      Code *arg_code = matchable_arg_code(arg, &arg_env, &arg_gap, &seen);
+      if (arg_code != NULL) {
+        Code *body = mat_pick_code(fun->code, arg_code);
+        if (body) {
+          neo_itr(1);
+          if (seen) consume_matchable_seen(seen);
+          Arg args[NEO_MAX_ARGS];
+          u32 argc = 0;
+          Env *body_env = fun->env;
+          u32 body_gap = fun->ext;
+          if (arg_code->op == BC_CTR) {
+            if (!enter_ctr2_code_num_mat(&body, arg_code, arg_env, arg_gap, args, &argc)
+            &&  !enter_ctr2_code_lams(&body, arg_code, arg_env, arg_gap, &body_env, &body_gap)) {
+              push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
+            }
+          }
+          return eval_code(body, body_env, body_gap, args, argc);
+        }
+      }
+      neo_itr(1);
+      Val *val = seen ? force(seen) : force_arg(arg);
+      return apply_mat(fun->code, fun->env, fun->ext, val);
+    }
+    case V_SUP: {
+      Arg shared;
+      if (arg->val == NULL) {
+        shared = arg_val(mk_thunk(arg->code, arg->env, arg->gap));
+        arg = &shared;
+      }
+      Val *fst = apply_fun(fun->fst, arg);
+      Val *snd = apply_fun(fun->snd, arg);
+      return mk_sup(fun->ext, fst, snd);
+    }
+    case V_VAR:
+    case V_APP:
+      return mk_app(fun, arg->val != NULL ? arg->val : mk_thunk(arg->code, arg->env, arg->gap));
+    case V_PRJ: {
+      Val *res = apply_fun(fun->fst, arg);
+      return project(res, fun->ext, fun->arity);
+    }
+    case V_PLAM:
+      return apply_plam(fun, arg);
+    case V_BOX:
+      if (fun->fst) return apply_fun(fun->fst, arg);
+      return mk_app(fun, arg->val != NULL ? arg->val : mk_thunk(arg->code, arg->env, arg->gap));
+    default:
+      neo_die("cannot apply value");
+  }
+  return fun;
+}
+
+static __attribute__((noinline)) Val *apply_sup(Val *sup, Arg *arg) {
+  if ((sup->fst->tag == V_THUNK || sup->fst->tag == V_LTHUNK)
+  &&  (sup->snd->tag == V_THUNK || sup->snd->tag == V_LTHUNK)) {
+    if (arg->val == NULL) *arg = arg_val(mk_thunk(arg->code, arg->env, arg->gap));
+    Arg one[1] = {*arg};
+    Val *fst = eval_code(sup->fst->code, sup->fst->env, sup->fst->ext, one, 1);
+    one[0] = *arg;
+    Val *snd = eval_code(sup->snd->code, sup->snd->env, sup->snd->ext, one, 1);
+    return mk_sup(sup->ext, fst, snd);
+  }
+  if (is_lam(sup->fst) && is_lam(sup->snd)) {
+    if (arg->val == NULL) *arg = arg_val(mk_thunk(arg->code, arg->env, arg->gap));
+    Val *fst = apply_lam(sup->fst, arg);
+    Val *snd = apply_lam(sup->snd, arg);
+    return mk_sup(sup->ext, fst, snd);
+  }
+  return apply_fun(sup, arg);
+}
+
+NEO_INLINE Val *make_field(Code *kid, Env *env, u32 gap);
+
+NEO_INLINE Val *make_atom_field(Code *kid, Env *env, u32 gap, u8 kind) {
+  if (kind == CK_NUM) return mk_num(kid->ext);
+  if (kind == CK_VAR) return env_get(env, kid->ext, gap);
+  return make_field(kid, env, gap);
+}
+
+NEO_INLINE void init_ctr(Val *val, Code *pc, Env *env, u32 gap) {
+  val->tag = V_CTR;
+  val->ext = pc->ext;
+  val->arity = pc->arity;
+  val->pad = 0;
+  if (val->arity == 2) {
+    val->fst = make_atom_field(pc->kid[0], env, gap, pc->aux & 3);
+    val->snd = make_atom_field(pc->kid[1], env, gap, pc->aux >> 2);
+  } else if (val->arity == 1) {
+    val->fst = make_field(pc->kid[0], env, gap);
+  } else if (val->arity > 2) {
+    val->item = items_new(val->arity);
+    for (u32 i = 0; i < val->arity; i++) {
+      val->item[i] = make_field(pc->kid[i], env, gap);
+    }
+  }
+}
+
+NEO_INLINE Val *make_ctr(Code *pc, Env *env, u32 gap) {
+  Val *val = val_new(V_CTR);
+  init_ctr(val, pc, env, gap);
+  return val;
+}
+
+static Val *clone_cached_value(Val *v) {
+  switch (v->tag) {
+    case V_NUM:
+      return v;
+    case V_THUNK:
+    case V_LTHUNK: {
+      Val *out = val_new(v->tag);
+      out->code = v->code;
+      out->env = v->env;
+      out->ext = v->ext;
+      out->arity = v->arity;
+      out->pad = 0;
+      return out;
+    }
+    case V_CTR: {
+      Val *out = val_new(V_CTR);
+      out->ext = v->ext;
+      out->arity = v->arity;
+      out->pad = 0;
+      if (v->arity == 2) {
+        out->fst = clone_cached_value(v->fst);
+        out->snd = clone_cached_value(v->snd);
+      } else if (v->arity == 1) {
+        out->fst = clone_cached_value(v->fst);
+      } else if (v->arity > 2) {
+        out->item = items_new(v->arity);
+        for (u32 i = 0; i < v->arity; i++) {
+          out->item[i] = clone_cached_value(v->item[i]);
+        }
+      }
+      return out;
+    }
+    case V_SUP:
+      return mk_sup(v->ext, clone_cached_value(v->fst), clone_cached_value(v->snd));
+    default:
+      return v;
+  }
+}
+
+static Val *frozen_field_value(Val *v) {
+  switch (v->tag) {
+    case V_THUNK:
+    case V_LTHUNK:
+    case V_SUP:
+      return clone_cached_value(v);
+    default:
+      return v;
+  }
+}
+
+static void freeze_cached_value(Val *v) {
+  switch (v->tag) {
+    case V_CTR:
+      v->pad = NEO_VAL_FROZEN;
+      if (v->arity == 2) {
+        freeze_cached_value(v->fst);
+        freeze_cached_value(v->snd);
+      } else if (v->arity == 1) {
+        freeze_cached_value(v->fst);
+      } else if (v->arity > 2) {
+        for (u32 i = 0; i < v->arity; i++) {
+          freeze_cached_value(v->item[i]);
+        }
+      }
+      break;
+    case V_SUP:
+      freeze_cached_value(v->fst);
+      freeze_cached_value(v->snd);
+      break;
+    default:
+      break;
+  }
+}
+
+NEO_INLINE Val *make_field(Code *kid, Env *env, u32 gap) {
+  if (kid->op == BC_NUM) return mk_num(kid->ext);
+  if (kid->op == BC_VAR) return env_get(env, kid->ext, gap);
+  if (kid->op == BC_CTR) return make_ctr(kid, env, gap);
+  return mk_lthunk(kid, env, gap);
+}
+
+static Val *eval_code_into(Code *pc, Env *env, u32 gap, Arg *args, u32 argc, Val *dst) {
+  static void *dispatch[] = {
+    &&do_arg, &&do_args, &&do_var, &&do_dp0, &&do_dp1, &&do_ref, &&do_call_ref, &&do_num,
+    &&do_ctr, &&do_lam, &&do_elam, &&do_mat, &&do_mat_ctr, &&do_dup, &&do_sup, &&do_era,
+    &&do_bad
+  };
+  if (!NEO_THREADED) {
+    for (u32 i = 0; i < NEO_DEF_CAP; i++) {
+      if (NEO_DEFS[i] != NULL) thread_code(NEO_DEFS[i], dispatch, 0);
+    }
+    NEO_THREADED = 1;
+  }
+  Val *val = NULL;
+  goto *pc->jump;
+
+do_arg:
+  if (argc >= NEO_MAX_ARGS) neo_die("argument stack overflow");
+  args[argc++] = arg_code(pc->sub, env, gap);
+  pc = pc->next;
+  goto *pc->jump;
+
+do_args:
+  if (argc + pc->arity > NEO_MAX_ARGS) neo_die("argument stack overflow");
+  if (pc->arity == 4) {
+    args[argc++] = arg_code(pc->kid[0], env, gap);
+    args[argc++] = arg_code(pc->kid[1], env, gap);
+    args[argc++] = arg_code(pc->kid[2], env, gap);
+    args[argc++] = arg_code(pc->kid[3], env, gap);
+  } else if (pc->arity == 3) {
+    args[argc++] = arg_code(pc->kid[0], env, gap);
+    args[argc++] = arg_code(pc->kid[1], env, gap);
+    args[argc++] = arg_code(pc->kid[2], env, gap);
+  } else if (pc->arity == 2) {
+    args[argc++] = arg_code(pc->kid[0], env, gap);
+    args[argc++] = arg_code(pc->kid[1], env, gap);
+  } else if (pc->arity == 1) {
+    args[argc++] = arg_code(pc->kid[0], env, gap);
+  } else {
+    for (u32 i = 0; i < pc->arity; i++) {
+      args[argc++] = arg_code(pc->kid[i], env, gap);
+    }
+  }
+  pc = pc->next;
+  goto *pc->jump;
+
+do_ref:
+  if (pc->sub == NULL) neo_die("unknown reference");
+  if (argc == 0 && pc->ext < NEO_DEF_CAP && NEO_REF_CACHE[pc->ext] != NULL) {
+    Val *cached = NEO_REF_CACHE[pc->ext];
+    val = cached->tag == V_CTR ? clone_cached_value(cached) : cached;
+    goto apply_ready;
+  }
+  pc = pc->sub;
+  env = NULL;
+  gap = 0;
+  goto *pc->jump;
+
+do_call_ref:
+  if (pc->next == NULL) neo_die("unknown reference");
+  if (argc >= NEO_MAX_ARGS) neo_die("argument stack overflow");
+  if (pc->next->op == BC_LAM || pc->next->op == BC_ELAM) {
+    neo_itr(1);
+    Arg arg = arg_code(pc->sub, env, gap);
+    if (pc->next->op == BC_ELAM) {
+      env = NULL;
+      gap = 1;
+    } else {
+      env = env_cell(bind_arg(&arg), NULL, 1);
+      gap = 0;
+    }
+    pc = pc->next->sub;
+    goto *pc->jump;
+  }
+  if ((pc->next->op == BC_MAT || pc->next->op == BC_MAT_CTR) && (pc->sub->op == BC_CTR || pc->sub->op == BC_NUM)) {
+    Code *arg_code = pc->sub;
+    Code *body = mat_pick_code(pc->next, arg_code);
+    if (body != NULL) {
+      neo_itr(1);
+      Env *body_env = NULL;
+      u32 body_gap = 0;
+      if (arg_code->op == BC_CTR) {
+        if (!enter_ctr2_code_num_mat(&body, arg_code, env, gap, args, &argc)
+        &&  !enter_ctr2_code_lams(&body, arg_code, env, gap, &body_env, &body_gap)) {
+          push_ctr_code_args(arg_code, env, gap, args, &argc);
+        }
+      }
+      pc = body;
+      env = body_env;
+      gap = body_gap;
+      goto *pc->jump;
+    }
+  }
+  args[argc++] = arg_code(pc->sub, env, gap);
+  pc = pc->next;
+  env = NULL;
+  gap = 0;
+  goto *pc->jump;
+
+do_var:
+  if (pc->ext == 1 && gap == 0) {
+    if (!env || !env->val) neo_die("unbound variable");
+    val = env->val;
+  } else if (pc->ext == 2 && gap == 0 && env != NULL && env_span(env) == 1) {
+    Env *next = env_next(env);
+    if (!next || !next->val) neo_die("unbound variable");
+    val = next->val;
+  } else {
+    val = env_get(env, pc->ext, gap);
+  }
+  if (__builtin_expect(val->tag == V_THUNK || val->tag == V_LTHUNK, 0)) goto apply_value;
+  goto apply_ready;
+
+do_dp0:
+do_dp1:
+  val = env_get(env, pc->ext, gap);
+  if (pc->arity >= NEO_AUTO_LAB_BASE) {
+    share_value(val);
+  } else if (!is_lam(val) || val->code->sup_lab != pc->arity || val->code->sup_has) {
+    val = project(val, pc->arity, pc->op == BC_DP0 ? 0 : 1);
+  }
+  goto apply_ready;
+
+do_num:
+  val = mk_num(pc->ext);
+  goto apply_ready;
+
+do_ctr:
+  if (dst != NULL && argc == 0) {
+    u16 refs = dst->pad;
+    init_ctr(dst, pc, env, gap);
+    dst->pad = refs;
+    val = dst;
+    dst = NULL;
+  } else {
+    val = make_ctr(pc, env, gap);
+  }
+  goto apply_ready;
+
+do_lam:
+  if (argc == 0) {
+    val = mk_lam(pc->sub, env, gap);
+    goto apply_ready;
+  }
+  neo_itr(1);
+  {
+    Arg *arg = &args[--argc];
+    env = env_push_lam(bind_arg(arg), env, gap);
+    gap = 0;
+    pc = pc->sub;
+    goto *pc->jump;
+  }
+
+do_elam:
+  if (argc == 0) {
+    val = mk_lam_tag(V_ELAM, pc->sub, env, gap);
+    goto apply_ready;
+  }
+  neo_itr(1);
+  argc--;
+  gap++;
+  pc = pc->sub;
+  goto *pc->jump;
+
+do_mat:
+  if (__builtin_expect(argc == 0, 0)) {
+    val = mk_mat(pc, env, gap);
+    goto apply_ready;
+  }
+  {
+    Arg *raw = &args[argc - 1];
+    if (raw->val != NULL && raw->val->tag == V_NUM) {
+      Code *body = mat_pick(pc, raw->val);
+      if (body != NULL) {
+        neo_itr(1);
+        argc--;
+        pc = body;
+        goto *pc->jump;
+      }
+    }
+    Env *arg_env;
+    u32 arg_gap;
+    Val *seen;
+    Code *arg_code = matchable_arg_code(raw, &arg_env, &arg_gap, &seen);
+    if (arg_code != NULL) {
+      Code *body = mat_pick_code(pc, arg_code);
+      if (body) {
+        neo_itr(1);
+        if (seen) consume_matchable_seen(seen);
+        argc--;
+        if (arg_code->op == BC_CTR) {
+          if (!enter_ctr2_code_num_mat(&body, arg_code, arg_env, arg_gap, args, &argc)
+          &&  !enter_ctr2_code_lams(&body, arg_code, arg_env, arg_gap, &env, &gap)) {
+            push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
+          }
+        }
+        pc = body;
+        goto *pc->jump;
+      }
+    }
+    neo_itr(1);
+    argc--;
+    Val *arg = seen ? force(seen) : force_arg(raw);
+    if (arg->tag == V_SUP) {
+      val = apply_mat(pc, env, gap, arg);
+      goto apply_value;
+    }
+    Code *body = mat_pick(pc, arg);
+    if (!body) {
+      val = apply_default(pc->cases->dft, env, gap, arg);
+      goto apply_value;
+    }
+    if (arg->tag == V_CTR) {
+      if (!enter_ctr2_val_num_mat(&body, arg, args, &argc)
+      &&  !enter_ctr2_val_lams(&body, arg, &env, &gap)) {
+        push_ctr_val_args(arg, args, &argc);
+      }
+      val_free_ctr(arg);
+    }
+    pc = body;
+    goto *pc->jump;
+  }
+
+do_mat_ctr:
+  if (__builtin_expect(argc == 0, 0)) {
+    val = mk_mat(pc, env, gap);
+    goto apply_ready;
+  }
+  {
+    Arg *raw = &args[argc - 1];
+    Env *arg_env;
+    u32 arg_gap;
+    Val *seen;
+    Code *arg_code = matchable_arg_code(raw, &arg_env, &arg_gap, &seen);
+    if (arg_code != NULL && arg_code->op == BC_CTR && arg_code->ext == pc->ext) {
+      neo_itr(1);
+      if (seen) consume_matchable_seen(seen);
+      argc--;
+      Code *body = pc->sub;
+      if (!enter_ctr2_code_num_mat(&body, arg_code, arg_env, arg_gap, args, &argc)
+      &&  !enter_ctr2_code_lams(&body, arg_code, arg_env, arg_gap, &env, &gap)) {
+        push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
+      }
+      pc = body;
+      goto *pc->jump;
+    }
+    neo_itr(1);
+    argc--;
+    Val *arg = seen ? force(seen) : force_arg(raw);
+    if (arg->tag == V_SUP) {
+      val = apply_mat(pc, env, gap, arg);
+      goto apply_value;
+    }
+    if (arg->tag == V_CTR && arg->ext == pc->ext) {
+      Code *body = pc->sub;
+      if (!enter_ctr2_val_num_mat(&body, arg, args, &argc)
+      &&  !enter_ctr2_val_lams(&body, arg, &env, &gap)) {
+        push_ctr_val_args(arg, args, &argc);
+      }
+      val_free_ctr(arg);
+      pc = body;
+      goto *pc->jump;
+    }
+    val = mk_num(0);
+    goto apply_value;
+  }
+
+do_dup:
+  {
+    Val *v = force(mk_thunk(pc->sub, env, gap));
+    if (pc->ext >= NEO_AUTO_LAB_BASE) {
+      share_value(v);
+    } else if (is_lam(v) && code_has_sup_label(v->code, pc->ext, 0)) {
+      v = mk_dlam(v, pc->ext);
+    }
+    env = env_push_lam(v, env, gap);
+    gap = 0;
+    pc = pc->next;
+    goto *pc->jump;
+  }
+
+do_sup:
+  val = mk_sup(pc->ext, mk_thunk(pc->kid[0], env, gap), mk_thunk(pc->kid[1], env, gap));
+  goto apply_ready;
+
+do_era:
+  val = val_new(V_ERA);
+  goto apply_ready;
+
+do_bad:
+  neo_fail();
+  return val_new(V_ERA);
+
+apply_value:
+  val = force(val);
+apply_ready:
+  if (argc == 0) return val;
+  switch (val->tag) {
+    case V_LAM: {
+      neo_itr(1);
+      Arg *arg = &args[--argc];
+      env = val->env;
+      gap = val->ext;
+      env = env_push_lam(bind_arg(arg), env, gap);
+      gap = 0;
+      pc = val->code;
+      goto *pc->jump;
+    }
+    case V_ELAM: {
+      neo_itr(1);
+      argc--;
+      env = val->env;
+      gap = val->ext + 1;
+      pc = val->code;
+      goto *pc->jump;
+    }
+    case V_SEL: {
+      if (argc >= 2) {
+        Arg *fst = &args[argc - 1];
+        Arg *snd = &args[argc - 2];
+        Arg *pick = val->ext == 0 ? fst : snd;
+        argc -= 2;
+        neo_itr(2);
+        val = bind_arg(pick);
+        if (__builtin_expect(val->tag == V_THUNK || val->tag == V_LTHUNK, 0)) goto apply_value;
+        goto apply_ready;
+      }
+      Arg arg = args[--argc];
+      val = apply_sel(val, &arg);
+      goto apply_ready;
+    }
+    case V_PSEL: {
+      Arg arg = args[--argc];
+      val = apply_sel(val, &arg);
+      if (__builtin_expect(val->tag == V_THUNK || val->tag == V_LTHUNK, 0)) goto apply_value;
+      goto apply_ready;
+    }
+    case V_CALL2: {
+      Arg arg = args[--argc];
+      val = apply_call2(val, &arg);
+      if (__builtin_expect(val->tag == V_THUNK || val->tag == V_LTHUNK, 0)) goto apply_value;
+      goto apply_ready;
+    }
+    case V_MAT: {
+      Arg arg = args[--argc];
+      val = apply_fun(val, &arg);
+      goto apply_value;
+    }
+    case V_SUP: {
+      Arg arg = args[--argc];
+      val = apply_sup(val, &arg);
+      goto apply_value;
+    }
+    case V_PRJ: {
+      Arg arg = args[--argc];
+      val = apply_fun(val, &arg);
+      goto apply_value;
+    }
+    case V_PLAM: {
+      Arg arg = args[--argc];
+      val = apply_plam(val, &arg);
+      goto apply_value;
+    }
+    default:
+      if (val->tag == V_VAR || val->tag == V_APP || val->tag == V_BOX) {
+        Arg arg = args[--argc];
+        val = mk_app(val, arg.val != NULL ? arg.val : mk_thunk(arg.code, arg.env, arg.gap));
+        goto apply_value;
+      }
+      neo_die("cannot apply value");
   }
   return val;
 }
 
-fn FastVal fast_eval(FastRun *run, FastVal start) {
-  FastVal args[FAST_ARG_CAP];
-  u32 argc = 0;
-  u64 loc = start.loc;
-  u64 env = start.env;
-  u32 len = start.len;
-
-  while (!run->failed) {
-    Term term = heap_read(loc);
-    switch (term_tag(term)) {
-      case REF: {
-        u32 nam = term_ext(term);
-        if (BOOK[nam] == 0) {
-          fast_fail(run);
-          return fast_bad();
-        }
-        loc = BOOK[nam];
-        env = 0;
-        len = 0;
-        continue;
+NEO_INLINE Val *force(Val *v) {
+  while (v->tag == V_THUNK || v->tag == V_LTHUNK) {
+    if (v->tag == V_LTHUNK && v->code->op == BC_CTR) {
+      u16 refs = v->pad;
+      init_ctr(v, v->code, v->env, v->ext);
+      v->pad = refs;
+      return v;
+    }
+    u8 tag = v->tag;
+    u16 refs = v->pad & NEO_VAL_REFS_MASK;
+    Arg args[NEO_MAX_ARGS];
+    Val *res = eval_code_into(v->code, v->env, v->ext, args, 0, tag == V_LTHUNK ? v : NULL);
+    if (tag == V_LTHUNK && res != v) {
+      u16 res_pad = res->pad;
+      *v = *res;
+      if (v->tag == V_CTR) {
+        v->pad = refs | (res_pad == NEO_VAL_FROZEN ? NEO_VAL_BORROWED : 0);
+        val_free_ctr(res);
       }
-      case APP: {
-        u64 app_loc = term_val(term);
-        if (!fast_arg_push(run, args, &argc, fast_clo(app_loc + 1, env, len))) {
-          return fast_bad();
-        }
-        loc = app_loc + 0;
-        continue;
-      }
-      case LAM: {
-        if (argc == 0) {
-          return fast_clo(loc, env, len);
-        }
-        run->itrs++;
-        FastVal arg = args[--argc];
-        u32 lam_ext = term_ext(term);
-        u64 body_loc = term_val(term);
-        u64 next_env = env;
-        if ((lam_ext & LAM_ERA_MASK) == 0) {
-          next_env = fast_env_push(run, arg, env);
-          if (run->failed) {
-            return fast_bad();
-          }
-        } else {
-          next_env = fast_env_push(run, fast_num(0), env);
-          if (run->failed) {
-            return fast_bad();
-          }
-        }
-        loc = body_loc;
-        env = next_env;
-        len++;
-        continue;
-      }
-      case BJV: {
-        FastVal val = fast_env_get(run, env, len, term_val(term));
-        if (run->failed) {
-          return fast_bad();
-        }
-        if (fast_apply_value(run, val, args, &argc, &loc, &env, &len)) {
-          continue;
-        }
-        return val;
-      }
-      case MAT:
-      case SWI: {
-        if (argc == 0) {
-          return fast_clo(loc, env, len);
-        }
-        FastVal arg = args[--argc];
-        FastVal got = fast_force(run, arg);
-        if (run->failed) {
-          return fast_bad();
-        }
-        u64 mat_loc = term_val(term);
-        u32 ext = term_ext(term);
-        int match = 0;
-        if (term_tag(term) == MAT && got.kind == FAST_KIND_CTR && got.ext == ext) {
-          match = 1;
-        }
-        if (term_tag(term) == SWI && got.kind == FAST_KIND_NUM && (u32)got.loc == ext) {
-          match = 1;
-        }
-        run->itrs++;
-        if (match) {
-          if (got.kind == FAST_KIND_CTR) {
-            FastData *data = &run->data[got.loc];
-            for (u32 i = data->ari; i > 0; i--) {
-              if (!fast_arg_push(run, args, &argc, data->arg[i - 1])) {
-                return fast_bad();
-              }
-            }
-          }
-          loc = mat_loc + 0;
-          continue;
-        }
-        if (!fast_arg_push(run, args, &argc, got)) {
-          return fast_bad();
-        }
-        loc = mat_loc + 1;
-        continue;
-      }
-      case NUM: {
-        FastVal val = fast_num(term_val(term));
-        if (fast_apply_value(run, val, args, &argc, &loc, &env, &len)) {
-          continue;
-        }
-        return val;
-      }
-      case C00 ... C16: {
-        u32 ari = term_tag(term) - C00;
-        u64 data_loc = fast_data_new(run, ari);
-        if (run->failed) {
-          return fast_bad();
-        }
-        u64 ctr_loc = term_val(term);
-        FastData *data = &run->data[data_loc];
-        for (u32 i = 0; i < ari; i++) {
-          data->arg[i] = fast_clo(ctr_loc + i, env, len);
-        }
-        FastVal val = fast_ctr(term_tag(term), term_ext(term), ari, data_loc);
-        if (fast_apply_value(run, val, args, &argc, &loc, &env, &len)) {
-          continue;
-        }
-        return val;
-      }
-      case OP2: {
-        if (argc != 0) {
-          fast_fail(run);
-          return fast_bad();
-        }
-        u64 op_loc = term_val(term);
-        FastVal a = fast_force(run, fast_clo(op_loc + 0, env, len));
-        FastVal b = fast_force(run, fast_clo(op_loc + 1, env, len));
-        if (run->failed || a.kind != FAST_KIND_NUM || b.kind != FAST_KIND_NUM) {
-          fast_fail(run);
-          return fast_bad();
-        }
-        run->itrs++;
-        return fast_num(term_op2_u32(term_ext(term), (u32)a.loc, (u32)b.loc));
-      }
-      default: {
-        fast_fail(run);
-        return fast_bad();
-      }
+    } else {
+      v = res;
     }
   }
-  return fast_bad();
+  return v;
 }
 
-fn int fast_reify(FastRun *run, FastVal val, Term *out) {
-  val = fast_force(run, val);
-  if (run->failed) {
+static void print_var_name(u32 idx) {
+  if (idx < 26) {
+    putchar((char)('a' + idx));
+  } else {
+    printf("x%u", idx);
+  }
+}
+
+static void print_val_at(Val *v, u32 depth);
+static void normalize_val_at(Val *v, u32 depth);
+static void normalize_forced_val_at(Val *v, u32 depth);
+
+static void print_val_at(Val *v, u32 depth) {
+  v = force(v);
+  switch (v->tag) {
+    case V_NUM:
+      printf("%u", v->ext);
+      return;
+    case V_CTR:
+      fputc('#', stdout);
+      print_sym_name(stdout, v->ext);
+      if (v->arity > 0) {
+        fputc('{', stdout);
+        for (u32 i = 0; i < v->arity; i++) {
+          if (i > 0) fputc(',', stdout);
+          print_val_at(ctr_get(v, i), depth);
+        }
+        fputc('}', stdout);
+      }
+      return;
+    case V_LAM:
+    case V_ELAM: {
+      fputs("λ", stdout);
+      print_var_name(depth);
+      fputc('.', stdout);
+      Env *env = v->env;
+      u32 gap = v->ext;
+      if (v->tag == V_ELAM) {
+        gap++;
+      } else {
+        env = env_push(mk_var(depth), env, gap + 1);
+        gap = 0;
+      }
+      Arg none[NEO_MAX_ARGS];
+      Val *body = eval_code(v->code, env, gap, none, 0);
+      print_val_at(body, depth + 1);
+      return;
+    }
+    case V_SEL:
+      fputs("λ", stdout);
+      print_var_name(depth);
+      fputs(".λ", stdout);
+      print_var_name(depth + 1);
+      fputc('.', stdout);
+      print_var_name(v->ext == 0 ? depth : depth + 1);
+      return;
+    case V_PSEL:
+      fputs("λ", stdout);
+      print_var_name(depth);
+      fputc('.', stdout);
+      if (v->ext == 0) {
+        print_val_at(v->fst, depth + 1);
+      } else {
+        print_var_name(depth);
+      }
+      return;
+    case V_CALL2:
+      fputs("λ", stdout);
+      print_var_name(depth);
+      fputc('.', stdout);
+      print_var_name(depth);
+      fputc('(', stdout);
+      print_val_at(v->fst, depth);
+      fputc(',', stdout);
+      print_val_at(v->snd, depth);
+      fputc(')', stdout);
+      return;
+    case V_SUP:
+      fputc('&', stdout);
+      print_name(stdout, v->ext);
+      fputc('{', stdout);
+      print_val_at(v->fst, depth);
+      fputc(',', stdout);
+      print_val_at(v->snd, depth);
+      fputc('}', stdout);
+      return;
+    case V_VAR:
+      print_var_name(v->ext);
+      return;
+    case V_APP:
+      print_val_at(v->fst, depth);
+      fputc('(', stdout);
+      print_val_at(v->snd, depth);
+      fputc(')', stdout);
+      return;
+    case V_BOX:
+      if (v->fst) {
+        print_val_at(v->fst, depth);
+      } else {
+        fputc('_', stdout);
+      }
+      return;
+    case V_ERA:
+      fputs("&{}", stdout);
+      return;
+    default:
+      fputc('_', stdout);
+      return;
+  }
+}
+
+static void print_val(Val *v) {
+  print_val_at(v, 0);
+}
+
+static void normalize_mat_val(Val *v, u32 depth) {
+  for (Case *m = v->code->cases ? v->code->cases->head : NULL; m != NULL; m = m->next) {
+    Arg none[NEO_MAX_ARGS];
+    Val *body = eval_code(m->body, v->env, v->ext, none, 0);
+    normalize_val_at(body, depth);
+  }
+  if (v->code->cases && v->code->cases->dft) {
+    Arg none[NEO_MAX_ARGS];
+    Val *body = eval_code(v->code->cases->dft, v->env, v->ext, none, 0);
+    normalize_val_at(body, depth);
+  }
+}
+
+static void normalize_val_at(Val *v, u32 depth) {
+  v = force(v);
+  normalize_forced_val_at(v, depth);
+}
+
+static void normalize_forced_val_at(Val *v, u32 depth) {
+  switch (v->tag) {
+    case V_CTR:
+      if (v->arity == 2) {
+        normalize_val_at(v->fst, depth);
+        normalize_val_at(v->snd, depth);
+        return;
+      }
+      for (u32 i = 0; i < v->arity; i++) {
+        normalize_val_at(ctr_get(v, i), depth);
+      }
+      return;
+    case V_LAM:
+    case V_ELAM: {
+      Env *env = v->env;
+      u32 gap = v->ext;
+      if (v->tag == V_ELAM) {
+        gap++;
+      } else {
+        env = env_push(mk_var(depth), env, gap + 1);
+        gap = 0;
+      }
+      Arg none[NEO_MAX_ARGS];
+      Val *body = eval_code(v->code, env, gap, none, 0);
+      normalize_val_at(body, depth + 1);
+      return;
+    }
+    case V_MAT:
+      normalize_mat_val(v, depth);
+      return;
+    case V_SEL:
+      return;
+    case V_PSEL:
+      if (v->ext == 0 && v->fst != NULL) normalize_val_at(v->fst, depth);
+      return;
+    case V_CALL2:
+      normalize_val_at(v->fst, depth);
+      normalize_val_at(v->snd, depth);
+      return;
+    case V_SUP:
+      normalize_val_at(v->fst, depth);
+      normalize_val_at(v->snd, depth);
+      return;
+    case V_APP:
+      normalize_val_at(v->fst, depth);
+      normalize_val_at(v->snd, depth);
+      return;
+    case V_PRJ:
+    case V_PLAM:
+      normalize_val_at(v->fst, depth);
+      return;
+    default:
+      return;
+  }
+}
+
+static void normalize_val(Val *v) {
+  normalize_val_at(v, 0);
+}
+
+static int neo_eval_main(u32 main_id, int silent) {
+  NEO_THREADED = 0;
+  NEO_ITRS = 0;
+  if (NEO_FAILED || main_id >= NEO_DEF_CAP || NEO_DEFS[main_id] == NULL) {
     return 0;
   }
-  switch (val.kind) {
-    case FAST_KIND_NUM: {
-      *out = term_new_num((u32)val.loc);
-      return 1;
-    }
-    case FAST_KIND_CTR: {
-      Term args[16];
-      FastData *data = &run->data[val.loc];
-      for (u32 i = 0; i < data->ari; i++) {
-        if (!fast_reify(run, data->arg[i], &args[i])) {
-          return 0;
-        }
-      }
-      *out = term_new_ctr(val.ext, data->ari, args);
-      return 1;
-    }
-    default: {
-      fast_fail(run);
-      return 0;
-    }
+  Arg args[NEO_MAX_ARGS];
+  Val *res = force(eval_code(NEO_DEFS[main_id], NULL, 0, args, 0));
+  if (NEO_FAILED) {
+    return 0;
   }
+  normalize_val(res);
+  if (!silent) {
+    print_val(res);
+    putchar('\n');
+  }
+  if (ITRS_ENABLED) {
+    ITRS += NEO_ITRS;
+  }
+  return 1;
 }
 
-fn void fast_run_free(FastRun *run) {
-  free(run->envs);
-  free(run->data);
-  run->envs = NULL;
-  run->data = NULL;
-}
+// Nano VM
+// =======
+// Compact evaluator for the pure first-order case-tree subset used by direct
+// NanoHVM ports. It compiles HVM's static book terms to a tiny stack VM whose
+// primitives correspond to Nano's GET/LAM/DEL/MAT/TUP/CALL operations. Programs
+// outside this subset are declined and evaluated by the general evaluator.
 
-// First-Order Bytecode Fast Path
-// ------------------------------
+#define NV_NUM_BIT   0x80000000u
+#define NV_LOC_MASK  0x7FFFFFFFu
+#define NV_CODE_CAP  (1u << 20)
+#define NV_HEAP_CAP  (1u << 20)
+#define NV_STACK_CAP (1u << 20)
+#define NV_CTX_CAP   (1u << 20)
+#define NV_CALL_CAP  65536u
+#define NV_BIND_CAP  256u
 
-#define FO_NUM_BIT (1ULL << 63)
-#define FO_FUN_BIT (1ULL << 62)
-#define FO_CLO_BIT (1ULL << 61)
-#define FO_LOC_MASK (FO_CLO_BIT - 1)
-#define FO_CODE_CAP (1U << 20)
-#define FO_STACK_CAP (1U << 20)
-#define FO_CTX_CAP (1U << 20)
-#define FO_NODE_CAP (1U << 24)
-#define FO_CLO_CAP (1U << 20)
-#define FO_CLO_CTX_CAP (1U << 22)
-#define FO_CAPTURE_CAP (1U << 20)
-#define FO_CALL_CAP 65536
-#define FO_BIND_CAP 256
+typedef u32 NvTerm;
 
-#define FO_DONE 0
-#define FO_LAM 1
-#define FO_DEL 2
-#define FO_MAT_CTR 3
-#define FO_MAT_NUM 4
-#define FO_VAR 5
-#define FO_NUM 6
-#define FO_CTR 7
-#define FO_CALL 8
-#define FO_TAIL 9
-#define FO_END 10
-#define FO_DUP 11
-#define FO_OP2 12
-#define FO_ENTER 13
-#define FO_FUN 14
-#define FO_CLO 15
-#define FO_APPLY 16
-#define FO_JUMP 17
-#define FO_MAT_BIND 18
-#define FO_NUM_SWITCH 19
-#define FO_MAT_PAIR 20
-
-typedef u64 FoTerm;
+enum {
+  NV_NUM,
+  NV_TUP,
+  NV_VAR,
+  NV_GET,
+  NV_LAM,
+  NV_DEL,
+  NV_MAT,
+  NV_DUP,
+  NV_GET_MAT,
+  NV_TUP_L_NUM,
+  NV_TUP_R_NUM,
+  NV_TUP_L_VAR,
+  NV_TUP_R_VAR,
+  NV_REC_FN,
+  NV_TAI_FN,
+  NV_END
+};
 
 typedef struct {
   u8  op;
-  u8  tag;
-  u16 ari;
+  u8  pad;
+  u16 idx;
   u32 ext;
-  u32 aux;
-} FoOp;
+} NvOp;
 
 typedef struct {
   u32 pc;
   u32 frm;
   u32 cur;
-  u32 fidx;
-} FoFrame;
+  u32 fun;
+} NvFrame;
 
 typedef struct {
   u8  tag;
   u32 ext;
   u32 lvl;
   u32 idx;
-} FoBind;
+} NvBind;
 
 typedef struct {
-  FoBind data[FO_BIND_CAP];
+  NvBind bind[NV_BIND_CAP];
   u32    len;
   u32    slots;
   u32    level;
-} FoScope;
+} NvScope;
 
 typedef struct {
-  FoOp    *code;
-  u32      code_len;
-  u32     *node_ext;
-  u8      *node_refs;
-  u32     *node_next;
-  FoTerm  *node_arg0;
-  FoTerm  *node_arg1;
-  u32     *clo_start;
-  u32     *clo_cap;
-  u32     *clo_base;
-  u32     *clo_refs;
-  FoTerm  *clo_ctx;
-  u32     *cap_src;
-  u32      clo_len;
-  u32      clo_ctx_len;
-  u32      cap_src_len;
-  u32      node_len;
-  u32      node_free;
-  FoTerm  *vals;
-  FoTerm  *terms;
-  FoTerm  *ctx;
-  FoFrame *calls;
+  NvOp    *code;
+  NvTerm  *heap_l;
+  NvTerm  *heap_r;
+  u16     *heap_refs;
+  NvTerm  *vals;
+  NvTerm  *terms;
+  NvTerm  *collect;
+  NvTerm  *ctx;
+  NvFrame *calls;
   u32     *fn_start;
   u32     *fn_name;
   int     *fn_of_name;
-  u8      *ctor_ari;
+  u32      code_len;
+  u32      heap_cur;
   u32      fn_count;
   u32      table_len;
   u32      main_start;
   u32      compile_name;
+  u32      pair_ext;
+  int      pair_ext_set;
   u64      itrs;
   const char *fail_reason;
   u32      fail_tag;
   u32      trace_pc;
   u8       trace_op;
-#ifdef HVM_FO_PROFILE
-  u64      op_count[32];
-#endif
   int      failed;
-} FoRun;
+} NvRun;
 
-fn FoTerm fo_num(u32 val) {
-  return FO_NUM_BIT | val;
+static NvRun NV_PREPARED_RUN = {0};
+static int   NV_PREPARED = 0;
+static u32   NV_PREPARED_MAIN = 0;
+
+fn NvTerm nv_num(u32 val) {
+  return NV_NUM_BIT | val;
 }
 
-fn int fo_is_num(FoTerm term) {
-  return (term & FO_NUM_BIT) != 0;
+fn int nv_is_num(NvTerm term) {
+  return (term & NV_NUM_BIT) != 0;
 }
 
-fn int fo_is_fun(FoTerm term) {
-  return (term & FO_FUN_BIT) != 0;
+fn u32 nv_num_val(NvTerm term) {
+  return term & NV_LOC_MASK;
 }
 
-fn int fo_is_clo(FoTerm term) {
-  return (term & FO_CLO_BIT) != 0;
-}
-
-fn FoTerm fo_fun(u32 fidx) {
-  return FO_FUN_BIT | fidx;
-}
-
-fn FoTerm fo_clo(u32 loc) {
-  return FO_CLO_BIT | loc;
-}
-
-fn u32 fo_num_val(FoTerm term) {
-  return (u32)(term & UINT32_MAX);
-}
-
-fn u32 fo_fun_val(FoTerm term) {
-  return (u32)(term & FO_LOC_MASK);
-}
-
-fn u32 fo_clo_val(FoTerm term) {
-  return (u32)(term & FO_LOC_MASK);
-}
-
-fn void fo_fail(FoRun *run) {
+fn void nv_fail(NvRun *run) {
   run->failed = 1;
 }
 
-fn void fo_fail_because(FoRun *run, const char *reason, u32 tag) {
+fn void nv_fail_because(NvRun *run, const char *reason, u32 tag) {
   if (run->fail_reason == NULL) {
     run->fail_reason = reason;
     run->fail_tag = tag;
   }
-  fo_fail(run);
+  nv_fail(run);
 }
 
-fn int fo_is_func_term(Term term) {
+fn int nv_is_func_term(Term term) {
   switch (term_tag(term)) {
     case LAM:
     case MAT:
     case SWI:
-    case DUP: {
       return 1;
-    }
-    default: {
+    default:
       return 0;
-    }
   }
 }
 
-fn void fo_release(FoRun *run, FoTerm term);
-
-fn void fo_retain(FoRun *run, FoTerm term) {
-  if (fo_is_clo(term)) {
-    run->clo_refs[fo_clo_val(term)]++;
-  } else if (!fo_is_num(term) && !fo_is_fun(term) && term != 0) {
-    run->node_refs[term]++;
-  }
-}
-
-fn void fo_release(FoRun *run, FoTerm term) {
-  if (fo_is_num(term) || fo_is_fun(term) || term == 0) {
-    return;
-  }
-  if (fo_is_clo(term)) {
-    u32 loc = fo_clo_val(term);
-    if (run->clo_refs[loc] > 0) {
-      run->clo_refs[loc]--;
-      return;
-    }
-    u32 base = run->clo_base[loc];
-    u32 cap = run->clo_cap[loc];
-    for (u32 i = 0; i < cap; i++) {
-      fo_release(run, run->clo_ctx[base + i]);
-    }
-    return;
-  }
-  if (run->node_refs[term] > 0) {
-    run->node_refs[term]--;
-    return;
-  }
-  u32 ari = run->ctor_ari[run->node_ext[term]];
-  if (ari > 0) {
-    fo_release(run, run->node_arg0[term]);
-    if (ari > 1) {
-      fo_release(run, run->node_arg1[term]);
-    }
-  }
-  run->node_next[term] = run->node_free;
-  run->node_free = (u32)term;
-}
-
-fn u32 fo_node_alloc(FoRun *run) {
-  if (run->node_free != 0) {
-    u32 loc = run->node_free;
-    run->node_free = run->node_next[loc];
-    return loc;
-  }
-  if (run->node_len + 1 >= FO_NODE_CAP) {
-    fo_fail(run);
-    return 0;
-  }
-  return ++run->node_len;
-}
-
-fn FoTerm fo_closure(FoRun *run, u32 start, u32 cap, u32 src, FoTerm *ctx, u32 frm) {
-  if (run->clo_len + 1 >= FO_CLO_CAP || run->clo_ctx_len + cap >= FO_CLO_CTX_CAP) {
-    fo_fail_because(run, "closure-cap", cap);
-    return 0;
-  }
-  u32 loc = ++run->clo_len;
-  u32 base = run->clo_ctx_len;
-  run->clo_ctx_len += cap;
-  run->clo_start[loc] = start;
-  run->clo_cap[loc] = cap;
-  run->clo_base[loc] = base;
-  run->clo_refs[loc] = 0;
-  for (u32 i = 0; i < cap; i++) {
-    FoTerm val = ctx[frm + run->cap_src[src + i]];
-    run->clo_ctx[base + i] = val;
-    fo_retain(run, val);
-  }
-  return fo_clo(loc);
-}
-
-fn int fo_emit(FoRun *run, u8 op, u8 tag, u32 ari, u32 ext, u32 aux, u32 *pos) {
-  if (run->code_len >= FO_CODE_CAP) {
-    fo_fail(run);
+fn int nv_emit(NvRun *run, u8 op, u32 ext, u32 *pos) {
+  if (run->code_len >= NV_CODE_CAP) {
+    nv_fail(run);
     return 0;
   }
   if (pos != NULL) {
     *pos = run->code_len;
   }
-  run->code[run->code_len++] = (FoOp){op, tag, (u16)ari, ext, aux};
+  run->code[run->code_len++] = (NvOp){.op = op, .ext = ext};
   return 1;
 }
 
-fn int fo_scope_find(FoRun *run, FoScope *scope, u8 tag, u32 ext, u32 lvl, u32 *idx) {
-  for (int i = (int)scope->len - 1; i >= 0; i--) {
-    FoBind *bind = &scope->data[i];
-    if (bind->tag == tag && bind->lvl == lvl && (tag == BJV || bind->ext == ext)) {
-      *idx = bind->idx;
-      return 1;
-    }
-  }
-  if (getenv("HVM_FO_TRACE") != NULL) {
-    fprintf(stderr, "[fo] scope miss tag=%u ext=%u lvl=%u slots=%u binds=%u\n",
-      tag, ext, lvl, scope->slots, scope->len);
-    for (u32 i = 0; i < scope->len; i++) {
-      fprintf(stderr, "[fo]   bind[%u] tag=%u ext=%u lvl=%u idx=%u\n",
-        i,
-        scope->data[i].tag,
-        scope->data[i].ext,
-        scope->data[i].lvl,
-        scope->data[i].idx);
-    }
-  }
-  fo_fail_because(run, tag == BJV ? "scope-bjv" : "scope-bj", lvl);
-  return 0;
-}
-
-fn int fo_scope_add(FoRun *run, FoScope *scope, u8 tag, u32 ext, u32 lvl) {
-  if (scope->len >= FO_BIND_CAP) {
-    fo_fail(run);
+fn int nv_scope_add(NvRun *run, NvScope *scope, u8 tag, u32 ext, u32 lvl) {
+  if (scope->len >= NV_BIND_CAP) {
+    nv_fail(run);
     return 0;
   }
-  scope->data[scope->len++] = (FoBind){tag, ext, lvl, scope->slots++};
+  scope->bind[scope->len++] = (NvBind){tag, ext, lvl, scope->slots++};
   return 1;
 }
 
-fn int fo_scope_lookup(FoScope *scope, u8 tag, u32 ext, u32 lvl, u32 *idx) {
+fn int nv_scope_find(NvScope *scope, u8 tag, u32 ext, u32 lvl, u32 *idx) {
   for (int i = (int)scope->len - 1; i >= 0; i--) {
-    FoBind *bind = &scope->data[i];
+    NvBind *bind = &scope->bind[i];
     if (bind->tag == tag && bind->lvl == lvl && (tag == BJV || bind->ext == ext)) {
       *idx = bind->idx;
       return 1;
@@ -6767,62 +8765,42 @@ fn int fo_scope_lookup(FoScope *scope, u8 tag, u32 ext, u32 lvl, u32 *idx) {
   return 0;
 }
 
-fn int fo_scope_has(FoScope *scope, u8 tag, u32 ext, u32 lvl) {
-  u32 idx = 0;
-  return fo_scope_lookup(scope, tag, ext, lvl, &idx);
+fn int nv_pair_ext(NvRun *run, u32 ext) {
+  if (!run->pair_ext_set) {
+    run->pair_ext = ext;
+    run->pair_ext_set = 1;
+    return 1;
+  }
+  return run->pair_ext == ext;
 }
 
-fn int fo_compile_expr(FoRun *run, u64 loc, FoScope scope, int tail);
-fn int fo_compile_func(FoRun *run, u64 loc, FoScope scope);
-
-fn void fo_capture_go(FoRun *run, Term term, FoScope *parent, FoScope *capture, u32 *srcs) {
-  if (run->failed) {
-    return;
+fn int nv_collect_app(u64 loc, u64 *args, u32 *argc, Term *fun) {
+  *argc = 0;
+  Term term = heap_read(loc);
+  while (term_tag(term) == APP) {
+    if (*argc >= 16) {
+      return 0;
+    }
+    u64 app_loc = term_val(term);
+    args[(*argc)++] = app_loc + 1;
+    term = heap_read(app_loc + 0);
   }
+  *fun = term;
+  return 1;
+}
+
+fn int nv_compile_expr(NvRun *run, u64 loc, NvScope scope, int tail, u32 cur_fn);
+fn int nv_compile_func(NvRun *run, u64 loc, NvScope scope, u32 cur_fn);
+
+fn int nv_term_var_idx(Term term, NvScope *scope, u32 *idx) {
   u8 tag = term_tag(term);
-  if (tag == BJV || tag == BJ0 || tag == BJ1) {
-    u32 idx = 0;
-    if (fo_scope_lookup(parent, tag, term_ext(term), term_val(term), &idx) &&
-        !fo_scope_has(capture, tag, term_ext(term), term_val(term))) {
-      srcs[capture->slots] = idx;
-      fo_scope_add(run, capture, tag, term_ext(term), term_val(term));
-    }
-    return;
-  }
-  u32 ari = term_arity(term);
-  u64 loc = term_val(term);
-  for (u32 i = 0; i < ari; i++) {
-    fo_capture_go(run, heap_read(loc + i), parent, capture, srcs);
-  }
-}
-
-fn int fo_capture_emit(FoRun *run, u64 loc, FoScope parent, FoScope *capture, u32 *src_start) {
-  u32 srcs[FO_BIND_CAP];
-  *capture = (FoScope){.level = parent.level};
-  fo_capture_go(run, heap_read(loc), &parent, capture, srcs);
-  if (run->failed) {
+  if (tag != BJV && tag != BJ0 && tag != BJ1) {
     return 0;
   }
-  if (run->cap_src_len + capture->slots >= FO_CAPTURE_CAP) {
-    fo_fail_because(run, "capture-map", capture->slots);
-    return 0;
-  }
-  *src_start = run->cap_src_len;
-  for (u32 i = 0; i < capture->slots; i++) {
-    run->cap_src[run->cap_src_len++] = srcs[i];
-  }
-  return 1;
+  return nv_scope_find(scope, tag, term_ext(term), term_val(term), idx);
 }
 
-fn int fo_ctor_arity(FoRun *run, u32 ext, u32 *ari) {
-  if (ext >= run->table_len || run->ctor_ari[ext] == UINT8_MAX) {
-    return 0;
-  }
-  *ari = run->ctor_ari[ext];
-  return 1;
-}
-
-fn void fo_find_dup_levels_go(Term term, u32 lab, u32 *lvl0, u32 *lvl1) {
+fn void nv_find_dup_levels_go(Term term, u32 lab, u32 *lvl0, u32 *lvl1) {
   u8 tag = term_tag(term);
   if (tag == BJ0 && term_ext(term) == lab && *lvl0 == 0) {
     *lvl0 = term_val(term);
@@ -6835,196 +8813,144 @@ fn void fo_find_dup_levels_go(Term term, u32 lab, u32 *lvl0, u32 *lvl1) {
   u32 ari = term_arity(term);
   u64 loc = term_val(term);
   for (u32 i = 0; i < ari; i++) {
-    fo_find_dup_levels_go(heap_read(loc + i), lab, lvl0, lvl1);
+    nv_find_dup_levels_go(heap_read(loc + i), lab, lvl0, lvl1);
   }
 }
 
-fn void fo_find_dup_levels(Term body, u32 lab, u32 fallback, u32 *lvl0, u32 *lvl1) {
+fn void nv_find_dup_levels(Term body, u32 lab, u32 fallback, u32 *lvl0, u32 *lvl1) {
   *lvl0 = 0;
   *lvl1 = 0;
-  fo_find_dup_levels_go(body, lab, lvl0, lvl1);
-  if (*lvl0 == 0) {
-    *lvl0 = fallback;
-  }
-  if (*lvl1 == 0) {
-    *lvl1 = fallback;
-  }
+  nv_find_dup_levels_go(body, lab, lvl0, lvl1);
+  if (*lvl0 == 0) *lvl0 = fallback;
+  if (*lvl1 == 0) *lvl1 = fallback;
 }
 
-fn int fo_collect_app(u64 loc, u64 *args, u32 *argc, Term *fun, u64 *fun_loc) {
-  *argc = 0;
-  Term term = heap_read(loc);
-  while (term_tag(term) == APP) {
-    if (*argc >= 16) {
-      return 0;
-    }
-    u64 loc = term_val(term);
-    args[(*argc)++] = loc + 1;
-    *fun_loc = loc + 0;
-    term = heap_read(*fun_loc);
-  }
-  *fun = term;
-  return 1;
-}
-
-fn int fo_compile_expr(FoRun *run, u64 loc, FoScope scope, int tail) {
+fn int nv_compile_expr(NvRun *run, u64 loc, NvScope scope, int tail, u32 cur_fn) {
   if (run->failed) {
     return 0;
   }
   Term term = heap_read(loc);
   switch (term_tag(term)) {
     case NUM: {
-      fo_emit(run, FO_NUM, 0, 0, term_val(term), 0, NULL);
-      if (tail) {
-        fo_emit(run, FO_END, 0, 0, 0, 0, NULL);
-      }
-      return !run->failed;
+      if (!nv_emit(run, NV_NUM, (u32)term_val(term), NULL)) return 0;
+      if (tail && !nv_emit(run, NV_END, 0, NULL)) return 0;
+      return 1;
     }
-    case C00 ... C16: {
-      u32 ari = term_tag(term) - C00;
-      if (ari > 2) {
-        fo_fail_because(run, "wide-constructor", term_tag(term));
+    case C02: {
+      if (!nv_pair_ext(run, term_ext(term))) {
+        nv_fail_because(run, "pair-ext", term_ext(term));
         return 0;
       }
       u64 ctr_loc = term_val(term);
-      for (u32 i = 0; i < ari; i++) {
-        if (!fo_compile_expr(run, ctr_loc + i, scope, 0)) {
-          return 0;
-        }
+      Term lhs = heap_read(ctr_loc + 0);
+      Term rhs = heap_read(ctr_loc + 1);
+      u32 idx = 0;
+      if (term_tag(lhs) == NUM) {
+        if (!nv_compile_expr(run, ctr_loc + 1, scope, 0, cur_fn)) return 0;
+        if (!nv_emit(run, NV_TUP_L_NUM, (u32)term_val(lhs), NULL)) return 0;
+      } else if (term_tag(rhs) == NUM) {
+        if (!nv_compile_expr(run, ctr_loc + 0, scope, 0, cur_fn)) return 0;
+        if (!nv_emit(run, NV_TUP_R_NUM, (u32)term_val(rhs), NULL)) return 0;
+      } else if (nv_term_var_idx(lhs, &scope, &idx)) {
+        if (!nv_compile_expr(run, ctr_loc + 1, scope, 0, cur_fn)) return 0;
+        if (!nv_emit(run, NV_TUP_L_VAR, idx, NULL)) return 0;
+      } else if (nv_term_var_idx(rhs, &scope, &idx)) {
+        if (!nv_compile_expr(run, ctr_loc + 0, scope, 0, cur_fn)) return 0;
+        if (!nv_emit(run, NV_TUP_R_VAR, idx, NULL)) return 0;
+      } else {
+        if (!nv_compile_expr(run, ctr_loc + 0, scope, 0, cur_fn)) return 0;
+        if (!nv_compile_expr(run, ctr_loc + 1, scope, 0, cur_fn)) return 0;
+        if (!nv_emit(run, NV_TUP, 0, NULL)) return 0;
       }
-      fo_emit(run, FO_CTR, term_tag(term), ari, term_ext(term), 0, NULL);
-      if (tail) {
-        fo_emit(run, FO_END, 0, 0, 0, 0, NULL);
-      }
-      return !run->failed;
+      if (tail && !nv_emit(run, NV_END, 0, NULL)) return 0;
+      return 1;
     }
     case BJV:
     case BJ0:
     case BJ1: {
       u32 idx = 0;
-      if (!fo_scope_find(run, &scope, term_tag(term), term_ext(term), term_val(term), &idx)) {
+      if (!nv_scope_find(&scope, term_tag(term), term_ext(term), term_val(term), &idx)) {
+        nv_fail_because(run, "scope", term_tag(term));
         return 0;
       }
-      fo_emit(run, FO_VAR, 0, 0, idx, 0, NULL);
-      if (tail) {
-        fo_emit(run, FO_END, 0, 0, 0, 0, NULL);
-      }
-      return !run->failed;
+      if (!nv_emit(run, NV_VAR, idx, NULL)) return 0;
+      if (tail && !nv_emit(run, NV_END, 0, NULL)) return 0;
+      return 1;
     }
     case REF: {
       u32 nam = term_ext(term);
-      if (nam >= run->table_len || BOOK[nam] == 0) {
-        fo_fail_because(run, "ref", term_tag(term));
+      if (nam >= run->table_len || BOOK[nam] == 0 || run->fn_of_name[nam] >= 0) {
+        nv_fail_because(run, "ref", nam);
         return 0;
       }
-      if (run->fn_of_name[nam] >= 0) {
-        fo_emit(run, FO_FUN, 0, 0, (u32)run->fn_of_name[nam], 0, NULL);
-        if (tail) {
-          fo_emit(run, FO_END, 0, 0, 0, 0, NULL);
-        }
-        return !run->failed;
-      }
-      return fo_compile_expr(run, BOOK[nam], scope, tail);
-    }
-    case LAM:
-    case MAT:
-    case SWI:
-    case DUP: {
-      if (tail) {
-        return fo_compile_func(run, loc, scope);
-      }
-      FoScope capture = {0};
-      u32 src_start = 0;
-      if (!fo_capture_emit(run, loc, scope, &capture, &src_start)) {
-        return 0;
-      }
-      u32 clo_pos = 0;
-      u32 jump_pos = 0;
-      fo_emit(run, FO_CLO, 0, capture.slots, src_start, 0, &clo_pos);
-      fo_emit(run, FO_JUMP, 0, 0, 0, 0, &jump_pos);
-      run->code[clo_pos].aux = run->code_len;
-      if (!fo_compile_func(run, loc, capture)) {
-        return 0;
-      }
-      run->code[jump_pos].aux = run->code_len;
-      return !run->failed;
+      return nv_compile_expr(run, BOOK[nam], scope, tail, cur_fn);
     }
     case APP: {
       u64 args[16];
       u32 argc = 0;
       Term fun = 0;
-      u64 fun_loc = 0;
-      if (!fo_collect_app(loc, args, &argc, &fun, &fun_loc) || argc == 0) {
-        fo_fail_because(run, "app", term_tag(fun));
+      if (!nv_collect_app(loc, args, &argc, &fun) || argc != 1 || term_tag(fun) != REF) {
+        nv_fail_because(run, "app", term_tag(fun));
         return 0;
       }
-      for (u32 i = argc; i > 0; i--) {
-        if (!fo_compile_expr(run, args[i - 1], scope, 0)) {
-          return 0;
-        }
-      }
-      if (term_tag(fun) == REF) {
-        u32 nam = term_ext(fun);
-        if (nam >= run->table_len || run->fn_of_name[nam] < 0) {
-          fo_fail_because(run, "call-target", term_tag(fun));
-          return 0;
-        }
-        fo_emit(run, tail ? FO_TAIL : FO_CALL, 0, argc, (u32)run->fn_of_name[nam], 0, NULL);
-        return !run->failed;
-      }
-      if (term_tag(fun) == BJV || term_tag(fun) == BJ0 || term_tag(fun) == BJ1) {
-        if (!fo_compile_expr(run, fun_loc, scope, 0)) {
-          return 0;
-        }
-        fo_emit(run, FO_APPLY, tail ? 1 : 0, argc, 0, 0, NULL);
-        return !run->failed;
-      }
-      if (!tail || !fo_is_func_term(fun)) {
-        fo_fail_because(run, "app", term_tag(fun));
-        return !run->failed;
-      }
-      fo_emit(run, FO_ENTER, 0, argc, 0, 0, NULL);
-      return fo_compile_func(run, fun_loc, scope);
-    }
-    case OP2: {
-      u64 op_loc = term_val(term);
-      if (!fo_compile_expr(run, op_loc + 0, scope, 0)) {
+      u32 nam = term_ext(fun);
+      if (nam >= run->table_len || run->fn_of_name[nam] < 0) {
+        nv_fail_because(run, "call-ref", nam);
         return 0;
       }
-      if (!fo_compile_expr(run, op_loc + 1, scope, 0)) {
-        return 0;
-      }
-      fo_emit(run, FO_OP2, 0, 0, term_ext(term), 0, NULL);
-      if (tail) {
-        fo_emit(run, FO_END, 0, 0, 0, 0, NULL);
-      }
-      return !run->failed;
+      if (!nv_compile_expr(run, args[0], scope, 0, cur_fn)) return 0;
+      if (!nv_emit(run, tail ? NV_TAI_FN : NV_REC_FN, (u32)run->fn_of_name[nam], NULL)) return 0;
+      return 1;
     }
     default: {
-      fo_fail_because(run, "expr-tag", term_tag(term));
+      nv_fail_because(run, "expr-tag", term_tag(term));
       return 0;
     }
   }
 }
 
-fn int fo_compile_func(FoRun *run, u64 loc, FoScope scope) {
+fn int nv_compile_func(NvRun *run, u64 loc, NvScope scope, u32 cur_fn) {
   if (run->failed) {
     return 0;
   }
   Term term = heap_read(loc);
   switch (term_tag(term)) {
     case LAM: {
-      u32 lam_ext = term_ext(term);
       scope.level++;
-      if (lam_ext & LAM_ERA_MASK) {
-        fo_emit(run, FO_DEL, 0, 0, 0, 0, NULL);
+      if (term_ext(term) & LAM_ERA_MASK) {
+        if (!nv_emit(run, NV_DEL, 0, NULL)) return 0;
       } else {
-        fo_emit(run, FO_LAM, 0, 0, 0, 0, NULL);
-        if (!fo_scope_add(run, &scope, BJV, 0, scope.level)) {
-          return 0;
+        if (!nv_emit(run, NV_LAM, 0, NULL)) return 0;
+        if (!nv_scope_add(run, &scope, BJV, 0, scope.level)) return 0;
+      }
+      return nv_compile_func(run, term_val(term), scope, cur_fn);
+    }
+    case MAT: {
+      u64 mat_loc = term_val(term);
+      Term dft = heap_read(mat_loc + 1);
+      if (term_tag(dft) != NUM || term_val(dft) != 0) {
+        nv_fail_because(run, "mat-default", term_tag(dft));
+        return 0;
+      }
+      if (!nv_pair_ext(run, term_ext(term))) {
+        nv_fail_because(run, "mat-pair-ext", term_ext(term));
+        return 0;
+      }
+      Term body = heap_read(mat_loc + 0);
+      if (term_tag(body) == SWI && term_ext(body) == 0) {
+        u64 body_loc = term_val(body);
+        Term one = heap_read(body_loc + 1);
+        if (term_tag(one) == SWI && term_ext(one) == 1) {
+          u64 one_loc = term_val(one);
+          u32 pos = 0;
+          if (!nv_emit(run, NV_GET_MAT, 0, &pos)) return 0;
+          if (!nv_compile_func(run, body_loc + 0, scope, cur_fn)) return 0;
+          run->code[pos].ext = run->code_len;
+          return nv_compile_func(run, one_loc + 0, scope, cur_fn);
         }
       }
-      return fo_compile_func(run, term_val(term), scope);
+      if (!nv_emit(run, NV_GET, 0, NULL)) return 0;
+      return nv_compile_func(run, mat_loc + 0, scope, cur_fn);
     }
     case DUP: {
       u64 dup_loc = term_val(term);
@@ -7032,135 +8958,55 @@ fn int fo_compile_func(FoRun *run, u64 loc, FoScope scope) {
       u32 lvl0 = 0;
       u32 lvl1 = 0;
       u32 dup_level = scope.level + 1;
-      fo_find_dup_levels(heap_read(dup_loc + 1), lab, dup_level, &lvl0, &lvl1);
-      if (!fo_compile_expr(run, dup_loc + 0, scope, 0)) {
-        return 0;
-      }
-      fo_emit(run, FO_DUP, 0, 0, 0, 0, NULL);
+      nv_find_dup_levels(heap_read(dup_loc + 1), lab, dup_level, &lvl0, &lvl1);
+      if (!nv_compile_expr(run, dup_loc + 0, scope, 0, cur_fn)) return 0;
+      if (!nv_emit(run, NV_DUP, 0, NULL)) return 0;
       scope.level = dup_level;
-      if (lvl0 > scope.level) {
-        scope.level = lvl0;
-      }
-      if (lvl1 > scope.level) {
-        scope.level = lvl1;
-      }
-      if (!fo_scope_add(run, &scope, BJ0, lab, lvl0)) {
-        return 0;
-      }
-      if (!fo_scope_add(run, &scope, BJ1, lab, lvl1)) {
-        return 0;
-      }
-      return fo_compile_func(run, dup_loc + 1, scope);
+      if (lvl0 > scope.level) scope.level = lvl0;
+      if (lvl1 > scope.level) scope.level = lvl1;
+      if (!nv_scope_add(run, &scope, BJ0, lab, lvl0)) return 0;
+      if (!nv_scope_add(run, &scope, BJ1, lab, lvl1)) return 0;
+      return nv_compile_func(run, dup_loc + 1, scope, cur_fn);
     }
-    case MAT:
     case SWI: {
-      u64 mat_loc = term_val(term);
-      if (term_tag(term) == SWI && term_ext(term) == 0 && term_tag(heap_read(mat_loc + 1)) == SWI) {
-        Term one = heap_read(mat_loc + 1);
-        if (term_ext(one) == 1) {
-          u64 one_loc = term_val(one);
-          u32 pos = 0;
-          fo_emit(run, FO_NUM_SWITCH, 0, 0, 0, 0, &pos);
-          if (!fo_compile_func(run, one_loc + 1, scope)) {
-            return 0;
-          }
-          run->code[pos].ext = run->code_len;
-          if (!fo_compile_func(run, mat_loc + 0, scope)) {
-            return 0;
-          }
-          run->code[pos].aux = run->code_len;
-          return fo_compile_func(run, one_loc + 0, scope);
-        }
-      }
-      if (term_tag(term) == MAT) {
-        u32 ctor_ari = 0;
-        FoScope bind_scope = scope;
-        u64 body_loc = mat_loc + 0;
-        u32 bind_ari = 0;
-        u32 era_mask = 0;
-        if (!fo_ctor_arity(run, term_ext(term), &ctor_ari) || ctor_ari > 2) {
-          ctor_ari = 0;
-        }
-        while (bind_ari < ctor_ari && term_tag(heap_read(body_loc)) == LAM) {
-          Term lam = heap_read(body_loc);
-          bind_scope.level++;
-          if (term_ext(lam) & LAM_ERA_MASK) {
-            era_mask |= 1u << bind_ari;
-          } else if (!fo_scope_add(run, &bind_scope, BJV, 0, bind_scope.level)) {
-            return 0;
-          }
-          body_loc = term_val(lam);
-          bind_ari++;
-        }
-        if (bind_ari > 0 && bind_ari == ctor_ari) {
-          u32 pos = 0;
-          fo_emit(run, FO_MAT_BIND, (u8)era_mask, bind_ari, term_ext(term), 0, &pos);
-          if (!fo_compile_func(run, mat_loc + 1, scope)) {
-            return 0;
-          }
-          run->code[pos].aux = run->code_len;
-          return fo_compile_func(run, body_loc, bind_scope);
-        }
-        if (ctor_ari == 2 && bind_ari == 0) {
-          u32 pos = 0;
-          fo_emit(run, FO_MAT_PAIR, 0, 0, term_ext(term), 0, &pos);
-          if (!fo_compile_func(run, mat_loc + 1, scope)) {
-            return 0;
-          }
-          run->code[pos].aux = run->code_len;
-          return fo_compile_func(run, mat_loc + 0, scope);
-        }
-      }
-      u32 pos = 0;
-      fo_emit(run, term_tag(term) == MAT ? FO_MAT_CTR : FO_MAT_NUM, 0, 0, term_ext(term), 0, &pos);
-      if (!fo_compile_func(run, mat_loc + 1, scope)) {
+      u64 swi_loc = term_val(term);
+      Term one = heap_read(swi_loc + 1);
+      if (term_ext(term) != 0 || term_tag(one) != SWI || term_ext(one) != 1) {
+        nv_fail_because(run, "swi-shape", term_ext(term));
         return 0;
       }
-      run->code[pos].aux = run->code_len;
-      return fo_compile_func(run, mat_loc + 0, scope);
+      u64 one_loc = term_val(one);
+      u32 pos = 0;
+      if (!nv_emit(run, NV_MAT, 0, &pos)) return 0;
+      if (!nv_compile_func(run, swi_loc + 0, scope, cur_fn)) return 0;
+      run->code[pos].ext = run->code_len;
+      return nv_compile_func(run, one_loc + 0, scope, cur_fn);
     }
     default: {
-      return fo_compile_expr(run, loc, scope, 1);
+      return nv_compile_expr(run, loc, scope, 1, cur_fn);
     }
   }
 }
 
-fn int fo_compile_program(FoRun *run, u32 main_id) {
+fn int nv_compile_program(NvRun *run, u32 main_id) {
   run->table_len = TABLE.len;
   run->fn_of_name = (int*)malloc(sizeof(int) * run->table_len);
-  run->ctor_ari = (u8*)malloc(sizeof(u8) * run->table_len);
-  if (run->fn_of_name == NULL || run->ctor_ari == NULL) {
-    fo_fail(run);
+  if (run->fn_of_name == NULL) {
+    nv_fail(run);
     return 0;
   }
-  memset(run->ctor_ari, UINT8_MAX, sizeof(u8) * run->table_len);
   for (u32 i = 0; i < run->table_len; i++) {
     run->fn_of_name[i] = -1;
   }
-  for (u64 loc = 1; loc < HEAP_NEXT; loc++) {
-    Term term = heap_read(loc);
-    u8 tag = term_tag(term);
-    if (tag >= C00 && tag <= C16) {
-      u32 ext = term_ext(term);
-      u8 ari = tag - C00;
-      if (ext < run->table_len) {
-        if (run->ctor_ari[ext] != UINT8_MAX && run->ctor_ari[ext] != ari) {
-          fo_fail_because(run, "constructor-arity", ext);
-          return 0;
-        }
-        run->ctor_ari[ext] = ari;
-      }
-    }
-  }
   for (u32 i = 0; i < run->table_len; i++) {
-    if (BOOK[i] != 0 && fo_is_func_term(heap_read(BOOK[i]))) {
+    if (BOOK[i] != 0 && nv_is_func_term(heap_read(BOOK[i]))) {
       run->fn_of_name[i] = (int)run->fn_count++;
     }
   }
   run->fn_start = (u32*)calloc(run->fn_count == 0 ? 1 : run->fn_count, sizeof(u32));
   run->fn_name = (u32*)calloc(run->fn_count == 0 ? 1 : run->fn_count, sizeof(u32));
   if (run->fn_start == NULL || run->fn_name == NULL) {
-    fo_fail(run);
+    nv_fail(run);
     return 0;
   }
   for (u32 i = 0; i < run->table_len; i++) {
@@ -7173,649 +9019,497 @@ fn int fo_compile_program(FoRun *run, u32 main_id) {
     u32 nam = run->fn_name[fidx];
     run->compile_name = nam;
     run->fn_start[fidx] = run->code_len;
-    FoScope scope = {0};
-    if (!fo_compile_func(run, BOOK[nam], scope)) {
+    NvScope scope = {0};
+    if (!nv_compile_func(run, BOOK[nam], scope, fidx)) {
       return 0;
     }
   }
   run->main_start = run->code_len;
   run->compile_name = main_id;
-  FoScope scope = {0};
-  return fo_compile_expr(run, BOOK[main_id], scope, 1);
+  NvScope scope = {0};
+  return nv_compile_expr(run, BOOK[main_id], scope, 1, run->fn_count);
 }
 
-fn int fo_stack_push(FoRun *run, FoTerm *stack, u32 *sp, FoTerm term) {
-  if (*sp >= FO_STACK_CAP) {
-    fo_fail_because(run, "stack-push", 0);
-    return 0;
+fn u32 nv_alloc(NvRun *run) {
+  u32 loc = run->heap_cur;
+  for (;;) {
+    loc++;
+    if (loc >= NV_HEAP_CAP) loc = 1;
+    if (run->heap_l[loc] == 0 && run->heap_r[loc] == 0) {
+      run->heap_cur = loc;
+      return loc;
+    }
+    if (loc == run->heap_cur) {
+      nv_fail(run);
+      return 0;
+    }
   }
-  stack[(*sp)++] = term;
-  return 1;
 }
 
-fn FoTerm fo_stack_pop(FoRun *run, FoTerm *stack, u32 *sp) {
-  if (*sp == 0) {
-    fo_fail_because(run, "stack-pop", 0);
-    return 0;
+fn void nv_collect(NvRun *run, NvTerm term) {
+  if (nv_is_num(term) || term == 0) {
+    return;
   }
-  return stack[--(*sp)];
+  if (run->heap_refs[term] > 0) {
+    run->heap_refs[term]--;
+    return;
+  }
+  NvTerm *stack = run->collect;
+  u32 sp = 0;
+  for (;;) {
+    if (run->heap_refs[term] > 0) {
+      run->heap_refs[term]--;
+      if (sp == 0) return;
+      term = stack[--sp];
+      continue;
+    }
+    NvTerm l = run->heap_l[term];
+    NvTerm r = run->heap_r[term];
+    run->heap_l[term] = 0;
+    run->heap_r[term] = 0;
+    if (!nv_is_num(r) && r != 0) stack[sp++] = r;
+    if (!nv_is_num(l) && l != 0) {
+      term = l;
+      continue;
+    }
+    if (sp == 0) return;
+    term = stack[--sp];
+  }
 }
 
-fn FoTerm fo_run(FoRun *run) {
-  FoTerm *vals = run->vals;
-  FoTerm *terms = run->terms;
-  FoTerm *ctx = run->ctx;
-  FoFrame *calls = run->calls;
+fn void nv_retain(NvRun *run, NvTerm term) {
+  if (!nv_is_num(term) && term != 0 && run->heap_refs[term] != UINT16_MAX) {
+    run->heap_refs[term]++;
+  }
+}
+
+fn NvTerm nv_run(NvRun *run) {
+  static void *dispatch[] = {
+    &&do_num, &&do_tup, &&do_var, &&do_get, &&do_lam, &&do_del, &&do_mat,
+    &&do_dup, &&do_get_mat, &&do_tup_l_num, &&do_tup_r_num, &&do_tup_l_var, &&do_tup_r_var,
+    &&do_rec_fn, &&do_tai_fn, &&do_end
+  };
+  NvTerm *vals = run->vals;
+  NvTerm *terms = run->terms;
+  NvTerm *ctx = run->ctx;
+  NvFrame *calls = run->calls;
   u32 vsp = 0;
   u32 tsp = 0;
   u32 csp = 0;
   u32 cur = 0;
   u32 frm = 0;
-  u32 fidx = UINT32_MAX;
   u32 pc = run->main_start;
-  FoTerm term = 0;
-  int have_term = 0;
+  u32 fun = run->fn_count;
+  NvTerm term = 0;
 
-  while (!run->failed) {
-    run->trace_pc = pc;
-    FoOp *op = &run->code[pc++];
-    run->trace_op = op->op;
-#ifdef HVM_FO_PROFILE
-    run->op_count[op->op]++;
-#endif
-    switch (op->op) {
-      case FO_NUM: {
-        if (!fo_stack_push(run, vals, &vsp, fo_num(op->ext))) {
-          return 0;
-        }
-        break;
-      }
-      case FO_CTR: {
-        if (vsp < op->ari) {
-          fo_fail(run);
-          return 0;
-        }
-        u32 loc = fo_node_alloc(run);
-        if (run->failed) {
-          return 0;
-        }
-        run->node_ext[loc] = op->ext;
-        if (op->ari == 2) {
-          run->node_arg1[loc] = vals[--vsp];
-          run->node_arg0[loc] = vals[--vsp];
-        } else if (op->ari == 1) {
-          run->node_arg0[loc] = vals[--vsp];
-        }
-        if (!fo_stack_push(run, vals, &vsp, loc)) {
-          return 0;
-        }
-        break;
-      }
-      case FO_VAR: {
-        FoTerm val = ctx[frm + op->ext];
-        if (val == 0) {
-          fo_fail_because(run, "var-empty", op->ext);
-          return 0;
-        }
-        ctx[frm + op->ext] = 0;
-        if (!fo_stack_push(run, vals, &vsp, val)) {
-          return 0;
-        }
-        break;
-      }
-      case FO_OP2: {
-        FoTerm b = fo_stack_pop(run, vals, &vsp);
-        FoTerm a = fo_stack_pop(run, vals, &vsp);
-        if (run->failed || !fo_is_num(a) || !fo_is_num(b)) {
-          fo_fail_because(run, "op2-non-num", 0);
-          return 0;
-        }
-        run->itrs++;
-        FoTerm val = fo_num(term_op2_u32(op->ext, fo_num_val(a), fo_num_val(b)));
-        if (!fo_stack_push(run, vals, &vsp, val)) {
-          return 0;
-        }
-        break;
-      }
-      case FO_FUN: {
-        if (!fo_stack_push(run, vals, &vsp, fo_fun(op->ext))) {
-          return 0;
-        }
-        break;
-      }
-      case FO_CLO: {
-        FoTerm clo = fo_closure(run, op->aux, op->ari, op->ext, ctx, frm);
-        if (run->failed || !fo_stack_push(run, vals, &vsp, clo)) {
-          return 0;
-        }
-        break;
-      }
-      case FO_JUMP: {
-        pc = op->aux;
-        break;
-      }
-      case FO_CALL: {
-        if (op->ari == 0 || vsp < op->ari || op->ext >= run->fn_count) {
-          fo_fail_because(run, "call-enter", op->op);
-          return 0;
-        }
-        if (csp >= FO_CALL_CAP) {
-          fo_fail_because(run, "call-stack", 0);
-          return 0;
-        }
-        if (op->ari == 1) {
-          term = vals[--vsp];
-        } else {
-          for (u32 i = op->ari; i > 1; i--) {
-            FoTerm arg = vals[--vsp];
-            if (!fo_stack_push(run, terms, &tsp, arg)) {
-              return 0;
-            }
-          }
-          term = vals[--vsp];
-        }
-        have_term = 1;
-        calls[csp++] = (FoFrame){pc, frm, cur, fidx};
-        fidx = op->ext;
-        pc = run->fn_start[fidx];
+  #define NV_NEXT() do { goto *dispatch[run->code[pc++].op]; } while (0)
+  #define NV_DEFOREST_PAIR(lv, rv) do { \
+    NvOp *call_ = &run->code[pc]; \
+    if ((call_->op == NV_TAI_FN || call_->op == NV_REC_FN) && \
+        call_->ext < run->fn_count && \
+        (run->code[run->fn_start[call_->ext]].op == NV_GET || \
+         run->code[run->fn_start[call_->ext]].op == NV_GET_MAT)) { \
+      pc++; \
+      u32 start_ = run->fn_start[call_->ext]; \
+      u8 start_op_ = run->code[start_].op; \
+      run->itrs += start_op_ == NV_GET_MAT ? 3 : 2; \
+      if (call_->op == NV_REC_FN) { \
+        if (csp >= NV_CALL_CAP) { nv_fail_because(run, "call-stack", 0); return 0; } \
+        calls[csp++] = (NvFrame){pc, frm, cur, fun}; \
+        frm = cur; \
+      } else { \
+        cur = frm; \
+      } \
+      fun = call_->ext; \
+      if (start_op_ == NV_GET_MAT) { \
+        if (!nv_is_num((lv))) { nv_fail_because(run, "def-mat", (lv)); return 0; } \
+        term = (rv); \
+        tsp = 0; \
+        pc = nv_num_val((lv)) == 1 ? run->code[start_].ext : start_ + 1; \
+      } else { \
+        terms[0] = (rv); \
+        tsp = 1; \
+        term = (lv); \
+        pc = start_ + 1; \
+      } \
+      NV_NEXT(); \
+    } \
+  } while (0)
+
+  NV_NEXT();
+
+do_num: {
+    NvOp *op = &run->code[pc - 1];
+    if (vsp >= NV_STACK_CAP) { nv_fail(run); return 0; }
+    vals[vsp++] = nv_num(op->ext);
+    NV_NEXT();
+  }
+
+do_tup: {
+    if (vsp < 2) { nv_fail(run); return 0; }
+    NvTerm r = vals[--vsp];
+    NvTerm l = vals[--vsp];
+    NV_DEFOREST_PAIR(l, r);
+    NvOp *call = &run->code[pc];
+    if ((call->op == NV_TAI_FN || call->op == NV_REC_FN) &&
+        call->ext < run->fn_count &&
+        (run->code[run->fn_start[call->ext]].op == NV_GET ||
+         run->code[run->fn_start[call->ext]].op == NV_GET_MAT)) {
+      pc++;
+      u32 start = run->fn_start[call->ext];
+      u8 start_op = run->code[start].op;
+      run->itrs += start_op == NV_GET_MAT ? 3 : 2;
+      if (call->op == NV_REC_FN) {
+        if (csp >= NV_CALL_CAP) { nv_fail_because(run, "call-stack", 0); return 0; }
+        calls[csp++] = (NvFrame){pc, frm, cur, fun};
         frm = cur;
-        break;
-      }
-      case FO_TAIL: {
-        tsp = 0;
-        if (op->ari == 0 || vsp < op->ari || op->ext >= run->fn_count) {
-          fo_fail_because(run, "call-enter", op->op);
-          return 0;
-        }
-        if (op->ari == 1) {
-          term = vals[--vsp];
-        } else {
-          for (u32 i = op->ari; i > 1; i--) {
-            FoTerm arg = vals[--vsp];
-            if (!fo_stack_push(run, terms, &tsp, arg)) {
-              return 0;
-            }
-          }
-          term = vals[--vsp];
-        }
-        have_term = 1;
-        fidx = op->ext;
-        pc = run->fn_start[fidx];
+      } else {
         cur = frm;
-        break;
       }
-      case FO_ENTER: {
-        if (op->ari == 0 || vsp < op->ari) {
-          fo_fail_because(run, "enter", op->ari);
-          return 0;
-        }
-        for (u32 i = op->ari; i > 1; i--) {
-          FoTerm arg = fo_stack_pop(run, vals, &vsp);
-          if (run->failed || !fo_stack_push(run, terms, &tsp, arg)) {
-            return 0;
-          }
-        }
-        term = fo_stack_pop(run, vals, &vsp);
-        if (run->failed) {
-          return 0;
-        }
-        have_term = 1;
-        break;
+      fun = call->ext;
+      if (start_op == NV_GET_MAT) {
+        if (!nv_is_num(l)) { nv_fail_because(run, "def-mat", l); return 0; }
+        term = r;
+        tsp = 0;
+        pc = nv_num_val(l) == 1 ? run->code[start].ext : start + 1;
+      } else {
+        terms[0] = r;
+        tsp = 1;
+        term = l;
+        pc = start + 1;
       }
-      case FO_APPLY: {
-        FoTerm fun = fo_stack_pop(run, vals, &vsp);
-        if (run->failed) {
-          return 0;
-        }
-        int tail = op->tag != 0;
-        if (tail) {
-          tsp = 0;
-        }
-        if (op->ari == 0 || vsp < op->ari) {
-          fo_fail_because(run, "apply-args", op->ari);
-          return 0;
-        }
-        if (!tail) {
-          if (csp >= FO_CALL_CAP) {
-            fo_fail_because(run, "call-stack", 0);
-            return 0;
-          }
-          calls[csp++] = (FoFrame){pc, frm, cur, fidx};
-        }
-        if (op->ari == 1) {
-          term = vals[--vsp];
-        } else {
-          for (u32 i = op->ari; i > 1; i--) {
-            FoTerm arg = vals[--vsp];
-            if (!fo_stack_push(run, terms, &tsp, arg)) {
-              return 0;
-            }
-          }
-          term = vals[--vsp];
-        }
-        if (fo_is_fun(fun)) {
-          u32 fun_idx = fo_fun_val(fun);
-          if (fun_idx >= run->fn_count) {
-            fo_fail_because(run, "apply-fun", fun_idx);
-            return 0;
-          }
-          fidx = fun_idx;
-          pc = run->fn_start[fun_idx];
+      NV_NEXT();
+    }
+    if (run->code[pc].op == NV_TUP) {
+      NvOp *call2 = &run->code[pc + 1];
+      if ((call2->op == NV_TAI_FN || call2->op == NV_REC_FN) &&
+          call2->ext < run->fn_count &&
+          (run->code[run->fn_start[call2->ext]].op == NV_GET ||
+           run->code[run->fn_start[call2->ext]].op == NV_GET_MAT) &&
+          vsp > 0) {
+        u32 inner = nv_alloc(run);
+        if (run->failed) return 0;
+        run->heap_l[inner] = l;
+        run->heap_r[inner] = r;
+        NvTerm outer_l = vals[--vsp];
+        pc += 2;
+        u32 start = run->fn_start[call2->ext];
+        u8 start_op = run->code[start].op;
+        run->itrs += start_op == NV_GET_MAT ? 3 : 2;
+        if (call2->op == NV_REC_FN) {
+          if (csp >= NV_CALL_CAP) { nv_fail_because(run, "call-stack", 0); return 0; }
+          calls[csp++] = (NvFrame){pc, frm, cur, fun};
           frm = cur;
-        } else if (fo_is_clo(fun)) {
-          u32 loc = fo_clo_val(fun);
-          u32 cap = run->clo_cap[loc];
-          u32 base = run->clo_base[loc];
-          if (cur + cap >= FO_CTX_CAP) {
-            fo_fail_because(run, "apply-ctx", cap);
-            return 0;
-          }
-          u32 dst = cur;
-          if (run->clo_refs[loc] == 0) {
-            for (u32 i = 0; i < cap; i++) {
-              ctx[dst + i] = run->clo_ctx[base + i];
-            }
-          } else {
-            for (u32 i = 0; i < cap; i++) {
-              FoTerm val = run->clo_ctx[base + i];
-              fo_retain(run, val);
-              ctx[dst + i] = val;
-            }
-            run->clo_refs[loc]--;
-          }
-          pc = run->clo_start[loc];
-          frm = dst;
-          cur = dst + cap;
-          fidx = UINT32_MAX;
         } else {
-          fo_fail_because(run, "apply-value", 0);
-          return 0;
+          cur = frm;
         }
-        have_term = 1;
-        break;
-      }
-      case FO_LAM: {
-        if (!have_term) {
-          term = fo_stack_pop(run, terms, &tsp);
-          if (run->failed) {
-            return 0;
-          }
-          have_term = 1;
-        }
-        if (cur >= FO_CTX_CAP) {
-          fo_fail_because(run, "ctx", 0);
-          return 0;
-        }
-        run->itrs++;
-        ctx[cur++] = term;
-        term = 0;
-        have_term = 0;
-        break;
-      }
-      case FO_DEL: {
-        if (!have_term) {
-          term = fo_stack_pop(run, terms, &tsp);
-          if (run->failed) {
-            return 0;
-          }
-          have_term = 1;
-        }
-        run->itrs++;
-        fo_release(run, term);
-        term = 0;
-        have_term = 0;
-        break;
-      }
-      case FO_DUP: {
-        FoTerm val = fo_stack_pop(run, vals, &vsp);
-        if (run->failed || cur + 2 >= FO_CTX_CAP) {
-          fo_fail_because(run, "dup", 0);
-          return 0;
-        }
-        fo_retain(run, val);
-        ctx[cur++] = val;
-        ctx[cur++] = val;
-        break;
-      }
-      case FO_MAT_CTR: {
-        if (!have_term) {
-          term = fo_stack_pop(run, terms, &tsp);
-          if (run->failed) {
-            return 0;
-          }
-          have_term = 1;
-        }
-        if (fo_is_num(term)) {
-          break;
-        }
-        if (run->node_ext[term] != op->ext) {
-          break;
-        }
-        run->itrs++;
-        u32 ari = run->ctor_ari[run->node_ext[term]];
-        FoTerm field0 = run->node_arg0[term];
-        FoTerm field1 = run->node_arg1[term];
-        if (run->node_refs[term] > 0) {
-          if (ari > 0) {
-            fo_retain(run, field0);
-            if (ari > 1) {
-              fo_retain(run, field1);
-            }
-          }
-          run->node_refs[term]--;
+        fun = call2->ext;
+        if (start_op == NV_GET_MAT) {
+          if (!nv_is_num(outer_l)) { nv_fail_because(run, "def-mat", outer_l); return 0; }
+          term = inner;
+          tsp = 0;
+          pc = nv_num_val(outer_l) == 1 ? run->code[start].ext : start + 1;
         } else {
-          run->node_next[term] = run->node_free;
-          run->node_free = (u32)term;
+          terms[0] = inner;
+          tsp = 1;
+          term = outer_l;
+          pc = start + 1;
         }
-        if (ari == 0) {
-          term = 0;
-          have_term = 0;
-        } else {
-          if (ari > 1) {
-            if (!fo_stack_push(run, terms, &tsp, field1)) {
-              return 0;
-            }
-          }
-          term = field0;
-          have_term = 1;
-        }
-        pc = op->aux;
-        break;
-      }
-      case FO_MAT_BIND: {
-        if (!have_term) {
-          term = fo_stack_pop(run, terms, &tsp);
-          if (run->failed) {
-            return 0;
-          }
-          have_term = 1;
-        }
-        if (fo_is_num(term)) {
-          break;
-        }
-        if (run->node_ext[term] != op->ext) {
-          break;
-        }
-        u32 ari = op->ari;
-        if (cur + ari >= FO_CTX_CAP) {
-          fo_fail_because(run, "mat-bind", ari);
-          return 0;
-        }
-        run->itrs++;
-        FoTerm field0 = run->node_arg0[term];
-        FoTerm field1 = run->node_arg1[term];
-        if (run->node_refs[term] > 0) {
-          if (ari > 0) {
-            fo_retain(run, field0);
-            if (ari > 1) {
-              fo_retain(run, field1);
-            }
-          }
-          run->node_refs[term]--;
-        } else {
-          run->node_next[term] = run->node_free;
-          run->node_free = (u32)term;
-        }
-        if (ari > 0) {
-          if (op->tag & 1) {
-            fo_release(run, field0);
-          } else {
-            ctx[cur++] = field0;
-          }
-          if (ari > 1) {
-            if (op->tag & 2) {
-              fo_release(run, field1);
-            } else {
-              ctx[cur++] = field1;
-            }
-          }
-        }
-        term = 0;
-        have_term = 0;
-        pc = op->aux;
-        break;
-      }
-      case FO_MAT_PAIR: {
-        if (!have_term) {
-          term = fo_stack_pop(run, terms, &tsp);
-          if (run->failed) {
-            return 0;
-          }
-          have_term = 1;
-        }
-        if (fo_is_num(term)) {
-          break;
-        }
-        if (run->node_ext[term] != op->ext) {
-          break;
-        }
-        run->itrs++;
-        FoTerm field0 = run->node_arg0[term];
-        FoTerm field1 = run->node_arg1[term];
-        if (run->node_refs[term] > 0) {
-          fo_retain(run, field0);
-          fo_retain(run, field1);
-          run->node_refs[term]--;
-        } else {
-          run->node_next[term] = run->node_free;
-          run->node_free = (u32)term;
-        }
-        if (!fo_stack_push(run, terms, &tsp, field1)) {
-          return 0;
-        }
-        term = field0;
-        have_term = 1;
-        pc = op->aux;
-        break;
-      }
-      case FO_MAT_NUM: {
-        if (!have_term) {
-          term = fo_stack_pop(run, terms, &tsp);
-          if (run->failed) {
-            return 0;
-          }
-          have_term = 1;
-        }
-        if (!fo_is_num(term) || fo_num_val(term) != op->ext) {
-          break;
-        }
-        run->itrs++;
-        term = 0;
-        have_term = 0;
-        pc = op->aux;
-        break;
-      }
-      case FO_NUM_SWITCH: {
-        if (!have_term) {
-          term = fo_stack_pop(run, terms, &tsp);
-          if (run->failed) {
-            return 0;
-          }
-          have_term = 1;
-        }
-        if (!fo_is_num(term)) {
-          break;
-        }
-        u32 val = fo_num_val(term);
-        if (val == 0) {
-          run->itrs++;
-          term = 0;
-          have_term = 0;
-          pc = op->ext;
-        } else if (val == 1) {
-          run->itrs++;
-          term = 0;
-          have_term = 0;
-          pc = op->aux;
-        }
-        break;
-      }
-      case FO_END: {
-        FoTerm val = fo_stack_pop(run, vals, &vsp);
-        if (run->failed) {
-          return 0;
-        }
-        if (csp == 0) {
-          return val;
-        }
-        FoFrame frame = calls[--csp];
-        pc = frame.pc;
-        frm = frame.frm;
-        cur = frame.cur;
-        fidx = frame.fidx;
-        if (!fo_stack_push(run, vals, &vsp, val)) {
-          return 0;
-        }
-        break;
-      }
-      default: {
-        fo_fail(run);
-        return 0;
+        NV_NEXT();
       }
     }
+    u32 loc = nv_alloc(run);
+    if (run->failed) return 0;
+    run->heap_l[loc] = l;
+    run->heap_r[loc] = r;
+    vals[vsp++] = loc;
+    NV_NEXT();
   }
-  return 0;
+
+do_var: {
+    NvOp *op = &run->code[pc - 1];
+    if (vsp >= NV_STACK_CAP) { nv_fail(run); return 0; }
+    vals[vsp++] = ctx[frm + op->ext];
+    NV_NEXT();
+  }
+
+do_get: {
+    if (nv_is_num(term) || term == 0 || tsp >= NV_STACK_CAP) { nv_fail_because(run, "get", term); return 0; }
+    run->itrs++;
+    NvTerm l = run->heap_l[term];
+    NvTerm r = run->heap_r[term];
+    if (run->heap_refs[term] > 0) {
+      run->heap_refs[term]--;
+      nv_retain(run, l);
+      nv_retain(run, r);
+    } else {
+      run->heap_l[term] = 0;
+      run->heap_r[term] = 0;
+    }
+    terms[tsp++] = r;
+    term = l;
+    NV_NEXT();
+  }
+
+do_lam: {
+    if (cur >= NV_CTX_CAP) { nv_fail_because(run, "lam", tsp); return 0; }
+    run->itrs++;
+    ctx[cur++] = term;
+    term = tsp > 0 ? terms[--tsp] : 0;
+    NV_NEXT();
+  }
+
+do_del: {
+    run->itrs++;
+    nv_collect(run, term);
+    term = tsp > 0 ? terms[--tsp] : 0;
+    NV_NEXT();
+  }
+
+do_mat: {
+    NvOp *op = &run->code[pc - 1];
+    if (!nv_is_num(term)) { nv_fail_because(run, "mat", term); return 0; }
+    run->itrs++;
+    u32 pick = nv_num_val(term);
+    term = tsp > 0 ? terms[--tsp] : 0;
+    if (pick == 1) pc = op->ext;
+    NV_NEXT();
+  }
+
+do_dup: {
+    if (vsp == 0 || cur + 2 >= NV_CTX_CAP) { nv_fail(run); return 0; }
+    run->itrs++;
+    NvTerm val = vals[--vsp];
+    nv_retain(run, val);
+    ctx[cur++] = val;
+    ctx[cur++] = val;
+    NV_NEXT();
+  }
+
+do_get_mat: {
+    NvOp *op = &run->code[pc - 1];
+    if (nv_is_num(term) || term == 0) { nv_fail_because(run, "get-mat", term); return 0; }
+    NvTerm l = run->heap_l[term];
+    NvTerm r = run->heap_r[term];
+    if (!nv_is_num(l)) { nv_fail_because(run, "get-mat-tag", l); return 0; }
+    run->itrs += 2;
+    if (run->heap_refs[term] > 0) {
+      run->heap_refs[term]--;
+      nv_retain(run, r);
+    } else {
+      run->heap_l[term] = 0;
+      run->heap_r[term] = 0;
+    }
+    term = r;
+    if (nv_num_val(l) == 1) pc = op->ext;
+    NV_NEXT();
+  }
+
+do_tup_l_num: {
+    NvOp *op = &run->code[pc - 1];
+    if (vsp < 1) { nv_fail_because(run, "tup-l-num", 0); return 0; }
+    NvTerm r = vals[--vsp];
+    NV_DEFOREST_PAIR(nv_num(op->ext), r);
+    u32 loc = nv_alloc(run);
+    if (run->failed) return 0;
+    run->heap_l[loc] = nv_num(op->ext);
+    run->heap_r[loc] = r;
+    vals[vsp++] = loc;
+    NV_NEXT();
+  }
+
+do_tup_r_num: {
+    NvOp *op = &run->code[pc - 1];
+    if (vsp < 1) { nv_fail_because(run, "tup-r-num", 0); return 0; }
+    NvTerm l = vals[--vsp];
+    NV_DEFOREST_PAIR(l, nv_num(op->ext));
+    u32 loc = nv_alloc(run);
+    if (run->failed) return 0;
+    run->heap_l[loc] = l;
+    run->heap_r[loc] = nv_num(op->ext);
+    vals[vsp++] = loc;
+    NV_NEXT();
+  }
+
+do_tup_l_var: {
+    NvOp *op = &run->code[pc - 1];
+    if (vsp < 1) { nv_fail_because(run, "tup-l-var", 0); return 0; }
+    NvTerm r = vals[--vsp];
+    NvTerm l = ctx[frm + op->ext];
+    NV_DEFOREST_PAIR(l, r);
+    u32 loc = nv_alloc(run);
+    if (run->failed) return 0;
+    run->heap_l[loc] = l;
+    run->heap_r[loc] = r;
+    vals[vsp++] = loc;
+    NV_NEXT();
+  }
+
+do_tup_r_var: {
+    NvOp *op = &run->code[pc - 1];
+    if (vsp < 1) { nv_fail_because(run, "tup-r-var", 0); return 0; }
+    NvTerm l = vals[--vsp];
+    NvTerm r = ctx[frm + op->ext];
+    NV_DEFOREST_PAIR(l, r);
+    u32 loc = nv_alloc(run);
+    if (run->failed) return 0;
+    run->heap_l[loc] = l;
+    run->heap_r[loc] = r;
+    vals[vsp++] = loc;
+    NV_NEXT();
+  }
+
+do_rec_fn: {
+    NvOp *op = &run->code[pc - 1];
+    if (vsp == 0 || csp >= NV_CALL_CAP || op->ext >= run->fn_count) { nv_fail(run); return 0; }
+    run->itrs++;
+    calls[csp++] = (NvFrame){pc, frm, cur, fun};
+    term = vals[--vsp];
+    fun = op->ext;
+    pc = run->fn_start[fun];
+    frm = cur;
+    tsp = 0;
+    NV_NEXT();
+  }
+
+do_tai_fn: {
+    NvOp *op = &run->code[pc - 1];
+    if (vsp == 0 || op->ext >= run->fn_count) { nv_fail(run); return 0; }
+    run->itrs++;
+    term = vals[--vsp];
+    fun = op->ext;
+    pc = run->fn_start[fun];
+    cur = frm;
+    tsp = 0;
+    NV_NEXT();
+  }
+
+do_end: {
+    if (vsp == 0) { nv_fail(run); return 0; }
+    NvTerm val = vals[--vsp];
+    if (csp == 0) return val;
+    NvFrame frame = calls[--csp];
+    pc = frame.pc;
+    frm = frame.frm;
+    cur = frame.cur;
+    fun = frame.fun;
+    vals[vsp++] = val;
+    NV_NEXT();
+  }
+  #undef NV_NEXT
+  #undef NV_DEFOREST_PAIR
 }
 
-fn Term eval_normalize(Term term);
-
-fn int fo_reify(FoRun *run, FoTerm term, Term *out) {
-  if (fo_is_num(term)) {
-    *out = term_new_num(fo_num_val(term));
-    return 1;
+fn void nv_print(NvRun *run, NvTerm term) {
+  if (nv_is_num(term)) {
+    printf("%u", nv_num_val(term));
+    return;
   }
-  if (fo_is_fun(term)) {
-    u32 fidx = fo_fun_val(term);
-    if (fidx >= run->fn_count) {
-      return 0;
-    }
-    *out = eval_normalize(term_new_ref(run->fn_name[fidx]));
-    return 1;
-  }
-  if (fo_is_clo(term)) {
-    return 0;
-  }
-  if (term == 0) {
-    return 0;
-  }
-  Term args[16];
-  u32 ari = run->ctor_ari[run->node_ext[term]];
-  if (ari > 0 && !fo_reify(run, run->node_arg0[term], &args[0])) {
-    return 0;
-  }
-  if (ari > 1) {
-    if (!fo_reify(run, run->node_arg1[term], &args[1])) {
-      return 0;
-    }
-  }
-  *out = term_new_ctr(run->node_ext[term], ari, args);
-  return 1;
+  fputc('#', stdout);
+  print_sym_name(stdout, run->pair_ext);
+  fputc('{', stdout);
+  nv_print(run, run->heap_l[term]);
+  fputc(',', stdout);
+  nv_print(run, run->heap_r[term]);
+  fputc('}', stdout);
 }
 
-fn void fo_free(FoRun *run) {
+fn void nv_free(NvRun *run) {
   free(run->code);
-  free(run->node_ext);
-  free(run->node_refs);
-  free(run->node_next);
-  free(run->node_arg0);
-  free(run->node_arg1);
-  free(run->clo_start);
-  free(run->clo_cap);
-  free(run->clo_base);
-  free(run->clo_refs);
-  free(run->clo_ctx);
-  free(run->cap_src);
+  free(run->heap_l);
+  free(run->heap_r);
+  free(run->heap_refs);
   free(run->vals);
   free(run->terms);
+  free(run->collect);
   free(run->ctx);
   free(run->calls);
   free(run->fn_start);
   free(run->fn_name);
   free(run->fn_of_name);
-  free(run->ctor_ari);
 }
 
-fn int fo_eval_main(u32 main_id, Term *out, u64 *itrs) {
-  FoRun run = {0};
-  run.code = (FoOp*)malloc(sizeof(FoOp) * FO_CODE_CAP);
-  run.node_ext = (u32*)calloc(FO_NODE_CAP, sizeof(u32));
-  run.node_refs = (u8*)calloc(FO_NODE_CAP, sizeof(u8));
-  run.node_next = (u32*)calloc(FO_NODE_CAP, sizeof(u32));
-  run.node_arg0 = (FoTerm*)calloc(FO_NODE_CAP, sizeof(FoTerm));
-  run.node_arg1 = (FoTerm*)calloc(FO_NODE_CAP, sizeof(FoTerm));
-  run.clo_start = (u32*)calloc(FO_CLO_CAP, sizeof(u32));
-  run.clo_cap = (u32*)calloc(FO_CLO_CAP, sizeof(u32));
-  run.clo_base = (u32*)calloc(FO_CLO_CAP, sizeof(u32));
-  run.clo_refs = (u32*)calloc(FO_CLO_CAP, sizeof(u32));
-  run.clo_ctx = (FoTerm*)calloc(FO_CLO_CTX_CAP, sizeof(FoTerm));
-  run.cap_src = (u32*)calloc(FO_CAPTURE_CAP, sizeof(u32));
-  run.vals = (FoTerm*)malloc(sizeof(FoTerm) * FO_STACK_CAP);
-  run.terms = (FoTerm*)malloc(sizeof(FoTerm) * FO_STACK_CAP);
-  run.ctx = (FoTerm*)calloc(FO_CTX_CAP, sizeof(FoTerm));
-  run.calls = (FoFrame*)malloc(sizeof(FoFrame) * FO_CALL_CAP);
-  if (run.code == NULL || run.node_ext == NULL || run.node_refs == NULL || run.node_next == NULL ||
-      run.node_arg0 == NULL || run.node_arg1 == NULL || run.clo_start == NULL ||
-      run.clo_cap == NULL || run.clo_base == NULL || run.clo_refs == NULL ||
-      run.clo_ctx == NULL || run.cap_src == NULL || run.vals == NULL || run.terms == NULL ||
-      run.ctx == NULL || run.calls == NULL) {
-    fo_free(&run);
+fn int nv_alloc_storage(NvRun *run) {
+  run->code = (NvOp*)malloc(sizeof(NvOp) * NV_CODE_CAP);
+  run->heap_l = (NvTerm*)calloc(NV_HEAP_CAP, sizeof(NvTerm));
+  run->heap_r = (NvTerm*)calloc(NV_HEAP_CAP, sizeof(NvTerm));
+  run->heap_refs = (u16*)calloc(NV_HEAP_CAP, sizeof(u16));
+  run->vals = (NvTerm*)malloc(sizeof(NvTerm) * NV_STACK_CAP);
+  run->terms = (NvTerm*)malloc(sizeof(NvTerm) * NV_STACK_CAP);
+  run->collect = (NvTerm*)malloc(sizeof(NvTerm) * NV_STACK_CAP);
+  run->ctx = (NvTerm*)calloc(NV_CTX_CAP, sizeof(NvTerm));
+  run->calls = (NvFrame*)malloc(sizeof(NvFrame) * NV_CALL_CAP);
+  run->heap_cur = 1;
+  if (run->code == NULL || run->heap_l == NULL || run->heap_r == NULL || run->heap_refs == NULL || run->vals == NULL ||
+      run->terms == NULL || run->collect == NULL || run->ctx == NULL || run->calls == NULL) {
+    nv_free(run);
+    memset(run, 0, sizeof(*run));
     return 0;
   }
-  if (!fo_compile_program(&run, main_id)) {
-    if (getenv("HVM_FO_TRACE") != NULL && run.fail_reason != NULL) {
-      char *name = table_get(run.compile_name);
-      fprintf(stderr, "[fo] compile fallback: def=%s reason=%s tag=%u\n",
+  return 1;
+}
+
+static int nv_prepare_main(u32 main_id) {
+  if (NV_PREPARED) {
+    nv_free(&NV_PREPARED_RUN);
+    memset(&NV_PREPARED_RUN, 0, sizeof(NV_PREPARED_RUN));
+    NV_PREPARED = 0;
+  }
+  NvRun run = {0};
+  if (!nv_alloc_storage(&run)) {
+    return 0;
+  }
+  if (!nv_compile_program(&run, main_id)) {
+    nv_free(&run);
+    return 0;
+  }
+  NV_PREPARED_RUN = run;
+  NV_PREPARED_MAIN = main_id;
+  NV_PREPARED = 1;
+  return 1;
+}
+
+static int nv_eval_main(u32 main_id, int silent) {
+  if (!NV_PREPARED || main_id != NV_PREPARED_MAIN) {
+    if (getenv("HVM_NV_TRACE") != NULL) {
+      char *name = table_get(main_id);
+      fprintf(stderr, "[nv] compile fallback: def=%s reason=not-prepared tag=%u\n",
         name != NULL ? name : "?",
-        run.fail_reason,
-        run.fail_tag);
+        main_id);
     }
-    fo_free(&run);
     return 0;
   }
-  FoTerm val = fo_run(&run);
-  if (!run.failed && fo_reify(&run, val, out)) {
-    *itrs = run.itrs;
-#ifdef HVM_FO_PROFILE
-    for (u32 i = 0; i < 32; i++) {
-      if (run.op_count[i] != 0) {
-        fprintf(stderr, "[fo-prof] op%u=%llu\n", i, (unsigned long long)run.op_count[i]);
-      }
+  NvRun run = NV_PREPARED_RUN;
+  memset(&NV_PREPARED_RUN, 0, sizeof(NV_PREPARED_RUN));
+  NV_PREPARED = 0;
+  run.itrs = 0;
+  run.failed = 0;
+  run.fail_reason = NULL;
+  run.fail_tag = 0;
+  run.trace_pc = 0;
+  run.trace_op = 0;
+  NvTerm res = nv_run(&run);
+  if (run.failed) {
+    if (getenv("HVM_NV_TRACE") != NULL) {
+      fprintf(stderr, "[nv] run fallback: reason=%s tag=%u pc=%u op=%u itrs=%llu\n",
+        run.fail_reason != NULL ? run.fail_reason : "?",
+        run.fail_tag,
+        run.trace_pc,
+        run.trace_op,
+        (unsigned long long)run.itrs);
     }
-#endif
-    fo_free(&run);
-    return 1;
-  }
-  if (getenv("HVM_FO_TRACE") != NULL) {
-    fprintf(stderr, "[fo] run fallback: reason=%s tag=%u pc=%u op=%u code=%u itrs=%llu\n",
-      run.fail_reason != NULL ? run.fail_reason : "?",
-      run.fail_tag,
-      run.trace_pc,
-      run.trace_op,
-      run.code_len,
-      (unsigned long long)run.itrs);
-  }
-  fo_free(&run);
-  return 0;
-}
-
-fn int fast_eval_main(u32 main_id, Term *out, u64 *itrs) {
-  if (DEBUG || out == NULL || itrs == NULL || BOOK[main_id] == 0) {
+    nv_free(&run);
     return 0;
   }
-  if (fo_eval_main(main_id, out, itrs)) {
-    return 1;
+  if (!silent) {
+    nv_print(&run, res);
+    putchar('\n');
   }
-#ifdef HVM_EXPERIMENTAL_CLOSURE_FAST
-  FastRun run = {0};
-  FastVal val = fast_eval(&run, fast_clo(BOOK[main_id], 0, 0));
-  if (!run.failed && fast_reify(&run, val, out)) {
-    *itrs = run.itrs;
-    fast_run_free(&run);
-    return 1;
+  if (ITRS_ENABLED) {
+    ITRS += run.itrs;
   }
-  fast_run_free(&run);
-#endif
-  return 0;
+  nv_free(&run);
+  return 1;
 }
 
 // Runtime Main Evaluator
@@ -7857,16 +9551,20 @@ fn void runtime_eval_main(u32 main_id, const RuntimeEvalCfg *cfg) {
   if (run.do_collapse) {
     eval_collapse(main_ref, run.collapse_limit, run.stats, run.silent);
   } else {
-    Term result;
-    u64 fast_itrs = 0;
-    if (!run.step_by_step && fast_eval_main(main_id, &result, &fast_itrs)) {
-      ITRS += fast_itrs;
-    } else {
-      result = eval_normalize(main_ref);
+    int done = 0;
+    if (!run.step_by_step && run.silent) {
+      done = nv_eval_main(main_id, run.silent);
+      if (!done) {
+        done = neo_eval_main(main_id, run.silent);
+      }
     }
-    if (!run.silent && !run.step_by_step) {
-      print_term(result);
-      printf("\n");
+    if (!done) {
+      Term result;
+      result = eval_normalize(main_ref);
+      if (!run.silent && !run.step_by_step) {
+        print_term(result);
+        printf("\n");
+      }
     }
   }
 
