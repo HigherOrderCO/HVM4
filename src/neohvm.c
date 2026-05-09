@@ -81,6 +81,7 @@ enum {
   BC_ELAM,
   BC_SLAM,
   BC_MAT,
+  BC_MAT_CTR,
   BC_DUP,
   BC_SUP,
   BC_ERA
@@ -458,6 +459,23 @@ ALWAYS_INLINE Env *env_at(Env *env, u32 lvl, u32 gap) {
   }
 }
 
+ALWAYS_INLINE Val *env_get(Env *env, u32 lvl, u32 gap) {
+  if (gap == 0) {
+    if (lvl == 1) {
+      if (!env) die("unbound variable");
+      if (!env->val) die("erased variable reached");
+      return env->val;
+    }
+    if (lvl == 2 && env != NULL && env_span(env) == 1) {
+      env = env_next(env);
+      if (!env) die("unbound variable");
+      if (!env->val) die("erased variable reached");
+      return env->val;
+    }
+  }
+  return env_at(env, lvl, gap)->val;
+}
+
 static void skip(Parser *p) {
   for (;;) {
     while (p->pos < p->len) {
@@ -829,7 +847,10 @@ static Code *compile_term(Term *term);
 static Code *compile_term_ctx(Term *term, int tail);
 static Code *compile_app(Term *term, int tail);
 static u8 compile_ctr_field_kind(Code *code);
-static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc);
+static Val *eval_code_into(Code *pc, Env *env, u32 gap, Arg *args, u32 argc, Val *dst);
+static inline Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc) {
+  return eval_code_into(pc, env, gap, args, argc, NULL);
+}
 ALWAYS_INLINE Val *force(Val *v);
 ALWAYS_INLINE Val *mk_lam_tag(u8 tag, Code *code, Env *env, u32 gap);
 static inline Val *mk_lam(Code *code, Env *env, u32 gap);
@@ -907,6 +928,11 @@ static Code *compile_term_ctx(Term *term, int tail) {
       if (m != NULL) {
         c->cases->dft = compile_term_ctx(m, 1);
       }
+      if (term->aux == M_CTR && term->kid[1] == NULL) {
+        c->op = BC_MAT_CTR;
+        c->ext = term->ext;
+        c->sub = term->kid[0]->code;
+      }
       break;
     case T_DUP:
       c = code_new(BC_DUP);
@@ -979,7 +1005,7 @@ static void compile_program_terms(void) {
   for (u32 i = 0; i < NAME_LEN; i++) {
     if (!DEFS[i]) continue;
     u8 op = DEFS[i]->code->op;
-    if (op == BC_MAT) {
+    if (op == BC_MAT || op == BC_MAT_CTR) {
       REF_CACHE[i] = mk_mat(DEFS[i]->code, NULL, 0);
     } else if (op == BC_LAM || op == BC_ELAM || op == BC_SLAM) {
       u8 tag = op == BC_ELAM ? V_ELAM : op == BC_SLAM ? V_SLAM : V_LAM;
@@ -1013,6 +1039,7 @@ static void link_refs_code(Code *code, u32 depth) {
       link_refs_code(code->sub, depth + 1);
       return;
     case BC_MAT:
+    case BC_MAT_CTR:
       if (code->cases != NULL) {
         link_refs_code(code->cases->ctr, depth + 1);
         link_refs_code(code->cases->num0, depth + 1);
@@ -1066,6 +1093,7 @@ static void thread_code(Code *code, void **dispatch, u32 depth) {
       thread_code(code->sub, dispatch, depth + 1);
       return;
     case BC_MAT:
+    case BC_MAT_CTR:
       if (code->cases != NULL) {
         thread_code(code->cases->ctr, dispatch, depth + 1);
         thread_code(code->cases->num0, dispatch, depth + 1);
@@ -1112,6 +1140,7 @@ static int code_has_sup_label(Code *code, u32 lab, u32 depth) {
       has = code_has_sup_label(code->sub, lab, depth + 1);
       break;
     case BC_MAT:
+    case BC_MAT_CTR:
       if (code->cases != NULL) {
         has = code_has_sup_label(code->cases->ctr, lab, depth + 1)
            || code_has_sup_label(code->cases->num0, lab, depth + 1)
@@ -1148,6 +1177,7 @@ ALWAYS_INLINE Val *mk_thunk(Code *code, Env *env, u32 gap) {
   v->code = code;
   v->env = env;
   v->ext = gap;
+  v->pad = 0;
   return v;
 }
 
@@ -1156,6 +1186,7 @@ ALWAYS_INLINE Val *mk_lthunk(Code *code, Env *env, u32 gap) {
   v->code = code;
   v->env = env;
   v->ext = gap;
+  v->pad = 0;
   return v;
 }
 
@@ -1254,6 +1285,7 @@ ALWAYS_INLINE Val *force_fun_arg(Val *v) {
     case BC_ELAM:
     case BC_SLAM:
     case BC_MAT:
+    case BC_MAT_CTR:
       return force(v);
     case BC_REF:
     case BC_CALL_REF:
@@ -1288,7 +1320,7 @@ ALWAYS_INLINE Val *bind_arg(Arg *arg) {
     case BC_NUM:
       return mk_num(arg->code->ext);
     case BC_VAR:
-      return env_at(arg->env, arg->code->ext, arg->gap)->val;
+      return env_get(arg->env, arg->code->ext, arg->gap);
     case BC_CTR:
       return mk_lthunk(arg->code, arg->env, arg->gap);
     case BC_REF:
@@ -1463,7 +1495,7 @@ ALWAYS_INLINE Code *matchable_arg_code(Arg *arg, Env **env, u32 *gap, Val **seen
     return arg->code;
   }
   if (arg->code->op == BC_VAR) {
-    Val *val = env_at(arg->env, arg->code->ext, arg->gap)->val;
+    Val *val = env_get(arg->env, arg->code->ext, arg->gap);
     *seen = val;
     return matchable_val_code(val, env, gap);
   }
@@ -1645,12 +1677,12 @@ ALWAYS_INLINE Val *make_field(Code *kid, Env *env, u32 gap);
 
 ALWAYS_INLINE Val *make_atom_field(Code *kid, Env *env, u32 gap, u8 kind) {
   if (kind == CK_NUM) return mk_num(kid->ext);
-  if (kind == CK_VAR) return env_at(env, kid->ext, gap)->val;
+  if (kind == CK_VAR) return env_get(env, kid->ext, gap);
   return make_field(kid, env, gap);
 }
 
-ALWAYS_INLINE Val *make_ctr(Code *pc, Env *env, u32 gap) {
-  Val *val = val_new(V_CTR);
+ALWAYS_INLINE void init_ctr(Val *val, Code *pc, Env *env, u32 gap) {
+  val->tag = V_CTR;
   val->ext = pc->ext;
   val->arity = pc->arity;
   val->pad = 0;
@@ -1665,20 +1697,25 @@ ALWAYS_INLINE Val *make_ctr(Code *pc, Env *env, u32 gap) {
       val->item[i] = make_field(pc->term->kid[i]->code, env, gap);
     }
   }
+}
+
+ALWAYS_INLINE Val *make_ctr(Code *pc, Env *env, u32 gap) {
+  Val *val = val_new(V_CTR);
+  init_ctr(val, pc, env, gap);
   return val;
 }
 
 ALWAYS_INLINE Val *make_field(Code *kid, Env *env, u32 gap) {
   if (kid->op == BC_NUM) return mk_num(kid->ext);
-  if (kid->op == BC_VAR) return env_at(env, kid->ext, gap)->val;
+  if (kid->op == BC_VAR) return env_get(env, kid->ext, gap);
   if (kid->op == BC_CTR) return make_ctr(kid, env, gap);
   return mk_lthunk(kid, env, gap);
 }
 
-static Val *eval_code(Code *pc, Env *env, u32 gap, Arg *args, u32 argc) {
+static Val *eval_code_into(Code *pc, Env *env, u32 gap, Arg *args, u32 argc, Val *dst) {
   static void *dispatch[] = {
     &&do_arg, &&do_args, &&do_var, &&do_dp0, &&do_dp1, &&do_ref, &&do_call_ref, &&do_num,
-    &&do_ctr, &&do_lam, &&do_elam, &&do_slam, &&do_mat, &&do_dup, &&do_sup, &&do_era
+    &&do_ctr, &&do_lam, &&do_elam, &&do_slam, &&do_mat, &&do_mat_ctr, &&do_dup, &&do_sup, &&do_era
   };
   static int threaded = 0;
   if (!threaded) {
@@ -1734,7 +1771,7 @@ do_ref:
 do_call_ref:
   if (pc->next == NULL) die("unknown reference");
   if (argc >= MAX_ARGS) die("argument stack overflow");
-  if (pc->next->op == BC_MAT && (pc->sub->op == BC_CTR || pc->sub->op == BC_NUM)) {
+  if ((pc->next->op == BC_MAT || pc->next->op == BC_MAT_CTR) && (pc->sub->op == BC_CTR || pc->sub->op == BC_NUM)) {
     Code *arg_code = pc->sub;
     Code *body = NULL;
     if (arg_code->op == BC_CTR) {
@@ -1772,18 +1809,18 @@ do_var:
     if (!next->val) die("erased variable reached");
     val = next->val;
   } else {
-    val = env_at(env, pc->ext, gap)->val;
+    val = env_get(env, pc->ext, gap);
   }
-  goto apply_value;
+  if (val->tag == V_THUNK || val->tag == V_LTHUNK) goto apply_value;
+  goto apply_ready;
 
 do_dp0:
 do_dp1: {
-    Env *e = env_at(env, pc->ext, gap);
-    val = e->val;
+    val = env_get(env, pc->ext, gap);
     if (!is_lam(val) || val->code->sup_lab != pc->arity || val->code->sup_has) {
       val = project(val, pc->arity, pc->op == BC_DP0 ? 0 : 1);
     }
-    goto apply_value;
+    goto apply_ready;
   }
 
 do_num:
@@ -1791,7 +1828,15 @@ do_num:
   goto apply_ready;
 
 do_ctr:
-  val = make_ctr(pc, env, gap);
+  if (dst != NULL && argc == 0) {
+    u16 refs = dst->pad;
+    init_ctr(dst, pc, env, gap);
+    dst->pad = refs;
+    val = dst;
+    dst = NULL;
+  } else {
+    val = make_ctr(pc, env, gap);
+  }
   goto apply_ready;
 
 do_lam:
@@ -1897,6 +1942,52 @@ do_mat:
     }
     pc = body;
     goto *pc->jump;
+  }
+
+do_mat_ctr:
+  if (argc == 0) {
+    val = mk_mat(pc, env, gap);
+    goto apply_ready;
+  }
+  {
+    Arg *raw = &args[argc - 1];
+    if (raw->val == NULL) {
+      Code *arg_code = raw->code;
+      if (arg_code->op == BC_CTR && arg_code->ext == pc->ext) {
+        ITRS++;
+        argc--;
+        push_ctr_code_args(arg_code, raw->env, raw->gap, args, &argc);
+        pc = pc->sub;
+        goto *pc->jump;
+      }
+    }
+    Env *arg_env;
+    u32 arg_gap;
+    Val *seen;
+    Code *arg_code = matchable_arg_code(raw, &arg_env, &arg_gap, &seen);
+    if (arg_code != NULL && arg_code->op == BC_CTR && arg_code->ext == pc->ext) {
+      ITRS++;
+      if (seen) consume_matchable_seen(seen);
+      argc--;
+      push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
+      pc = pc->sub;
+      goto *pc->jump;
+    }
+    ITRS++;
+    argc--;
+    Val *arg = seen ? force(seen) : force_arg(raw);
+    if (arg->tag == V_SUP) {
+      val = apply_mat(pc, env, gap, arg);
+      goto apply_value;
+    }
+    if (arg->tag == V_CTR && arg->ext == pc->ext) {
+      push_ctr_val_args(arg, args, &argc);
+      val_free_ctr(arg);
+      pc = pc->sub;
+      goto *pc->jump;
+    }
+    val = mk_num(0);
+    goto apply_value;
   }
 
 do_dup:
@@ -2048,10 +2139,16 @@ static Val *eval_term(Term *term, Env *env) {
 
 ALWAYS_INLINE Val *force(Val *v) {
   while (v->tag == V_THUNK || v->tag == V_LTHUNK) {
+    if (v->tag == V_LTHUNK && v->code->op == BC_CTR) {
+      u16 refs = v->pad;
+      init_ctr(v, v->code, v->env, v->ext);
+      v->pad = refs;
+      return v;
+    }
     u8 tag = v->tag;
     u16 refs = v->pad;
     Arg args[MAX_ARGS];
-    Val *res = eval_code(v->code, v->env, v->ext, args, 0);
+    Val *res = eval_code_into(v->code, v->env, v->ext, args, 0, tag == V_LTHUNK ? v : NULL);
     if (tag == V_LTHUNK && res != v) {
       *v = *res;
       if (v->tag == V_CTR) {
