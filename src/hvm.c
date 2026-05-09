@@ -4975,7 +4975,7 @@ __attribute__((cold, noinline)) static Term wnf_rebuild(Term cur, Term *stack, u
   return cur;
 }
 
-__attribute__((hot)) fn Term wnf(Term term) {
+fn Term wnf(Term term) {
   wnf_stack_init();
   Term *stack = WNF_STACK;
   u32  s_pos  = WNF_S_POS;
