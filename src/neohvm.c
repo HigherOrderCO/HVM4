@@ -222,7 +222,6 @@ static Bind  BINDS[MAX_BIND];
 static u32   BIND_LEN = 0;
 static u64   ITRS = 0;
 static u32   FRESH_LAB = 0;
-static int   READBACK = 0;
 static EnvBlock *ENV_BLOCK = NULL;
 static ValBlock *VAL_BLOCK = NULL;
 static ItemBlock *ITEM_BLOCK = NULL;
@@ -1292,7 +1291,7 @@ ALWAYS_INLINE Val *force_fun_arg(Val *v) {
     case BC_ARG:
     case BC_ARGS:
     case BC_DUP:
-      return READBACK ? force(v) : v;
+      return force(v);
     default:
       return v;
   }
@@ -1470,6 +1469,66 @@ ALWAYS_INLINE void push_ctr_val_args(Val *ctr, Arg *args, u32 *argc) {
   }
 }
 
+ALWAYS_INLINE int is_lam_code(Code *code) {
+  return code->op == BC_LAM || code->op == BC_ELAM || code->op == BC_SLAM;
+}
+
+ALWAYS_INLINE Code *enter_one_lam(Code *lam, Arg *arg, Env **env, u32 *gap) {
+  if (lam->op == BC_ELAM) {
+    (*gap)++;
+    return lam->sub;
+  }
+  if (lam->op == BC_SLAM) {
+    *env = env_push(share_value(bind_arg(arg)), *env, *gap + 1);
+  } else {
+    *env = env_push(bind_arg(arg), *env, *gap + 1);
+  }
+  *gap = 0;
+  return lam->sub;
+}
+
+ALWAYS_INLINE int enter_ctr2_code_lams(Code **body, Code *ctr, Env *ctr_env, u32 ctr_gap, Env **env, u32 *gap) {
+  if (ctr->arity != 2 || !is_lam_code(*body) || !is_lam_code((*body)->sub)) return 0;
+  ITRS += 2;
+  Arg fst = arg_code(ctr->sub, ctr_env, ctr_gap);
+  Code *next = enter_one_lam(*body, &fst, env, gap);
+  Arg snd = arg_code(ctr->next, ctr_env, ctr_gap);
+  *body = enter_one_lam(next, &snd, env, gap);
+  return 1;
+}
+
+ALWAYS_INLINE int enter_ctr2_val_lams(Code **body, Val *ctr, Env **env, u32 *gap) {
+  if (ctr->arity != 2 || !is_lam_code(*body) || !is_lam_code((*body)->sub)) return 0;
+  ITRS += 2;
+  Arg fst = arg_val(ctr->fst);
+  Code *next = enter_one_lam(*body, &fst, env, gap);
+  Arg snd = arg_val(ctr->snd);
+  *body = enter_one_lam(next, &snd, env, gap);
+  return 1;
+}
+
+ALWAYS_INLINE int enter_ctr2_code_num_mat(Code **body, Code *ctr, Env *ctr_env, u32 ctr_gap, Arg *args, u32 *argc) {
+  if (ctr->arity != 2 || (*body)->op != BC_MAT || ctr->sub->op != BC_NUM) return 0;
+  Code *next = mat_pick_code(*body, ctr->sub);
+  if (next == NULL) return 0;
+  ITRS++;
+  if (*argc >= MAX_ARGS) die("argument stack overflow");
+  args[(*argc)++] = arg_code(ctr->next, ctr_env, ctr_gap);
+  *body = next;
+  return 1;
+}
+
+ALWAYS_INLINE int enter_ctr2_val_num_mat(Code **body, Val *ctr, Arg *args, u32 *argc) {
+  if (ctr->arity != 2 || (*body)->op != BC_MAT || ctr->fst->tag != V_NUM) return 0;
+  Code *next = mat_pick(*body, ctr->fst);
+  if (next == NULL) return 0;
+  ITRS++;
+  if (*argc >= MAX_ARGS) die("argument stack overflow");
+  args[(*argc)++] = arg_val(ctr->snd);
+  *body = next;
+  return 1;
+}
+
 static Val *apply_fun(Val *fun, Arg *arg);
 static Val *apply_sup(Val *sup, Arg *arg);
 
@@ -1591,7 +1650,10 @@ static inline Val *apply_mat(Code *mat, Env *env, u32 gap, Val *arg) {
   Arg args[MAX_ARGS];
   u32 argc = 0;
   if (arg->tag == V_CTR) {
-    push_ctr_val_args(arg, args, &argc);
+    if (!enter_ctr2_val_num_mat(&body, arg, args, &argc)
+    &&  !enter_ctr2_val_lams(&body, arg, &env, &gap)) {
+      push_ctr_val_args(arg, args, &argc);
+    }
     val_free_ctr(arg);
   }
   return eval_code(body, env, gap, args, argc);
@@ -1616,10 +1678,15 @@ ALWAYS_INLINE Val *apply_fun(Val *fun, Arg *arg) {
           if (seen) consume_matchable_seen(seen);
           Arg args[MAX_ARGS];
           u32 argc = 0;
+          Env *body_env = fun->env;
+          u32 body_gap = fun->ext;
           if (arg_code->op == BC_CTR) {
-            push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
+            if (!enter_ctr2_code_num_mat(&body, arg_code, arg_env, arg_gap, args, &argc)
+            &&  !enter_ctr2_code_lams(&body, arg_code, arg_env, arg_gap, &body_env, &body_gap)) {
+              push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
+            }
           }
-          return eval_code(body, fun->env, fun->ext, args, argc);
+          return eval_code(body, body_env, body_gap, args, argc);
         }
       }
       ITRS++;
@@ -1783,12 +1850,17 @@ do_call_ref:
     }
     if (body != NULL) {
       ITRS++;
+      Env *body_env = NULL;
+      u32 body_gap = 0;
       if (arg_code->op == BC_CTR) {
-        push_ctr_code_args(arg_code, env, gap, args, &argc);
+        if (!enter_ctr2_code_num_mat(&body, arg_code, env, gap, args, &argc)
+        &&  !enter_ctr2_code_lams(&body, arg_code, env, gap, &body_env, &body_gap)) {
+          push_ctr_code_args(arg_code, env, gap, args, &argc);
+        }
       }
       pc = body;
-      env = NULL;
-      gap = 0;
+      env = body_env;
+      gap = body_gap;
       goto *pc->jump;
     }
   }
@@ -1909,7 +1981,10 @@ do_mat:
       ITRS++;
       argc--;
       if (arg_code->op == BC_CTR) {
-        push_ctr_code_args(arg_code, raw->env, raw->gap, args, &argc);
+        if (!enter_ctr2_code_num_mat(&body, arg_code, raw->env, raw->gap, args, &argc)
+        &&  !enter_ctr2_code_lams(&body, arg_code, raw->env, raw->gap, &env, &gap)) {
+          push_ctr_code_args(arg_code, raw->env, raw->gap, args, &argc);
+        }
       }
       pc = body;
       goto *pc->jump;
@@ -1926,7 +2001,10 @@ do_mat:
       if (seen) consume_matchable_seen(seen);
       argc--;
       if (arg_code->op == BC_CTR) {
-        push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
+        if (!enter_ctr2_code_num_mat(&body, arg_code, arg_env, arg_gap, args, &argc)
+        &&  !enter_ctr2_code_lams(&body, arg_code, arg_env, arg_gap, &env, &gap)) {
+          push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
+        }
       }
       pc = body;
       goto *pc->jump;
@@ -1946,7 +2024,10 @@ do_mat:
       goto apply_value;
     }
     if (arg->tag == V_CTR) {
-      push_ctr_val_args(arg, args, &argc);
+      if (!enter_ctr2_val_num_mat(&body, arg, args, &argc)
+      &&  !enter_ctr2_val_lams(&body, arg, &env, &gap)) {
+        push_ctr_val_args(arg, args, &argc);
+      }
       val_free_ctr(arg);
     }
     pc = body;
@@ -1965,8 +2046,12 @@ do_mat_ctr:
       if (arg_code->op == BC_CTR && arg_code->ext == pc->ext) {
         ITRS++;
         argc--;
-        push_ctr_code_args(arg_code, raw->env, raw->gap, args, &argc);
-        pc = pc->sub;
+        Code *body = pc->sub;
+        if (!enter_ctr2_code_num_mat(&body, arg_code, raw->env, raw->gap, args, &argc)
+        &&  !enter_ctr2_code_lams(&body, arg_code, raw->env, raw->gap, &env, &gap)) {
+          push_ctr_code_args(arg_code, raw->env, raw->gap, args, &argc);
+        }
+        pc = body;
         goto *pc->jump;
       }
     }
@@ -1978,8 +2063,12 @@ do_mat_ctr:
       ITRS++;
       if (seen) consume_matchable_seen(seen);
       argc--;
-      push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
-      pc = pc->sub;
+      Code *body = pc->sub;
+      if (!enter_ctr2_code_num_mat(&body, arg_code, arg_env, arg_gap, args, &argc)
+      &&  !enter_ctr2_code_lams(&body, arg_code, arg_env, arg_gap, &env, &gap)) {
+        push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
+      }
+      pc = body;
       goto *pc->jump;
     }
     ITRS++;
@@ -1990,9 +2079,13 @@ do_mat_ctr:
       goto apply_value;
     }
     if (arg->tag == V_CTR && arg->ext == pc->ext) {
-      push_ctr_val_args(arg, args, &argc);
+      Code *body = pc->sub;
+      if (!enter_ctr2_val_num_mat(&body, arg, args, &argc)
+      &&  !enter_ctr2_val_lams(&body, arg, &env, &gap)) {
+        push_ctr_val_args(arg, args, &argc);
+      }
       val_free_ctr(arg);
-      pc = pc->sub;
+      pc = body;
       goto *pc->jump;
     }
     val = mk_num(0);
@@ -2058,8 +2151,10 @@ apply_ready:
         if (body != NULL) {
           ITRS++;
           argc--;
-          env = val->env;
-          gap = val->ext;
+          Env *body_env = val->env;
+          u32 body_gap = val->ext;
+          env = body_env;
+          gap = body_gap;
           pc = body;
           goto *pc->jump;
         }
@@ -2077,11 +2172,16 @@ apply_ready:
         if (body != NULL) {
           ITRS++;
           argc--;
+          Env *body_env = val->env;
+          u32 body_gap = val->ext;
           if (arg_code->op == BC_CTR) {
-            push_ctr_code_args(arg_code, raw->env, raw->gap, args, &argc);
+            if (!enter_ctr2_code_num_mat(&body, arg_code, raw->env, raw->gap, args, &argc)
+            &&  !enter_ctr2_code_lams(&body, arg_code, raw->env, raw->gap, &body_env, &body_gap)) {
+              push_ctr_code_args(arg_code, raw->env, raw->gap, args, &argc);
+            }
           }
-          env = val->env;
-          gap = val->ext;
+          env = body_env;
+          gap = body_gap;
           pc = body;
           goto *pc->jump;
         }
@@ -2096,11 +2196,16 @@ apply_ready:
           ITRS++;
           if (seen) consume_matchable_seen(seen);
           argc--;
+          Env *body_env = val->env;
+          u32 body_gap = val->ext;
           if (arg_code->op == BC_CTR) {
-            push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
+            if (!enter_ctr2_code_num_mat(&body, arg_code, arg_env, arg_gap, args, &argc)
+            &&  !enter_ctr2_code_lams(&body, arg_code, arg_env, arg_gap, &body_env, &body_gap)) {
+              push_ctr_code_args(arg_code, arg_env, arg_gap, args, &argc);
+            }
           }
-          env = val->env;
-          gap = val->ext;
+          env = body_env;
+          gap = body_gap;
           pc = body;
           goto *pc->jump;
         }
@@ -2117,12 +2222,17 @@ apply_ready:
         val = apply_default(val->code->cases->dft, val->env, val->ext, arg);
         goto apply_value;
       }
+      Env *body_env = val->env;
+      u32 body_gap = val->ext;
       if (arg->tag == V_CTR) {
-        push_ctr_val_args(arg, args, &argc);
+        if (!enter_ctr2_val_num_mat(&body, arg, args, &argc)
+        &&  !enter_ctr2_val_lams(&body, arg, &body_env, &body_gap)) {
+          push_ctr_val_args(arg, args, &argc);
+        }
         val_free_ctr(arg);
       }
-      env = val->env;
-      gap = val->ext;
+      env = body_env;
+      gap = body_gap;
       pc = body;
       goto *pc->jump;
     }
@@ -2315,9 +2425,7 @@ static void print_val_at(Val *v, u32 depth) {
 }
 
 static void print_val(Val *v) {
-  READBACK = 1;
   print_val_at(v, 0);
-  READBACK = 0;
 }
 
 static void normalize_mat_val(Val *v, u32 depth) {
@@ -2400,9 +2508,7 @@ static void normalize_forced_val_at(Val *v, u32 depth) {
 }
 
 static void normalize_val(Val *v) {
-  READBACK = 1;
   normalize_val_at(v, 0);
-  READBACK = 0;
 }
 
 int main(int argc, char **argv) {
@@ -2427,7 +2533,6 @@ int main(int argc, char **argv) {
   if (DEFS[main_id] == NULL) die("missing @main");
 
   struct timespec t0, t1;
-  READBACK = 1;
   clock_gettime(CLOCK_MONOTONIC, &t0);
   Val *res = force(eval_term(DEFS[main_id], NULL));
   normalize_val(res);
