@@ -6353,6 +6353,7 @@ fn CliOpts parse_opts(int argc, char **argv) {
   return opts;
 }
 
+#ifndef HVM_NO_MAIN
 int main(int argc, char **argv) {
   if (argc <= 1) {
     cli_print_help(argv[0]);
@@ -6417,3 +6418,4 @@ int main(int argc, char **argv) {
 
   return 0;
 }
+#endif

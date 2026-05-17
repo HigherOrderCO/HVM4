@@ -1,0 +1,19 @@
+@eval = λ{
+  #App: λ&f. λx. @app(@eval(f), x);
+  #Fix: λ&F. @eval(F(1,λY.#Fix{F}));
+  #Pair: λa. λb. #Pair{@eval(a), @eval(b)};
+  λx. x;
+}
+
+@app = λ{
+  #Lam: λf. λx. @eval(f(x));
+  λf. λx. #App{f, x};
+}
+
+@main =
+  ! &r = #Fix{λ&Z.λR.
+    ! R &(1) = R // ← crashes
+//    ! R &(Z) = R // ← works
+    #Lam{λ{0: 0; λ&n. #Pair{#App{R₀(1),n-1}, #App{R₁(1),n-1}}}}
+  }
+  @eval(#App{r,2})
