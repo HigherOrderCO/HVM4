@@ -4407,26 +4407,22 @@ fn Term wnf_eql_ctr(u64 eql_loc, Term a, Term b) {
   u64  a_loc = term_val(a);
   u64  b_loc = term_val(b);
 
-  // SUC (1n+): recursive natural - wrap in INC for priority
-  if (a_ext == SYM_SUC && arity == 1) {
-    Term eq = term_new_eql_at(eql_loc, heap_read(a_loc), heap_read(b_loc));
-    return term_new_inc(eq);
+  // General n-ary equality (de-hardcoded; subsumes the SUC arity-1 and CON
+  // arity-2 special cases): compare field 0 first, and defer each subsequent
+  // field behind an INC so passing each field boundary yields collapse-priority
+  // credit. The boolean result is unchanged (INC is transparent); only collapse
+  // ordering is affected. For any arity n >= 1:
+  //   INC(AND(EQL a0 b0, INC(AND(EQL a1 b1, INC( ... EQL a_{n-1} b_{n-1} )))))
+  Term acc = (arity == 1)
+    ? term_new_eql_at(eql_loc, heap_read(a_loc), heap_read(b_loc))
+    : term_new_eql(heap_read(a_loc + arity - 1), heap_read(b_loc + arity - 1));
+  for (int i = (int)arity - 2; i >= 0; i--) {
+    Term eq_h = (i == 0)
+      ? term_new_eql_at(eql_loc, heap_read(a_loc), heap_read(b_loc))
+      : term_new_eql(heap_read(a_loc + i), heap_read(b_loc + i));
+    acc = term_new_and(eq_h, term_new_inc(acc));
   }
-
-  // CON (<>): recursive list - wrap tail and whole in INC
-  if (a_ext == SYM_CON && arity == 2) {
-    Term eq_h = term_new_eql_at(eql_loc, heap_read(a_loc), heap_read(b_loc));
-    Term eq_t = term_new_inc(term_new_eql(heap_read(a_loc + 1), heap_read(b_loc + 1)));
-    return term_new_inc(term_new_and(eq_h, eq_t));
-  }
-
-  // Other constructors: no INC, just AND chain
-  Term result = term_new_eql_at(eql_loc, heap_read(a_loc), heap_read(b_loc));
-  for (u32 i = 1; i < arity; i++) {
-    Term eq_i = term_new_eql(heap_read(a_loc + i), heap_read(b_loc + i));
-    result = term_new_and(result, eq_i);
-  }
-  return result;
+  return term_new_inc(acc);
 }
 
 // (λ{#K:ah;am} === λ{#K:bh;bm})  (same tag)
@@ -6038,8 +6034,16 @@ fn Term eval_normalize(Term term) {
 #define EVAL_COLLAPSE_QUEUE_INIT 1024u
 #endif
 
+// Filter-credit collapse scheduler: each task carries an INC-derived `credit`
+// (filter progress) that persists/accumulates independent of `key` (SUP depth).
+// Ordering uses order_key = key - credit/STRIDE; the real `key` is preserved so
+// collapse semantics (reachable set) are unchanged.
+#define COLLAPSE_CREDIT_STRIDE 16
+#define COLLAPSE_CREDIT_CAP    128
+
 typedef struct {
   u32 key;
+  u32 credit;
   u64 seq;
   u64 loc;
 } EvalCollapseTask;
@@ -6051,9 +6055,16 @@ typedef struct {
   u64 next_seq;
 } EvalCollapseQueue;
 
+fn u32 eval_collapse_order_key(EvalCollapseTask t) {
+  u32 bonus = t.credit / COLLAPSE_CREDIT_STRIDE;
+  return t.key > bonus ? t.key - bonus : 0;
+}
+
 fn int eval_collapse_task_lt(EvalCollapseTask a, EvalCollapseTask b) {
-  if (a.key != b.key) {
-    return a.key < b.key;
+  u32 ka = eval_collapse_order_key(a);
+  u32 kb = eval_collapse_order_key(b);
+  if (ka != kb) {
+    return ka < kb;
   }
   return a.seq < b.seq;
 }
@@ -6074,7 +6085,7 @@ fn void eval_collapse_queue_free(EvalCollapseQueue *queue) {
   *queue = (EvalCollapseQueue){0};
 }
 
-fn void eval_collapse_queue_push(EvalCollapseQueue *queue, u32 key, u64 loc) {
+fn void eval_collapse_queue_push(EvalCollapseQueue *queue, u32 key, u32 credit, u64 loc) {
   if (loc == 0) {
     return;
   }
@@ -6092,6 +6103,7 @@ fn void eval_collapse_queue_push(EvalCollapseQueue *queue, u32 key, u64 loc) {
   u64 idx = queue->len++;
   queue->data[idx] = (EvalCollapseTask){
     .key = key,
+    .credit = credit,
     .seq = queue->next_seq++,
     .loc = loc,
   };
@@ -6146,6 +6158,7 @@ fn int eval_collapse_queue_pop(EvalCollapseQueue *queue, EvalCollapseTask *task)
 fn void eval_collapse_process(EvalCollapseQueue *queue, EvalCollapseTask task, u64 *printed, u64 limit, int show_itrs, int silent) {
   Term before = heap_read(task.loc);
   u32  key    = task.key;
+  u32  credit = task.credit;
 
   for (;;) {
     Term t = cnf(before);
@@ -6157,13 +6170,14 @@ fn void eval_collapse_process(EvalCollapseQueue *queue, EvalCollapseTask task, u
         if (key > 0) {
           key -= 1;
         }
+        credit += credit < COLLAPSE_CREDIT_CAP;
         continue;
       }
 
       case SUP: {
         u64 sup_loc = term_val(t);
-        eval_collapse_queue_push(queue, key + 1, sup_loc + 0);
-        eval_collapse_queue_push(queue, key + 1, sup_loc + 1);
+        eval_collapse_queue_push(queue, key + 1, credit, sup_loc + 0);
+        eval_collapse_queue_push(queue, key + 1, credit, sup_loc + 1);
         return;
       }
 
@@ -6201,7 +6215,7 @@ fn void eval_collapse(Term term, int limit, int show_itrs, int silent) {
 
   EvalCollapseQueue queue;
   eval_collapse_queue_init(&queue);
-  eval_collapse_queue_push(&queue, 0, root_loc);
+  eval_collapse_queue_push(&queue, 0, 0, root_loc);
 
   u64 printed = 0;
   EvalCollapseTask task;
