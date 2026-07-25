@@ -5722,7 +5722,7 @@ typedef struct {
   u64 word_count;
 } Uset;
 
-// Initialize bitset storage.
+// Initialize empty bitset storage from a zero-filled anonymous mapping.
 fn void uset_init(Uset *set) {
   set->word_count = HEAP_CAP >> 6;
   set->words      = NULL;
@@ -5758,11 +5758,6 @@ fn u8 uset_add(Uset *set, u64 key) {
   u64 prev = set->words[word_idx];
   set->words[word_idx] = prev | bit_mask;
   return (prev & bit_mask) == 0;
-}
-
-// Clear all visited bits.
-fn void uset_clear(Uset *set) {
-  memset(set->words, 0, (size_t)(set->word_count * sizeof(u64)));
 }
 
 // CNF
@@ -6009,7 +6004,6 @@ fn Term eval_normalize(Term term) {
   EvalNormalizeStack stack;
   uset_init(&seen);
   eval_normalize_stack_init(&stack);
-  uset_clear(&seen);
   eval_normalize_stack_push(&stack, root_loc);
 
   u64 loc = 0;
